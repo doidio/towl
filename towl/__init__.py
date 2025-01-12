@@ -1,3 +1,4 @@
+import locale
 import os
 from pathlib import Path
 
@@ -5,9 +6,11 @@ import gradio as gr
 import numpy as np
 from loguru import logger
 
-fs_dir = Path('fs')
+locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
+
+fs_dir = Path('./fs').absolute()
 tmp_dir = fs_dir / 'tmp'
-nifti_dir = f'{fs_dir}/nifti'
+nifti_dir = fs_dir / 'nifti'
 
 os.environ['GRADIO_TEMP_DIR'] = tmp_dir.as_posix()
 
