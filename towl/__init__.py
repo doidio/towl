@@ -10,7 +10,7 @@ locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
 fs_dir = Path('./fs').absolute()
 tmp_dir = fs_dir / 'tmp'
-nifti_dir = fs_dir / 'nifti'
+save_dir = fs_dir / 'save'
 
 os.environ['GRADIO_TEMP_DIR'] = tmp_dir.as_posix()
 

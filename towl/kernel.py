@@ -18,31 +18,30 @@ def volume_sample(volume: wp.uint64, image: wp.array(dtype=pixel_type, ndim=3),
 
 
 @wp.kernel
-def volume_parallel_xray(
+def volume_xray_parallel(
         volume: wp.uint64, image: wp.array(dtype=wp.uint8, ndim=2),
         volume_origin: wp.vec3, volume_spacing: wp.vec3,
         image_origin: wp.vec3, image_iso_spacing: float,
         image_x_axis: wp.vec3, image_y_axis: wp.vec3, image_z_axis: wp.vec3,
         image_z_depth: float,
-        threshold_min: float,
-        window_min: float, window_max: float,
+        threshold_min: float, window_min: float, window_max: float,
 ):
     i, j = wp.tid()
 
-    ray_position = image_origin
-    ray_position += float(i) * image_iso_spacing * image_x_axis
-    ray_position += float(j) * image_iso_spacing * image_y_axis
+    position = image_origin
+    position += float(i) * image_iso_spacing * image_x_axis
+    position += float(j) * image_iso_spacing * image_y_axis
 
-    ray_step = image_iso_spacing * image_z_axis
+    step = image_iso_spacing * image_z_axis
     pixel = float(0)
 
     n = int(image_z_depth / image_iso_spacing)
     pixel_n = float(0)
 
     for k in range(n):
-        ray_position += ray_step
+        position += step
 
-        uvw = wp.cw_div(ray_position - volume_origin, volume_spacing)
+        uvw = wp.cw_div(position - volume_origin, volume_spacing)
         p = wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR)
 
         if threshold_min <= p:
@@ -51,6 +50,29 @@ def volume_parallel_xray(
 
     if pixel_n > 0:
         pixel /= pixel_n
+
+    pixel = wp.round((pixel - window_min) / (window_max - window_min) * 255.0)
+    pixel = wp.clamp(pixel, 0.0, 255.0)
+
+    image[i, j] = wp.uint8(pixel)
+
+
+@wp.kernel
+def volume_slice(
+        volume: wp.uint64, image: wp.array(dtype=wp.uint8, ndim=2),
+        volume_origin: wp.vec3, volume_spacing: wp.vec3,
+        image_origin: wp.vec3, image_iso_spacing: float,
+        image_x_axis: wp.vec3, image_y_axis: wp.vec3,
+        window_min: float, window_max: float,
+):
+    i, j = wp.tid()
+
+    position = image_origin
+    position += float(i) * image_iso_spacing * image_x_axis
+    position += float(j) * image_iso_spacing * image_y_axis
+
+    uvw = wp.cw_div(position - volume_origin, volume_spacing)
+    pixel = wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR)
 
     pixel = wp.round((pixel - window_min) / (window_max - window_min) * 255.0)
     pixel = wp.clamp(pixel, 0.0, 255.0)
