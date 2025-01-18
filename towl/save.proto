@@ -1,0 +1,59 @@
+//  [python]
+//  python -m pip install grpcio grpcio-tools
+//  python -m grpc_tools.protoc -I . --python_out=. --pyi_out=. --grpc_python_out=. save.proto
+
+//  [swift]
+//  brew install grpc-swift
+//  protoc --swift_out=. --grpc-swift_out=. --swift_opt=Visibility=Public save.proto
+
+syntax = "proto3";
+
+package save;
+
+enum Version {
+  RPC250115 = 0;
+}
+
+enum DataType {
+  UINT8 = 0;
+  INT16 = 1;
+  FLOAT64 = 2;
+}
+
+message Volume {
+  DataType dtype = 1;
+  bytes data = 2;
+  float background = 3;
+  Region region = 4;
+
+  message Region {
+    repeated int32 size = 1;
+    repeated float spacing = 2;
+    repeated float origin = 3;
+  }
+}
+
+message Ints {
+  repeated int32 values = 1;
+}
+
+message Floats {
+  repeated float values = 1;
+}
+
+message KeyPoints {
+  map<string, Ints> named_positions = 1;
+}
+
+message KeyBox {
+  Floats min = 1;
+  Floats max = 2;
+}
+
+message SaveTotalHip {
+  optional Volume init_volume = 1;
+  optional KeyBox main_region = 2;
+
+  optional string kp_name = 3;
+  optional KeyPoints kp_positions = 4;
+}

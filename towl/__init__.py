@@ -3,8 +3,9 @@ import os
 from pathlib import Path
 
 import gradio as gr
-import numpy as np
 from loguru import logger
+
+import towl.kernel
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
@@ -14,7 +15,7 @@ save_dir = fs_dir / 'save'
 
 os.environ['GRADIO_TEMP_DIR'] = tmp_dir.as_posix()
 
-theme = np.random.choice([
+theme = [
     gr.themes.Citrus(),
     gr.themes.Default(),
     gr.themes.Glass(),
@@ -22,5 +23,5 @@ theme = np.random.choice([
     gr.themes.Ocean(),
     gr.themes.Origin(),
     gr.themes.Soft(),
-])
+][-1]
 logger.debug(f'[theme] {theme.__class__.__name__}')
