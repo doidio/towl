@@ -161,10 +161,10 @@ def on_0_load(filename):
         raise gr.Error(f'载入失败，未知文件 {f.name}')
 
 
-def on_1_main_region(bbox_r, bbox_a, bbox_i, bbox_l, bbox_p, bbox_s):
+def on_1_main_region(r, a, i, l, p, s):
     global main_region_min, main_region_max
-    main_region_min = np.min([[bbox_r, bbox_a, bbox_i], [bbox_l, bbox_p, bbox_s]], axis=0)
-    main_region_max = np.max([[bbox_r, bbox_a, bbox_i], [bbox_l, bbox_p, bbox_s]], axis=0)
+    main_region_min = np.min([[r, a, i], [l, p, s]], axis=0)
+    main_region_max = np.max([[r, a, i], [l, p, s]], axis=0)
 
 
 def on_2_kp_name(name):
@@ -257,14 +257,14 @@ def on_1_tab():
             show_label=False, show_fullscreen_button=False,
             show_download_button=False, interactive=False,
         ),
-        _1_bbox_a: gr.Slider(
+        _1_main_region_a: gr.Slider(
             0,
             round(float(init_volume_length[1])),
             float(main_region_min[1]),
             step=main_region_spacing,
             label='前',
         ),
-        _1_bbox_p: gr.Slider(
+        _1_main_region_p: gr.Slider(
             0,
             round(float(init_volume_length[1])),
             float(main_region_max[1]),
@@ -276,28 +276,28 @@ def on_1_tab():
             show_label=False, show_fullscreen_button=False,
             show_download_button=False, interactive=False,
         ),
-        _1_bbox_r: gr.Slider(
+        _1_main_region_r: gr.Slider(
             0,
             round(float(init_volume_length[0])),
             float(main_region_min[0]),
             step=main_region_spacing,
             label='右',
         ),
-        _1_bbox_l: gr.Slider(
+        _1_main_region_l: gr.Slider(
             0,
             round(float(init_volume_length[0])),
             float(main_region_max[0]),
             step=main_region_spacing,
             label='左',
         ),
-        _1_bbox_i: gr.Slider(
+        _1_main_region_i: gr.Slider(
             0,
             round(float(init_volume_length[2])),
             float(main_region_min[2]),
             step=main_region_spacing,
             label='下',
         ),
-        _1_bbox_s: gr.Slider(
+        _1_main_region_s: gr.Slider(
             0,
             round(float(init_volume_length[2])),
             float(main_region_max[2]),
@@ -397,25 +397,25 @@ if __name__ == '__main__':
                 _0_save_upload = gr.UploadButton()
                 gr.Column(scale=1)
 
-        with gr.Tab('识别关键区域') as _1_tab:
+        with gr.Tab('识别主区') as _1_tab:
             with gr.Row():
                 with gr.Column(scale=1):
                     _1_main_image_xy = gr.Image()
                 with gr.Column(scale=2):
                     with gr.Row():
-                        _1_bbox_a = gr.Slider()
-                        _1_bbox_p = gr.Slider()
+                        _1_main_region_a = gr.Slider()
+                        _1_main_region_p = gr.Slider()
 
             with gr.Row():
                 with gr.Column(scale=1):
                     _1_main_image_xz = gr.Image()
                 with gr.Column(scale=2):
                     with gr.Row():
-                        _1_bbox_r = gr.Slider()
-                        _1_bbox_l = gr.Slider()
+                        _1_main_region_r = gr.Slider()
+                        _1_main_region_l = gr.Slider()
                     with gr.Row():
-                        _1_bbox_i = gr.Slider()
-                        _1_bbox_s = gr.Slider()
+                        _1_main_region_i = gr.Slider()
+                        _1_main_region_s = gr.Slider()
 
         with gr.Tab('识别关键点') as _2_tab:
             _2_kp_name = gr.Radio()
@@ -459,7 +459,7 @@ if __name__ == '__main__':
             on_2_tab, None, all_ui[2],
         )
 
-        for ui in (_ := [_1_bbox_r, _1_bbox_a, _1_bbox_i, _1_bbox_l, _1_bbox_p, _1_bbox_s]):
+        for ui in (_ := [_1_main_region_r, _1_main_region_a, _1_main_region_i, _1_main_region_l, _1_main_region_p, _1_main_region_s]):
             ui.release(
                 on_1_main_region, _, trigger_mode='once',
             ).success(on_1_tab, None, all_ui[1])
