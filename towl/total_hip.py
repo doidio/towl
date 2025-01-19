@@ -72,7 +72,7 @@ def on_0_save():
 
     if len(kp_positions) > 0:
         save.kp_positions.CopyFrom(pb.KeyPoints(
-            named_positions={k: pb.Ints(values=v) for k, v in kp_positions.items()},
+            named_positions={k: pb.Floats(values=v) for k, v in kp_positions.items()},
         ))
 
     os.makedirs(tl.save_dir, exist_ok=True)
@@ -106,7 +106,7 @@ def on_0_load(filename):
     global main_region_min, main_region_max
     global kp_name, kp_positions
 
-    if f.name.lower().endswith('.save'):
+    if f.name.lower().endswith(suffix := '.save'):
         gr.Info('正在载入存档')
 
         try:
@@ -132,9 +132,9 @@ def on_0_load(filename):
         if save.HasField('kp_positions'):
             kp_positions = {k: [*v.values] for k, v in save.kp_positions.named_positions.items()}
 
-        init_filename = f.name
+        init_filename = f.name.removesuffix(suffix)
         gr.Success(f'载入成功')
-    elif f.name.lower().endswith('.nii.gz'):
+    elif f.name.lower().endswith(suffix := '.nii.gz'):
         gr.Info('正在载入源数据')
         with wp.ScopedTimer('', print=False) as t:
             image = itk.imread(f.as_posix(), pixel_type=itk.SS)
@@ -155,7 +155,7 @@ def on_0_load(filename):
             main_region_min = np.zeros(3)
             main_region_max = init_volume_length.copy()
 
-        init_filename = f.name
+        init_filename = f.name.removesuffix(suffix)
         gr.Success(f'载入成功 {t.elapsed} ms')
     else:
         raise gr.Error(f'载入失败，未知文件 {f.name}')
@@ -176,7 +176,9 @@ def on_2_image_xz_select(evt: gr.SelectData, image):
     if kp_name not in kp_names:
         raise gr.Error('未选中解剖标志')
 
-    kp_positions[kp_name] = [evt.index[0], image.shape[0] - evt.index[1]]
+    p0 = main_region_origin[0] + main_region_spacing * evt.index[0]
+    p2 = main_region_origin[2] + main_region_spacing * (image.shape[0] - evt.index[1])
+    kp_positions[kp_name] = [p0, p2]
 
 
 def on_2_image_xy_select(evt: gr.SelectData, _):
@@ -187,19 +189,22 @@ def on_2_image_xy_select(evt: gr.SelectData, _):
     if kp_name not in kp_positions:
         raise gr.Error(f'未先选透视点 {kp_name}')
 
+    p1 = main_region_origin[1] + main_region_spacing * evt.index[1]
+
     if len(p := kp_positions[kp_name]) == 2:
-        kp_positions[kp_name] = [p[0], evt.index[1], p[1]]
+        kp_positions[kp_name] = [p[0], p1, p[1]]
     elif len(p) == 3:
-        kp_positions[kp_name] = [p[0], evt.index[1], p[2]]
+        kp_positions[kp_name] = [p[0], p1, p[2]]
     else:
         raise gr.Error(f'数据错误 {kp_name} {p}')
 
 
 def on_0_tab():
     return {
+        _0_save: gr.Button(f'保存 ({init_filename if init_filename is not None else str()}.save)'),
         _0_save_select: gr.FileExplorer(file_count='single', root_dir=tl.save_dir, label='请选择文件'),
         _0_save_load: gr.Button('载入'),
-        _0_save_upload: gr.UploadButton('上传 NIFTI(.nii.gz)'),
+        _0_save_upload: gr.UploadButton('上传 (.nii.gz)'),
     }
 
 
@@ -208,7 +213,8 @@ def on_1_tab():
         return {ui: gr.update() for ui in all_ui[1]}
 
     global main_region_min, main_region_max, main_region_size, main_region_origin
-    main_region_size = ((main_region_max - main_region_min) / main_region_spacing).astype(int)
+    main_region_length = main_region_max - main_region_min
+    main_region_size = (main_region_length / main_region_spacing).astype(int)
     main_region_size = np.max([main_region_size, [1, 1, 1]], axis=0)
     main_region_origin = init_volume_origin + main_region_min
 
@@ -225,7 +231,7 @@ def on_1_tab():
             wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1),
-            init_volume_length[2], 0.0, -100.0, 900.0,
+            main_region_length[2], 0.0, -100.0, 900.0,
         ])
 
         wp.launch(kernel=tl.kernel.volume_xray_parallel, dim=image[1].shape, inputs=[
@@ -233,7 +239,7 @@ def on_1_tab():
             wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
-            init_volume_length[1], 0.0, -100.0, 900.0,
+            main_region_length[1], 0.0, -100.0, 900.0,
         ])
 
     gr.Success(f'透视成功 {t.elapsed:.1f} ms')
@@ -306,17 +312,20 @@ def on_2_tab():
         return {ui: gr.update() for ui in all_ui[2]}
 
     kp_image_xz_ui = main_image_xz.copy()
+    kp_image_xz_ui = np.tile(kp_image_xz_ui[:, :, np.newaxis], (1, 1, 3))
 
     if (p := kp_positions.get(kp_name)) is not None:
-        p = [round(_) for _ in p]
-
         if len(p) == 3:
-            x, y, z = p[0], p[1], p[2]
+            x = round((p[0] - main_region_origin[0]) / main_region_spacing)
+            y = round((p[1] - main_region_origin[1]) / main_region_spacing)
+            z = round((p[2] - main_region_origin[2]) / main_region_spacing)
         else:
-            x, y, z = p[0], None, p[1]
+            x = round((p[0] - main_region_origin[0]) / main_region_spacing)
+            y = None
+            z = round((p[1] - main_region_origin[2]) / main_region_spacing)
 
-        kp_image_xz_ui[x, :] = 255
-        kp_image_xz_ui[:, z] = 255
+        kp_image_xz_ui[x, :] = [255, 0, 0]
+        kp_image_xz_ui[:, z] = [255, 0, 0]
 
         origin = main_region_origin + np.array([0, 0, z * main_region_spacing])
 
@@ -337,10 +346,11 @@ def on_2_tab():
         gr.Success(f'切片成功 {t.elapsed:.1f} ms')
 
         kp_image_xy_ui = kp_image_xy_ui.numpy()
-        kp_image_xy_ui[x, :] = 255
+        kp_image_xy_ui = np.tile(kp_image_xy_ui[:, :, np.newaxis], (1, 1, 3))
+        kp_image_xy_ui[x, :] = [255, 0, 0]
 
         if y is not None:
-            kp_image_xy_ui[:, y] = 255
+            kp_image_xy_ui[:, y] = [255, 0, 0]  # TODO 关键点坐标受主区域裁剪影响，改为初始范围坐标
 
         kp_image_xy_ui = kp_image_xy_ui.swapaxes(0, 1)
     else:
@@ -355,12 +365,12 @@ def on_2_tab():
             show_label=False,
         ),
         _2_kp_image_xz: gr.Image(
-            kp_image_xz_ui, image_mode='L',
+            kp_image_xz_ui, image_mode='RGB',
             show_label=False, show_fullscreen_button=False,
             show_download_button=False, interactive=False,
         ),
         _2_kp_image_xy: gr.Image(
-            kp_image_xy_ui, image_mode='L',
+            kp_image_xy_ui, image_mode='RGB',
             show_label=False, show_fullscreen_button=False,
             show_download_button=False, interactive=False,
         ),
@@ -371,7 +381,7 @@ if __name__ == '__main__':
     with (gr.Blocks(tl.theme, title=(title := f'{tl.__package__}')) as demo):
         with gr.Row():
             gr.Markdown(f'# {title}.{Path(__file__).stem}')
-            _0_save = gr.Button('保存', size='sm')
+            _0_save = gr.Button()
             gr.Column(scale=1)
 
         with gr.Tab('载入') as _0_tab:
@@ -385,6 +395,7 @@ if __name__ == '__main__':
             with gr.Row():
                 _0_save_load = gr.Button()
                 _0_save_upload = gr.UploadButton()
+                gr.Column(scale=1)
 
         with gr.Tab('识别关键区域') as _1_tab:
             with gr.Row():

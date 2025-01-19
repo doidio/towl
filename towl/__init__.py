@@ -23,5 +23,5 @@ theme = [
     gr.themes.Ocean(),
     gr.themes.Origin(),
     gr.themes.Soft(),
-][-1]
+][3]
 logger.debug(f'[theme] {theme.__class__.__name__}')

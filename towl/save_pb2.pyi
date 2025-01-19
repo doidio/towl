@@ -60,11 +60,11 @@ class KeyPoints(_message.Message):
         KEY_FIELD_NUMBER: _ClassVar[int]
         VALUE_FIELD_NUMBER: _ClassVar[int]
         key: str
-        value: Ints
-        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[Ints, _Mapping]] = ...) -> None: ...
+        value: Floats
+        def __init__(self, key: _Optional[str] = ..., value: _Optional[_Union[Floats, _Mapping]] = ...) -> None: ...
     NAMED_POSITIONS_FIELD_NUMBER: _ClassVar[int]
-    named_positions: _containers.MessageMap[str, Ints]
-    def __init__(self, named_positions: _Optional[_Mapping[str, Ints]] = ...) -> None: ...
+    named_positions: _containers.MessageMap[str, Floats]
+    def __init__(self, named_positions: _Optional[_Mapping[str, Floats]] = ...) -> None: ...
 
 class KeyBox(_message.Message):
     __slots__ = ("min", "max")

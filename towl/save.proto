@@ -42,7 +42,7 @@ message Floats {
 }
 
 message KeyPoints {
-  map<string, Ints> named_positions = 1;
+  map<string, Floats> named_positions = 1;
 }
 
 message KeyBox {
