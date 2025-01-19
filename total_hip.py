@@ -350,7 +350,7 @@ def on_2_tab():
         kp_image_xy_ui[x, :] = [255, 0, 0]
 
         if y is not None:
-            kp_image_xy_ui[:, y] = [255, 0, 0]  # TODO 关键点坐标受主区域裁剪影响，改为初始范围坐标
+            kp_image_xy_ui[:, y] = [255, 0, 0]
 
         kp_image_xy_ui = kp_image_xy_ui.swapaxes(0, 1)
     else:
@@ -362,23 +362,24 @@ def on_2_tab():
         _2_kp_name: gr.Radio(
             kp_names,
             value=kp_name,
-            show_label=False,
+            label='解剖标志',
         ),
         _2_kp_image_xz: gr.Image(
-            kp_image_xz_ui, image_mode='RGB',
-            show_label=False, show_fullscreen_button=False,
+            kp_image_xz_ui, image_mode='RGB', label='正位透视',
             show_download_button=False, interactive=False,
         ),
         _2_kp_image_xy: gr.Image(
-            kp_image_xy_ui, image_mode='RGB',
-            show_label=False, show_fullscreen_button=False,
+            kp_image_xy_ui, image_mode='RGB', label='轴位切片',
             show_download_button=False, interactive=False,
+        ),
+        _2_kp_positions: gr.Json(
+            kp_positions,
         ),
     }
 
 
 if __name__ == '__main__':
-    with (gr.Blocks(tl.theme, title=(title := f'{tl.__package__}')) as demo):
+    with (gr.Blocks(tl.theme, title=(title := f'{tl.__package__}')) as app):
         with gr.Row():
             gr.Markdown(f'# {title}.{Path(__file__).stem}')
             _0_save = gr.Button()
@@ -386,8 +387,8 @@ if __name__ == '__main__':
 
         with gr.Tab('载入') as _0_tab:
             gr.Markdown('''
-            - 使用 [3D Slicer](https://download.slicer.org/) 等软件解析DICOM并保存3D图像为NIFTI(.nii.gz)格式
-            - 载入图像(.nii.gz)，或存档(.save)
+            - 上传源数据，使用 [3D Slicer](https://download.slicer.org/) 等软件解析DICOM并保存3D图像为NIFTI(.nii.gz)格式
+            - 载入源数据(.nii.gz)，或存档(.save)
             ''')
 
             _0_save_select = gr.FileExplorer()
@@ -398,6 +399,10 @@ if __name__ == '__main__':
                 gr.Column(scale=1)
 
         with gr.Tab('识别主区') as _1_tab:
+            gr.Markdown('''
+            - 调节包围盒边界，使图像上方包含骨盆，下方包含股骨远端，排除四周干扰物体
+            ''')
+
             with gr.Row():
                 with gr.Column(scale=1):
                     _1_main_image_xy = gr.Image()
@@ -418,6 +423,10 @@ if __name__ == '__main__':
                         _1_main_region_s = gr.Slider()
 
         with gr.Tab('识别关键点') as _2_tab:
+            gr.Markdown('''
+            - 在图像中定位解剖标志，正位透视图定位左右(X)上下(Z)坐标，轴位切片图定位前后(Y)坐标
+            ''')
+
             _2_kp_name = gr.Radio()
 
             with gr.Row():
@@ -426,6 +435,7 @@ if __name__ == '__main__':
 
                 with gr.Column(scale=1):
                     _2_kp_image_xy = gr.Image()
+                    _2_kp_positions = gr.Json()
 
         # 控件集合
         all_ui = [[ui for name, ui in globals().items() if name.startswith(f'_{_}_')] for _ in range(3)]
@@ -459,7 +469,8 @@ if __name__ == '__main__':
             on_2_tab, None, all_ui[2],
         )
 
-        for ui in (_ := [_1_main_region_r, _1_main_region_a, _1_main_region_i, _1_main_region_l, _1_main_region_p, _1_main_region_s]):
+        for ui in (_ := [_1_main_region_r, _1_main_region_a, _1_main_region_i,
+                         _1_main_region_l, _1_main_region_p, _1_main_region_s]):
             ui.release(
                 on_1_main_region, _, trigger_mode='once',
             ).success(on_1_tab, None, all_ui[1])
@@ -478,5 +489,5 @@ if __name__ == '__main__':
         _1_tab.select(on_1_tab, None, all_ui[1])
         _2_tab.select(on_2_tab, None, all_ui[2])
 
-        demo.load(on_0_tab, None, all_ui[0])
-        demo.launch(share=False, show_api=False, max_file_size=gr.FileSize.GB, pwa=True)
+        app.load(on_0_tab, None, all_ui[0])
+        app.launch(share=False, show_api=False, max_file_size=gr.FileSize.GB, pwa=True)
