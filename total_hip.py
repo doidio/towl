@@ -195,12 +195,13 @@ def on_2_image_xy_select(evt: gr.SelectData, _):
     if kp_name not in kp_positions:
         raise gr.Error(f'未先选透视点 {kp_name}')
 
+    p0 = main_region_origin[0] + main_region_spacing * evt.index[0]
     p1 = main_region_origin[1] + main_region_spacing * evt.index[1]
 
     if len(p := kp_positions[kp_name]) == 2:
-        kp_positions[kp_name] = [p[0], p1, p[1]]
+        kp_positions[kp_name] = [p0, p1, p[1]]
     elif len(p) == 3:
-        kp_positions[kp_name] = [p[0], p1, p[2]]
+        kp_positions[kp_name] = [p0, p1, p[2]]
     else:
         raise gr.Error(f'数据错误 {kp_name} {p}')
 
@@ -446,7 +447,7 @@ if __name__ == '__main__':
 
         with gr.Tab('识别解剖') as _2_tab:
             gr.Markdown('''
-            - 在图像中定位解剖标志，正位透视定位左右(X)上下(Z)坐标，轴位切片定位前后(Y)坐标
+            - 在图像中定位解剖标志，正位透视定位左右(X)上下(Z)坐标，轴位切片定位左右(X)前后(Y)坐标
             ''')
 
             _2_kp_name = gr.Radio()
