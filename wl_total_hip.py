@@ -22,6 +22,7 @@ init_volume_origin: Optional[np.ndarray] = None
 init_volume_length: Optional[np.ndarray] = None
 
 main_region_spacing = 0.5
+main_region_window = [-100.0, 900.0]
 
 main_region_min: Optional[np.ndarray] = None
 main_region_max: Optional[np.ndarray] = None
@@ -35,7 +36,12 @@ kp_names = ['髂前上棘', '股骨头中心']
 kp_names = [f'左侧{_}' for _ in kp_names] + [f'右侧{_}' for _ in kp_names]
 kp_names += ['骶骨上终板中心']
 
-kp_name: Optional[str] = None
+kp_select_rgb = [255, 127, 127]
+kp_deselect_rgb = [0, 127, 255]
+kp_deselect_radius = 5
+
+kp_name_none = '取消选中'
+kp_name: str = kp_name_none
 kp_positions = {}
 
 kp_image_xz: Optional[np.ndarray] = None
@@ -231,7 +237,7 @@ def on_1_tab():
             wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1),
-            main_region_length[2], 0.0, -100.0, 900.0,
+            main_region_length[2], main_region_window[0], *main_region_window,
         ])
 
         wp.launch(kernel=tl.kernel.volume_xray_parallel, dim=image[1].shape, inputs=[
@@ -239,7 +245,7 @@ def on_1_tab():
             wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
-            main_region_length[1], 0.0, -100.0, 900.0,
+            main_region_length[1], main_region_window[0], *main_region_window,
         ])
 
     gr.Success(f'透视成功 {t.elapsed:.1f} ms')
@@ -324,13 +330,13 @@ def on_2_tab():
             y = None
             z = round((p[1] - main_region_origin[2]) / main_region_spacing)
 
-        kp_image_xz_ui[x, :] = [255, 0, 0]
-        kp_image_xz_ui[:, z] = [255, 0, 0]
+        kp_image_xz_ui[x, :] = kp_select_rgb
+        kp_image_xz_ui[:, z] = kp_select_rgb
 
         origin = main_region_origin + np.array([0, 0, z * main_region_spacing])
 
         global init_volume_wp
-        with wp.ScopedTimer('on_2_image_axial', print=False) as t:
+        with wp.ScopedTimer('', print=False) as t:
             if init_volume_wp is None:
                 init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
 
@@ -340,27 +346,43 @@ def on_2_tab():
                 wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
                 wp.vec3(origin), main_region_spacing,
                 wp.vec3(1, 0, 0), wp.vec3(0, 1, 0),
-                -100.0, 900.0,
+                *main_region_window,
             ])
 
         gr.Success(f'切片成功 {t.elapsed:.1f} ms')
 
         kp_image_xy_ui = kp_image_xy_ui.numpy()
         kp_image_xy_ui = np.tile(kp_image_xy_ui[:, :, np.newaxis], (1, 1, 3))
-        kp_image_xy_ui[x, :] = [255, 0, 0]
+        kp_image_xy_ui[x, :] = kp_select_rgb
 
         if y is not None:
-            kp_image_xy_ui[:, y] = [255, 0, 0]
+            kp_image_xy_ui[:, y] = kp_select_rgb
 
         kp_image_xy_ui = kp_image_xy_ui.swapaxes(0, 1)
+    elif kp_name in kp_names:
+        kp_image_xy_ui = None
     else:
+        for p in kp_positions.values():
+            if len(p) == 3:
+                x = round((p[0] - main_region_origin[0]) / main_region_spacing)
+                z = round((p[2] - main_region_origin[2]) / main_region_spacing)
+            else:
+                x = round((p[0] - main_region_origin[0]) / main_region_spacing)
+                z = round((p[1] - main_region_origin[2]) / main_region_spacing)
+
+            x_min = min(max(x - kp_deselect_radius, 0), kp_image_xz_ui.shape[0])
+            x_max = min(max(x + kp_deselect_radius, 0), kp_image_xz_ui.shape[0])
+            z_min = min(max(z - kp_deselect_radius, 0), kp_image_xz_ui.shape[1])
+            z_max = min(max(z + kp_deselect_radius, 0), kp_image_xz_ui.shape[1])
+            kp_image_xz_ui[x_min:x_max+1, z_min:z_max+1] = kp_deselect_rgb
+            kp_image_xz_ui[x_min:x_max+1, z_min:z_max+1] = kp_deselect_rgb
         kp_image_xy_ui = None
 
     kp_image_xz_ui = np.flipud(kp_image_xz_ui.swapaxes(0, 1))
 
     return {
         _2_kp_name: gr.Radio(
-            kp_names,
+            [kp_name_none, *kp_names],
             value=kp_name,
             label='解剖标志',
         ),
@@ -422,9 +444,9 @@ if __name__ == '__main__':
                         _1_main_region_i = gr.Slider()
                         _1_main_region_s = gr.Slider()
 
-        with gr.Tab('识别关键点') as _2_tab:
+        with gr.Tab('识别解剖') as _2_tab:
             gr.Markdown('''
-            - 在图像中定位解剖标志，正位透视图定位左右(X)上下(Z)坐标，轴位切片图定位前后(Y)坐标
+            - 在图像中定位解剖标志，正位透视定位左右(X)上下(Z)坐标，轴位切片定位前后(Y)坐标
             ''')
 
             _2_kp_name = gr.Radio()
