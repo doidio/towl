@@ -481,7 +481,7 @@ if __name__ == '__main__':
             lambda: gr.FileExplorer(root_dir=tl.save_dir), None, _0_save_select,
         )
 
-        _0_save_load.click(
+        _0_save_load.click(  # 载入
             on_0_load, _0_save_select, trigger_mode='once',
         ).success(
             on_0_tab, None, all_ui[0],
@@ -497,19 +497,25 @@ if __name__ == '__main__':
                 on_1_main_region, _, trigger_mode='once',
             ).success(on_1_tab, None, all_ui[1])
 
-        _2_kp_name.select(
+        _2_kp_name.select(  # 解剖标志
             on_2_kp_name, _2_kp_name, trigger_mode='once',
         ).success(on_2_tab, None, all_ui[2])
-        _2_kp_image_xz.select(
+
+        _2_kp_image_xz.select(  # 正位透视
             on_2_image_xz_select, _2_kp_image_xz, trigger_mode='once',
         ).success(on_2_tab, None, all_ui[2])
-        _2_kp_image_xy.select(
+
+        _2_kp_image_xy.select(  # 轴位切片
             on_2_image_xy_select, _2_kp_image_xy, trigger_mode='once',
         ).success(on_2_tab, None, all_ui[2])
 
+        # 标签页
         _0_tab.select(on_0_tab, None, all_ui[0])
         _1_tab.select(on_1_tab, None, all_ui[1])
         _2_tab.select(on_2_tab, None, all_ui[2])
 
+        # 刷新网页
         app.load(on_0_tab, None, all_ui[0])
+
+        # 启动网页
         app.launch(share=False, show_api=False, max_file_size=gr.FileSize.GB, pwa=True)
