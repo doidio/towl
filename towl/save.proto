@@ -11,7 +11,7 @@ syntax = "proto3";
 package save;
 
 enum Version {
-  RPC250115 = 0;
+  RPC250120 = 0;
 }
 
 enum DataType {

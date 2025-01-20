@@ -8,14 +8,14 @@ DESCRIPTOR: _descriptor.FileDescriptor
 
 class Version(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
-    RPC250115: _ClassVar[Version]
+    RPC250120: _ClassVar[Version]
 
 class DataType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     UINT8: _ClassVar[DataType]
     INT16: _ClassVar[DataType]
     FLOAT64: _ClassVar[DataType]
-RPC250115: Version
+RPC250120: Version
 UINT8: DataType
 INT16: DataType
 FLOAT64: DataType
