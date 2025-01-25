@@ -6,6 +6,7 @@ import gradio as gr
 from loguru import logger
 
 import towl.kernel
+import towl.cad
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 

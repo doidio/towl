@@ -32,9 +32,9 @@ main_region_origin: Optional[np.ndarray] = None
 main_image_xy: Optional[np.ndarray] = None
 main_image_xz: Optional[np.ndarray] = None
 
-kp_names = ['髂前上棘', '股骨头中心']
+kp_names = ['骨盆髂前上棘', '骨盆耻骨结节']
 kp_names = [f'左侧{_}' for _ in kp_names] + [f'右侧{_}' for _ in kp_names]
-kp_names += ['骶骨上终板中心']
+kp_names += ['股骨颈口上缘', '股骨颈口下缘', '股骨小粗隆髓腔中心', '股骨柄末端髓腔中心']
 
 kp_select_rgb = [255, 127, 127]
 kp_deselect_rgb = [0, 127, 255]
@@ -50,7 +50,7 @@ kp_image_xy: Optional[np.ndarray] = None
 
 def on_0_save():
     if init_filename is None:
-        raise gr.Error('未载入源数据或存档')
+        raise gr.Error('未载入源数据或存档', print_exception=False)
 
     gr.Info('开始保存')
     save = pb.SaveTotalHip()
@@ -101,11 +101,11 @@ def on_0_upload(filename):
 
 def on_0_load(filename):
     if filename is None:
-        raise gr.Error('未选中')
+        raise gr.Error('未选中', print_exception=False)
 
     f = Path(filename)
     if not f.is_file() or not f.exists():
-        raise gr.Error('选中无效')
+        raise gr.Error('选中无效', print_exception=False)
 
     global init_filename, init_volume, init_volume_wp
     global init_volume_size, init_volume_spacing, init_volume_origin, init_volume_length
@@ -118,7 +118,7 @@ def on_0_load(filename):
         try:
             save: pb.SaveTotalHip = pb.SaveTotalHip.FromString(f.read_bytes())
         except Exception as e:
-            raise gr.Error(f'载入存档失败 {e}')
+            raise gr.Error(f'载入存档失败 {e}', print_exception=False)
 
         if save.HasField('init_volume'):
             _ = [*save.init_volume.region.size]
@@ -146,7 +146,7 @@ def on_0_load(filename):
             image = itk.imread(f.as_posix(), pixel_type=itk.SS)
 
             if image.ndim != 3:
-                raise gr.Error(f'仅支持3D图像，不支持{image.ndim}D图像')
+                raise gr.Error(f'仅支持3D图像，不支持{image.ndim}D图像', print_exception=False)
 
             if np.any((direction := np.array(image.GetDirection())) != np.identity(3)):
                 gr.Warning(f'忽略已知的图像歪斜\n{direction}')
@@ -164,7 +164,7 @@ def on_0_load(filename):
         init_filename = f.name.removesuffix(suffix)
         gr.Success(f'载入成功 {t.elapsed} ms')
     else:
-        raise gr.Error(f'载入失败，未知文件 {f.name}')
+        raise gr.Error(f'载入失败，未知文件 {f.name}', print_exception=False)
 
 
 def on_1_main_region(r, a, i, l, p, s):
@@ -180,7 +180,7 @@ def on_2_kp_name(name):
 
 def on_2_image_xz_select(evt: gr.SelectData, image):
     if kp_name not in kp_names:
-        raise gr.Error('未选中解剖标志')
+        raise gr.Error('未选中解剖标志', print_exception=False)
 
     p0 = main_region_origin[0] + main_region_spacing * evt.index[0]
     p2 = main_region_origin[2] + main_region_spacing * (image.shape[0] - evt.index[1])
@@ -189,11 +189,11 @@ def on_2_image_xz_select(evt: gr.SelectData, image):
 
 def on_2_image_xy_select(evt: gr.SelectData, _):
     if kp_name not in kp_names:
-        raise gr.Error('未选中解剖标志')
+        raise gr.Error('未选中解剖标志', print_exception=False)
 
     global kp_positions
     if kp_name not in kp_positions:
-        raise gr.Error(f'未先选透视点 {kp_name}')
+        raise gr.Error(f'未先选透视点 {kp_name}', print_exception=False)
 
     p0 = main_region_origin[0] + main_region_spacing * evt.index[0]
     p1 = main_region_origin[1] + main_region_spacing * evt.index[1]
@@ -203,7 +203,7 @@ def on_2_image_xy_select(evt: gr.SelectData, _):
     elif len(p) == 3:
         kp_positions[kp_name] = [p0, p1, p[2]]
     else:
-        raise gr.Error(f'数据错误 {kp_name} {p}')
+        raise gr.Error(f'数据错误 {kp_name} {p}', print_exception=False)
 
 
 def on_0_tab():
@@ -234,19 +234,19 @@ def on_1_tab():
             init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
 
         wp.launch(kernel=tl.kernel.volume_xray_parallel, dim=image[0].shape, inputs=[
-            init_volume_wp.id, image[0],
-            wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-            wp.vec3(main_region_origin), main_region_spacing,
+            init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+            image[0], wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1),
             main_region_length[2], main_region_window[0], *main_region_window,
+            0,
         ])
 
         wp.launch(kernel=tl.kernel.volume_xray_parallel, dim=image[1].shape, inputs=[
-            init_volume_wp.id, image[1],
-            wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-            wp.vec3(main_region_origin), main_region_spacing,
+            init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+            image[1], wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
             main_region_length[1], main_region_window[0], *main_region_window,
+            0,
         ])
 
     gr.Success(f'透视成功 {t.elapsed:.1f} ms')
@@ -343,11 +343,11 @@ def on_2_tab():
 
             kp_image_xy_ui = wp.full(shape=(main_region_size[0], main_region_size[1]), value=0, dtype=wp.uint8)
             wp.launch(kernel=tl.kernel.volume_slice, dim=kp_image_xy_ui.shape, inputs=[
-                init_volume_wp.id, kp_image_xy_ui,
-                wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-                wp.vec3(origin), main_region_spacing,
+                init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+                kp_image_xy_ui, wp.vec3(origin), main_region_spacing,
                 wp.vec3(1, 0, 0), wp.vec3(0, 1, 0),
                 *main_region_window,
+                0, 0.0,
             ])
 
         gr.Success(f'切片成功 {t.elapsed:.1f} ms')
@@ -375,8 +375,8 @@ def on_2_tab():
             x_max = min(max(x + kp_deselect_radius, 0), kp_image_xz_ui.shape[0])
             z_min = min(max(z - kp_deselect_radius, 0), kp_image_xz_ui.shape[1])
             z_max = min(max(z + kp_deselect_radius, 0), kp_image_xz_ui.shape[1])
-            kp_image_xz_ui[x_min:x_max+1, z_min:z_max+1] = kp_deselect_rgb
-            kp_image_xz_ui[x_min:x_max+1, z_min:z_max+1] = kp_deselect_rgb
+            kp_image_xz_ui[x_min:x_max + 1, z_min:z_max + 1] = kp_deselect_rgb
+            kp_image_xz_ui[x_min:x_max + 1, z_min:z_max + 1] = kp_deselect_rgb
         kp_image_xy_ui = None
 
     kp_image_xz_ui = np.flipud(kp_image_xz_ui.swapaxes(0, 1))
@@ -397,6 +397,141 @@ def on_2_tab():
         ),
         _2_kp_positions: gr.Json(
             kp_positions,
+        ),
+    }
+
+
+def on_3_tab():
+    neck = [kp_positions.get(_) for _ in ('股骨颈口上缘', '股骨颈口下缘')]
+    canal = [kp_positions.get(_) for _ in ('股骨小粗隆髓腔中心', '股骨柄末端髓腔中心')]
+
+    if None in neck + canal:
+        raise gr.Error('缺少必要的解剖参考', print_exception=False)
+
+    neck = np.array(neck)
+    canal = np.array(canal)
+
+    neck_center = 0.5 * (neck[0] + neck[1])
+    neck_x = neck[0] - neck[1]
+    neck_rx = 0.5 * np.linalg.norm(neck_x)
+    neck_ry = 0.5 * neck_rx
+    neck_z = neck_center - canal[0]
+    neck_y = np.cross(neck_z, neck_x)
+    neck_z = np.cross(neck_x, neck_y)
+    neck_x, neck_y, neck_z = [_ / np.linalg.norm(_) for _ in (neck_x, neck_y, neck_z)]
+
+    canal_z = canal[0] - canal[1]
+    canal_x = canal[0] - neck[1]
+    canal_y = np.cross(canal_z, canal_x)
+    canal_x = np.cross(canal_y, canal_z)
+    canal_x, canal_y, canal_z = [_ / np.linalg.norm(_) for _ in (canal_x, canal_y, canal_z)]
+
+    canal_x_edges = [canal[0], canal[1], canal[0], canal[1]]
+    ray_dirs = [canal_x, canal_x, -canal_x, -canal_x]
+
+    global init_volume_wp
+    with wp.ScopedTimer('', print=False) as t:
+        if init_volume_wp is None:
+            init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
+
+        canal_x_edges = wp.array(canal_x_edges, dtype=wp.vec3)
+        wp.launch(kernel=tl.kernel.volume_query_rays, dim=(len(canal_x_edges),), inputs=[
+            init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+            canal_x_edges, wp.array(ray_dirs, dtype=wp.vec3),
+            main_region_spacing, 1e6, 500.0,
+            canal_x_edges,
+        ])
+        canal_x_edges = canal_x_edges.numpy()  # - np.array(ray_dirs) * 2.0
+
+        canal_x_edges = canal_x_edges.reshape((2, 2, 3)).astype(float)
+        canal_rx = 0.5 * np.linalg.norm(canal_x_edges[0, :] - canal_x_edges[1, :], axis=1)
+        canal_ry = 0.8 * canal_rx
+
+        canal_centers = np.mean(canal_x_edges, axis=0)
+        canal_y_edges = np.array([
+            [canal_centers[_] + canal_y * canal_ry[_] for _ in range(2)],
+            [canal_centers[_] - canal_y * canal_ry[_] for _ in range(2)],
+        ])
+
+        splines = np.array([
+            [
+                _ := neck[0],
+                _ * 0.9 + canal_x_edges[0, 0] * 0.1 + canal_x * 2,
+                canal_x_edges[0, 0],
+                canal_x_edges[0, 1] + canal_z * 2,
+                canal_x_edges[0, 1],
+            ],
+            [
+                _ := neck_center + canal_y * neck_ry,
+                _ * 0.9 + canal_y_edges[0, 0] * 0.1,
+                canal_y_edges[0, 0],
+                canal_y_edges[0, 1] + canal_z * 2,
+                canal_y_edges[0, 1],
+            ],
+            [
+                _ := neck[1],
+                _ * 0.9 + canal_x_edges[1, 0] * 0.1,
+                canal_x_edges[1, 0],
+                canal_x_edges[1, 1] + canal_z * 2,
+                canal_x_edges[1, 1],
+            ],
+            [
+                _ := neck_center - canal_y * neck_ry,
+                _ * 0.9 + canal_y_edges[1, 0] * 0.1,
+                canal_y_edges[1, 0],
+                canal_y_edges[1, 1] + canal_z * 2,
+                canal_y_edges[1, 1],
+            ],
+        ])
+
+        _ = tl.cad.femoral_prothesis(splines)
+        femoral_mesh = wp.Mesh(wp.array(_[0], wp.vec3), wp.array(_[1].flatten(), wp.int32),
+                               support_winding_number=True)
+
+        global main_region_min, main_region_max, main_region_size, main_region_origin
+        main_region_length = main_region_max - main_region_min
+
+        femur_image_xz_ui = wp.full(shape=(main_region_size[0], main_region_size[2]), value=0, dtype=wp.uint8)
+        wp.launch(kernel=tl.kernel.volume_xray_parallel, dim=femur_image_xz_ui.shape, inputs=[
+            init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+            femur_image_xz_ui, wp.vec3(main_region_origin), main_region_spacing,
+            wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
+            main_region_length[1], main_region_window[0], *main_region_window,
+            femoral_mesh.id,
+        ])
+        femur_image_xz_ui = np.flipud(femur_image_xz_ui.numpy().swapaxes(0, 1))
+
+        AP, AB = neck[1] - canal[0], canal[1] - canal[0]
+        P = canal[0] + np.dot(AP, AB) / np.dot(AB, AB) * AB
+
+        femur_image_xy_ui = []
+        rx, ry = 40.0, 24.0
+        for i in range(20):
+            i = i / 20.0
+            c = P * (1 - i) + canal[1] * i
+            o = c - rx * canal_x - ry * canal_y
+
+            size = tuple(max(round(2 * _ / main_region_spacing), 1) for _ in (rx, ry))
+            image = wp.full(shape=size, value=0, dtype=wp.uint8)
+            wp.launch(kernel=tl.kernel.volume_slice, dim=image.shape, inputs=[
+                init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+                image, wp.vec3(o), main_region_spacing,
+                wp.vec3(canal_x), wp.vec3(canal_y),
+                *main_region_window,
+                femoral_mesh.id, 1e6,
+            ])
+            femur_image_xy_ui.append(image.numpy().swapaxes(0, 1))
+
+    gr.Success(f'切片成功 {t.elapsed:.1f} ms')
+
+    return {
+        _3_femur_image_xz: gr.Image(
+            femur_image_xz_ui, image_mode='L', label='股骨柄透视',
+            show_download_button=False, interactive=False,
+        ),
+        _3_femur_image_xy: gr.Gallery(
+            femur_image_xy_ui, label='股骨柄截面',
+            object_fit='contain', selected_index=0, columns=1, interactive=False,
         ),
     }
 
@@ -460,8 +595,17 @@ if __name__ == '__main__':
                     _2_kp_image_xy = gr.Image()
                     _2_kp_positions = gr.Json()
 
+        with gr.Tab('生成股骨柄') as _3_tab:
+            gr.Markdown('''
+            - CAD几何造型，细分面网格为wp.Mesh，使用wp.mesh_query_ray叠加渲染
+            - wp.sim, add_shape_sdf, add_soft_mesh
+            ''')
+
+            _3_femur_image_xy = gr.Gallery()
+            _3_femur_image_xz = gr.Image()
+
         # 控件集合
-        all_ui = [[ui for name, ui in globals().items() if name.startswith(f'_{_}_')] for _ in range(3)]
+        all_ui = [[ui for name, ui in globals().items() if name.startswith(f'_{_}_')] for _ in range(4)]
 
         _0_save.click(  # 保存
             on_0_save,
@@ -514,9 +658,10 @@ if __name__ == '__main__':
         _0_tab.select(on_0_tab, None, all_ui[0])
         _1_tab.select(on_1_tab, None, all_ui[1])
         _2_tab.select(on_2_tab, None, all_ui[2])
+        _3_tab.select(on_3_tab, None, all_ui[3])
 
         # 刷新网页
         app.load(on_0_tab, None, all_ui[0])
 
         # 启动网页
-        app.launch(share=False, show_api=False, max_file_size=gr.FileSize.GB, pwa=True)
+        app.launch(share=True, show_api=False, max_file_size=gr.FileSize.GB, pwa=True)
