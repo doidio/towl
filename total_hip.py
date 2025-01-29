@@ -233,20 +233,18 @@ def on_1_tab():
         if init_volume_wp is None:
             init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
 
-        wp.launch(kernel=tl.kernel.volume_xray_parallel, dim=image[0].shape, inputs=[
+        wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=image[0].shape, inputs=[
             init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             image[0], wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1),
             main_region_length[2], main_region_window[0], *main_region_window,
-            0,
         ])
 
-        wp.launch(kernel=tl.kernel.volume_xray_parallel, dim=image[1].shape, inputs=[
+        wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=image[1].shape, inputs=[
             init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             image[1], wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
             main_region_length[1], main_region_window[0], *main_region_window,
-            0,
         ])
 
     gr.Success(f'透视成功 {t.elapsed:.1f} ms')
@@ -492,14 +490,25 @@ def on_3_tab():
         main_region_length = main_region_max - main_region_min
 
         femur_image_xz_ui = wp.full(shape=(main_region_size[0], main_region_size[2]), value=0, dtype=wp.uint8)
-        wp.launch(kernel=tl.kernel.volume_xray_parallel, dim=femur_image_xz_ui.shape, inputs=[
+        wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
             init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             femur_image_xz_ui, wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
             main_region_length[1], main_region_window[0], *main_region_window,
-            femoral_mesh.id,
         ])
-        femur_image_xz_ui = np.flipud(femur_image_xz_ui.numpy().swapaxes(0, 1))
+
+        femur_image_xz_ui = femur_image_xz_ui.numpy()
+        femur_image_xz_ui = np.tile(femur_image_xz_ui[:, :, np.newaxis], (1, 1, 3))
+
+        femur_image_xz_ui = wp.array(femur_image_xz_ui, dtype=wp.vec3)
+        wp.launch(kernel=tl.kernel.mesh_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
+            femoral_mesh.id, wp.vec3(0.0, 0.5, 1.0),
+            femur_image_xz_ui, wp.vec3(main_region_origin), main_region_spacing,
+            wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
+            main_region_length[1],
+        ])
+
+        femur_image_xz_ui = np.flipud(femur_image_xz_ui.numpy().astype(np.uint8).swapaxes(0, 1))
 
         AP, AB = neck[1] - canal[0], canal[1] - canal[0]
         P = canal[0] + np.dot(AP, AB) / np.dot(AB, AB) * AB
@@ -526,7 +535,7 @@ def on_3_tab():
 
     return {
         _3_femur_image_xz: gr.Image(
-            femur_image_xz_ui, image_mode='L', label='股骨柄透视',
+            femur_image_xz_ui, image_mode='RGB', label='股骨柄透视',
             show_download_button=False, interactive=False,
         ),
         _3_femur_image_xy: gr.Gallery(
