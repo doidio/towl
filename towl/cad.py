@@ -4,8 +4,8 @@ import numpy as np
 from vtkmodules.numpy_interface.dataset_adapter import WrapDataObject
 
 
-def _shape_to_mesh(shape):
-    obj = WrapDataObject(shape.toVtkPolyData(tolerance=1e-3, normals=True))
+def _shape_to_mesh(shape, tol: float = 1e-3, atol: float = 1e-1, normals: bool = False):
+    obj = WrapDataObject(shape.toVtkPolyData(tolerance=tol, angularTolerance=atol, normals=normals))
 
     if np.all(obj.Polygons.reshape((-1, 4))[:, 0] == 3):
         points = np.array(obj.Points, dtype=float)
@@ -22,6 +22,4 @@ def femoral_prothesis(splines):
     solid = cq.func.loft(*splines, splines[0])
     caps = [cq.func.face(solid.edges(_)) for _ in ('>Z', '<Z')]
     solid = cq.func.solid([*caps, solid.faces()])
-    cq.exporters.export(solid, 'solid.stl', tolerance=1e-3)
-    cq.exporters.export(solid, 'solid.step', tolerance=1e-3)
-    return _shape_to_mesh(solid)
+    return _shape_to_mesh(solid, 1e-5, 1e-1, True)

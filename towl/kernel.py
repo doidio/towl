@@ -71,10 +71,38 @@ def volume_xray_parallel(
     pixel = wp.clamp(pixel, 0.0, 255.0)
 
     if mesh > wp.uint64(0):
-        if wp.mesh_query_ray(
-                mesh, ray_start, image_z_axis, image_z_depth,
-        ).result:
-            pixel = (pixel + 255.0) * 0.5
+        q = wp.mesh_query_ray(
+            mesh, ray_start, image_z_axis, image_z_depth,
+        )
+        if q.result:  # 物理光照参数
+            view_dir = -wp.normalize(image_z_axis)  # 视线方向
+            normal = wp.normalize(q.normal)
+
+            metallic_factor = 0.3
+
+            # 基础材质参数
+            ambient = 0.1
+            shininess = 64  # 高光锐度
+            specular_strength = 0.8 * metallic_factor
+
+            # 光照计算
+            light_dir = wp.normalize(-image_z_axis)
+
+            # 漫反射
+            diffuse = wp.max(wp.dot(normal, light_dir), 0.0)
+
+            # Blinn-Phong 高光
+            H = wp.normalize(light_dir + view_dir)
+            NdotH = wp.max(wp.dot(normal, H), 0.0)
+            specular = specular_strength * wp.pow(NdotH, float(shininess))
+
+            # 菲涅尔效应增强金属感
+            fresnel = (1.0 - wp.max(wp.dot(view_dir, normal), 0.0)) ** 5.0
+            specular += fresnel * metallic_factor
+
+            # 组合光照分量
+            intensity = ambient + (1.0 - metallic_factor) * diffuse + specular
+            pixel = wp.clamp(intensity, 0.0, 1.0) * 255.0
 
     image[i, j] = wp.uint8(pixel)
 
