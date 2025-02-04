@@ -11,6 +11,8 @@ import warp as wp
 import towl as tl
 import towl.save_pb2 as pb
 
+g_keys = set(globals().keys())
+
 init_filename: Optional[str] = None
 
 init_volume: Optional[np.ndarray] = None
@@ -46,6 +48,10 @@ kp_positions = {}
 
 kp_image_xz: Optional[np.ndarray] = None
 kp_image_xy: Optional[np.ndarray] = None
+
+femur_stem_rgb = [127, 191, 255]
+
+g_default = {_: globals()[_] for _ in globals() if _ not in g_keys}
 
 
 def on_0_save():
@@ -120,6 +126,8 @@ def on_0_load(filename):
         except Exception as e:
             raise gr.Error(f'载入存档失败 {e}', print_exception=False)
 
+        globals().update(g_default)
+
         if save.HasField('init_volume'):
             _ = [*save.init_volume.region.size]
             init_volume = np.frombuffer(save.init_volume.data, np.int16).reshape(_)
@@ -151,6 +159,8 @@ def on_0_load(filename):
             if np.any((direction := np.array(image.GetDirection())) != np.identity(3)):
                 gr.Warning(f'忽略已知的图像歪斜\n{direction}')
 
+            globals().update(g_default)
+
             init_volume_size = np.array(itk.size(image))
             init_volume_spacing = np.array(itk.spacing(image))
             init_volume_origin = np.array(itk.origin(image))
@@ -165,6 +175,11 @@ def on_0_load(filename):
         gr.Success(f'载入成功 {t.elapsed} ms')
     else:
         raise gr.Error(f'载入失败，未知文件 {f.name}', print_exception=False)
+
+
+def on_0_unload():
+    globals().update(g_default)
+    gr.Success('重置成功')
 
 
 def on_1_main_region(r, a, i, l, p, s):
@@ -208,16 +223,17 @@ def on_2_image_xy_select(evt: gr.SelectData, _):
 
 def on_0_tab():
     return {
-        _0_save: gr.Button(f'保存 ({init_filename if init_filename is not None else str()}.save)'),
-        _0_save_select: gr.FileExplorer(file_count='single', root_dir=tl.save_dir, label='请选择文件'),
-        _0_save_load: gr.Button('载入'),
-        _0_save_upload: gr.UploadButton('上传 (.nii.gz)'),
+        _0_save: gr.Button(f'保存 ({init_filename if init_filename is not None else str()}.save)', visible=True, ),
+        _0_select: gr.FileExplorer(file_count='single', root_dir=tl.save_dir, label='请选择文件', visible=True, ),
+        _0_load: gr.Button('载入', visible=True, ),
+        _0_upload: gr.UploadButton('上传 (.nii.gz)', visible=True, ),
+        _0_unload: gr.Button('重置', visible=True, ),
     }
 
 
 def on_1_tab():
     if init_volume is None:
-        return {ui: gr.update() for ui in all_ui[1]}
+        return {ui: ui.__class__(visible=False) for ui in all_ui[1]}
 
     global main_region_min, main_region_max, main_region_size, main_region_origin
     main_region_length = main_region_max - main_region_min
@@ -233,14 +249,14 @@ def on_1_tab():
         if init_volume_wp is None:
             init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
 
-        wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=image[0].shape, inputs=[
+        wp.launch(kernel=tl.wp.volume_ray_parallel, dim=image[0].shape, inputs=[
             init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             image[0], wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1),
             main_region_length[2], main_region_window[0], *main_region_window,
         ])
 
-        wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=image[1].shape, inputs=[
+        wp.launch(kernel=tl.wp.volume_ray_parallel, dim=image[1].shape, inputs=[
             init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             image[1], wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
@@ -260,61 +276,61 @@ def on_1_tab():
         _1_main_image_xy: gr.Image(
             main_image_xy_ui, image_mode='L',
             show_label=False, show_fullscreen_button=False,
-            show_download_button=False, interactive=False,
+            show_download_button=False, interactive=False, visible=True,
         ),
         _1_main_region_a: gr.Slider(
             0,
             round(float(init_volume_length[1])),
             float(main_region_min[1]),
             step=main_region_spacing,
-            label='前',
+            label='前', visible=True,
         ),
         _1_main_region_p: gr.Slider(
             0,
             round(float(init_volume_length[1])),
             float(main_region_max[1]),
             step=main_region_spacing,
-            label='后',
+            label='后', visible=True,
         ),
         _1_main_image_xz: gr.Image(
             main_image_xz_ui, image_mode='L',
             show_label=False, show_fullscreen_button=False,
-            show_download_button=False, interactive=False,
+            show_download_button=False, interactive=False, visible=True,
         ),
         _1_main_region_r: gr.Slider(
             0,
             round(float(init_volume_length[0])),
             float(main_region_min[0]),
             step=main_region_spacing,
-            label='右',
+            label='右', visible=True,
         ),
         _1_main_region_l: gr.Slider(
             0,
             round(float(init_volume_length[0])),
             float(main_region_max[0]),
             step=main_region_spacing,
-            label='左',
+            label='左', visible=True,
         ),
         _1_main_region_i: gr.Slider(
             0,
             round(float(init_volume_length[2])),
             float(main_region_min[2]),
             step=main_region_spacing,
-            label='下',
+            label='下', visible=True,
         ),
         _1_main_region_s: gr.Slider(
             0,
             round(float(init_volume_length[2])),
             float(main_region_max[2]),
             step=main_region_spacing,
-            label='上',
+            label='上', visible=True,
         ),
     }
 
 
 def on_2_tab():
     if main_image_xz is None:
-        return {ui: gr.update() for ui in all_ui[2]}
+        return {ui: ui.__class__(visible=False) for ui in all_ui[2]}
 
     kp_image_xz_ui = main_image_xz.copy()
     kp_image_xz_ui = np.tile(kp_image_xz_ui[:, :, np.newaxis], (1, 1, 3))
@@ -340,12 +356,11 @@ def on_2_tab():
                 init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
 
             kp_image_xy_ui = wp.full(shape=(main_region_size[0], main_region_size[1]), value=0, dtype=wp.uint8)
-            wp.launch(kernel=tl.kernel.volume_slice, dim=kp_image_xy_ui.shape, inputs=[
+            wp.launch(kernel=tl.wp.volume_slice, dim=kp_image_xy_ui.shape, inputs=[
                 init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
                 kp_image_xy_ui, wp.vec3(origin), main_region_spacing,
                 wp.vec3(1, 0, 0), wp.vec3(0, 1, 0),
                 *main_region_window,
-                0, 0.0,
             ])
 
         gr.Success(f'切片成功 {t.elapsed:.1f} ms')
@@ -382,19 +397,18 @@ def on_2_tab():
     return {
         _2_kp_name: gr.Radio(
             [kp_name_none, *kp_names],
-            value=kp_name,
-            label='解剖标志',
+            value=kp_name, label='解剖标志', visible=True,
         ),
         _2_kp_image_xz: gr.Image(
             kp_image_xz_ui, image_mode='RGB', label='正位透视',
-            show_download_button=False, interactive=False,
+            show_download_button=False, interactive=False, visible=True,
         ),
         _2_kp_image_xy: gr.Image(
             kp_image_xy_ui, image_mode='RGB', label='轴位切片',
-            show_download_button=False, interactive=False,
+            show_download_button=False, interactive=False, visible=True,
         ),
         _2_kp_positions: gr.Json(
-            kp_positions,
+            kp_positions, visible=True,
         ),
     }
 
@@ -404,7 +418,7 @@ def on_3_tab():
     canal = [kp_positions.get(_) for _ in ('股骨小粗隆髓腔中心', '股骨柄末端髓腔中心')]
 
     if None in neck + canal:
-        raise gr.Error('缺少必要的解剖参考', print_exception=False)
+        return {ui: ui.__class__(visible=False) for ui in all_ui[3]}
 
     neck = np.array(neck)
     canal = np.array(canal)
@@ -413,10 +427,10 @@ def on_3_tab():
     neck_x = neck[0] - neck[1]
     neck_rx = 0.5 * np.linalg.norm(neck_x)
     neck_ry = 0.5 * neck_rx
-    neck_z = neck_center - canal[0]
-    neck_y = np.cross(neck_z, neck_x)
-    neck_z = np.cross(neck_x, neck_y)
-    neck_x, neck_y, neck_z = [_ / np.linalg.norm(_) for _ in (neck_x, neck_y, neck_z)]
+    # neck_z = neck_center - canal[0]
+    # neck_y = np.cross(neck_z, neck_x)
+    # neck_z = np.cross(neck_x, neck_y)
+    # neck_x, neck_y, neck_z = [_ / np.linalg.norm(_) for _ in (neck_x, neck_y, neck_z)]
 
     canal_z = canal[0] - canal[1]
     canal_x = canal[0] - neck[1]
@@ -424,8 +438,14 @@ def on_3_tab():
     canal_x = np.cross(canal_y, canal_z)
     canal_x, canal_y, canal_z = [_ / np.linalg.norm(_) for _ in (canal_x, canal_y, canal_z)]
 
-    canal_x_edges = [canal[0], canal[1], canal[0], canal[1]]
-    ray_dirs = [canal_x, canal_x, -canal_x, -canal_x]
+    canal_x_edges = [
+        canal[0], 0.7 * canal[0] + 0.3 * canal[1], 0.4 * canal[0] + 0.6 * canal[1], canal[1],
+        canal[0], 0.7 * canal[0] + 0.3 * canal[1], 0.4 * canal[0] + 0.6 * canal[1], canal[1],
+    ]
+    ray_dirs = [
+        canal_x, canal_x, canal_x, canal_x,
+        -canal_x, -canal_x, -canal_x, -canal_x,
+    ]
 
     global init_volume_wp
     with wp.ScopedTimer('', print=False) as t:
@@ -433,7 +453,7 @@ def on_3_tab():
             init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
 
         canal_x_edges = wp.array(canal_x_edges, dtype=wp.vec3)
-        wp.launch(kernel=tl.kernel.volume_query_rays, dim=(len(canal_x_edges),), inputs=[
+        wp.launch(kernel=tl.wp.volume_query_rays, dim=(len(canal_x_edges),), inputs=[
             init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             canal_x_edges, wp.array(ray_dirs, dtype=wp.vec3),
             main_region_spacing, 1e6, 500.0,
@@ -441,14 +461,14 @@ def on_3_tab():
         ])
         canal_x_edges = canal_x_edges.numpy()  # - np.array(ray_dirs) * 2.0
 
-        canal_x_edges = canal_x_edges.reshape((2, 2, 3)).astype(float)
+        canal_x_edges = canal_x_edges.reshape((2, -1, 3)).astype(float)
         canal_rx = 0.5 * np.linalg.norm(canal_x_edges[0, :] - canal_x_edges[1, :], axis=1)
         canal_ry = 0.8 * canal_rx
 
         canal_centers = np.mean(canal_x_edges, axis=0)
         canal_y_edges = np.array([
-            [canal_centers[_] + canal_y * canal_ry[_] for _ in range(2)],
-            [canal_centers[_] - canal_y * canal_ry[_] for _ in range(2)],
+            [canal_centers[_] + canal_y * canal_ry[_] for _ in range(canal_x_edges.shape[1])],
+            [canal_centers[_] - canal_y * canal_ry[_] for _ in range(canal_x_edges.shape[1])],
         ])
 
         splines = np.array([
@@ -456,33 +476,41 @@ def on_3_tab():
                 _ := neck[0],
                 _ * 0.9 + canal_x_edges[0, 0] * 0.1 + canal_x * 2,
                 canal_x_edges[0, 0],
-                canal_x_edges[0, 1] + canal_z * 2,
                 canal_x_edges[0, 1],
+                canal_x_edges[0, 2],
+                canal_x_edges[0, 3] + canal_z * 2,
+                canal_x_edges[0, 3],
             ],
             [
                 _ := neck_center + canal_y * neck_ry,
                 _ * 0.9 + canal_y_edges[0, 0] * 0.1,
                 canal_y_edges[0, 0],
-                canal_y_edges[0, 1] + canal_z * 2,
                 canal_y_edges[0, 1],
+                canal_y_edges[0, 2],
+                canal_y_edges[0, 3] + canal_z * 2,
+                canal_y_edges[0, 3],
             ],
             [
                 _ := neck[1],
                 _ * 0.9 + canal_x_edges[1, 0] * 0.1,
                 canal_x_edges[1, 0],
-                canal_x_edges[1, 1] + canal_z * 2,
                 canal_x_edges[1, 1],
+                canal_x_edges[1, 2],
+                canal_x_edges[1, 3] + canal_z * 2,
+                canal_x_edges[1, 3],
             ],
             [
                 _ := neck_center - canal_y * neck_ry,
                 _ * 0.9 + canal_y_edges[1, 0] * 0.1,
                 canal_y_edges[1, 0],
-                canal_y_edges[1, 1] + canal_z * 2,
                 canal_y_edges[1, 1],
+                canal_y_edges[1, 2],
+                canal_y_edges[1, 3] + canal_z * 2,
+                canal_y_edges[1, 3],
             ],
         ])
 
-        _ = tl.cad.femoral_prothesis(splines)
+        _ = tl.cq.femoral_prothesis(splines)
         femoral_mesh = wp.Mesh(wp.array(_[0], wp.vec3), wp.array(_[1].flatten(), wp.int32),
                                support_winding_number=True)
 
@@ -490,7 +518,7 @@ def on_3_tab():
         main_region_length = main_region_max - main_region_min
 
         femur_image_xz_ui = wp.full(shape=(main_region_size[0], main_region_size[2]), value=0, dtype=wp.uint8)
-        wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
+        wp.launch(kernel=tl.wp.volume_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
             init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             femur_image_xz_ui, wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
@@ -499,10 +527,10 @@ def on_3_tab():
 
         femur_image_xz_ui = femur_image_xz_ui.numpy()
         femur_image_xz_ui = np.tile(femur_image_xz_ui[:, :, np.newaxis], (1, 1, 3))
-
         femur_image_xz_ui = wp.array(femur_image_xz_ui, dtype=wp.vec3)
-        wp.launch(kernel=tl.kernel.mesh_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
-            femoral_mesh.id, wp.vec3(0.0, 0.5, 1.0),
+
+        wp.launch(kernel=tl.wp.mesh_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
+            femoral_mesh.id, wp.vec3(np.array(femur_stem_rgb) / 255.0),
             femur_image_xz_ui, wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
             main_region_length[1],
@@ -522,25 +550,36 @@ def on_3_tab():
 
             size = tuple(max(round(2 * _ / main_region_spacing), 1) for _ in (rx, ry))
             image = wp.full(shape=size, value=0, dtype=wp.uint8)
-            wp.launch(kernel=tl.kernel.volume_slice, dim=image.shape, inputs=[
+            wp.launch(kernel=tl.wp.volume_slice, dim=image.shape, inputs=[
                 init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
                 image, wp.vec3(o), main_region_spacing,
                 wp.vec3(canal_x), wp.vec3(canal_y),
                 *main_region_window,
-                femoral_mesh.id, 1e6,
             ])
-            femur_image_xy_ui.append(image.numpy().swapaxes(0, 1))
+
+            image = image.numpy()
+            image = np.tile(image[:, :, np.newaxis], (1, 1, 3))
+            image = wp.array(image, dtype=wp.vec3)
+
+            wp.launch(kernel=tl.wp.mesh_slice, dim=image.shape, inputs=[
+                femoral_mesh.id, 1e6,
+                wp.vec3(np.array(femur_stem_rgb) / 255.0), 0.5,
+                image, wp.vec3(o), main_region_spacing,
+                wp.vec3(canal_x), wp.vec3(canal_y),
+            ])
+
+            femur_image_xy_ui.append(image.numpy().astype(np.uint8).swapaxes(0, 1))
 
     gr.Success(f'切片成功 {t.elapsed:.1f} ms')
 
     return {
         _3_femur_image_xz: gr.Image(
             femur_image_xz_ui, image_mode='RGB', label='股骨柄透视',
-            show_download_button=False, interactive=False,
+            show_download_button=False, interactive=False, visible=True,
         ),
         _3_femur_image_xy: gr.Gallery(
             femur_image_xy_ui, label='股骨柄截面',
-            object_fit='contain', selected_index=0, columns=1, interactive=False,
+            object_fit='contain', selected_index=0, columns=1, interactive=False, visible=True,
         ),
     }
 
@@ -558,12 +597,12 @@ if __name__ == '__main__':
             - 载入源数据(.nii.gz)，或存档(.save)
             ''')
 
-            _0_save_select = gr.FileExplorer()
+            _0_select = gr.FileExplorer()
 
             with gr.Row():
-                _0_save_load = gr.Button()
-                _0_save_upload = gr.UploadButton()
-                gr.Column(scale=1)
+                _0_load = gr.Button()
+                _0_upload = gr.UploadButton()
+                _0_unload = gr.Button()
 
         with gr.Tab('识别主区') as _1_tab:
             gr.Markdown('''
@@ -614,35 +653,50 @@ if __name__ == '__main__':
             _3_femur_image_xz = gr.Image()
 
         # 控件集合
-        all_ui = [[ui for name, ui in globals().items() if name.startswith(f'_{_}_')] for _ in range(4)]
+        all_ui = [[ui for name, ui in globals().items() if name.startswith(f'_{_}_') and 'tab' not in name]
+                  for _ in range(4)]
 
         _0_save.click(  # 保存
             on_0_save,
         ).then(
-            lambda: gr.FileExplorer(root_dir=tl.fs_dir), None, _0_save_select,
+            lambda: gr.FileExplorer(root_dir=tl.fs_dir), None, _0_select,
         ).then(
-            lambda: gr.FileExplorer(root_dir=tl.save_dir), None, _0_save_select,
+            lambda: gr.FileExplorer(root_dir=tl.save_dir), None, _0_select,
         )
 
-        _0_save_upload.upload(  # 上传
+        _0_upload.upload(  # 上传
             fn=on_0_upload,
-            inputs=_0_save_upload,
+            inputs=_0_upload,
             outputs=None,
             trigger_mode='once',
         ).then(
-            lambda: gr.FileExplorer(root_dir=tl.fs_dir), None, _0_save_select,
+            lambda: gr.FileExplorer(root_dir=tl.fs_dir), None, _0_select,
         ).then(
-            lambda: gr.FileExplorer(root_dir=tl.save_dir), None, _0_save_select,
+            lambda: gr.FileExplorer(root_dir=tl.save_dir), None, _0_select,
         )
 
-        _0_save_load.click(  # 载入
-            on_0_load, _0_save_select, trigger_mode='once',
+        _0_load.click(  # 载入
+            on_0_load, _0_select, trigger_mode='once',
         ).success(
             on_0_tab, None, all_ui[0],
         ).success(
             on_1_tab, None, all_ui[1],
         ).success(
             on_2_tab, None, all_ui[2],
+        ).success(
+            on_3_tab, None, all_ui[3],
+        )
+
+        _0_unload.click(  # 重启
+            on_0_unload, None, trigger_mode='once',
+        ).success(
+            on_0_tab, None, all_ui[0],
+        ).success(
+            on_1_tab, None, all_ui[1],
+        ).success(
+            on_2_tab, None, all_ui[2],
+        ).success(
+            on_3_tab, None, all_ui[3],
         )
 
         for ui in (_ := [_1_main_region_r, _1_main_region_a, _1_main_region_i,
@@ -670,7 +724,15 @@ if __name__ == '__main__':
         _3_tab.select(on_3_tab, None, all_ui[3])
 
         # 刷新网页
-        app.load(on_0_tab, None, all_ui[0])
+        app.load(
+            on_0_tab, None, all_ui[0],
+        ).success(
+            on_1_tab, None, all_ui[1],
+        ).success(
+            on_2_tab, None, all_ui[2],
+        ).success(
+            on_3_tab, None, all_ui[3],
+        )
 
         # 启动网页
         app.launch(share=True, show_api=False, max_file_size=gr.FileSize.GB, pwa=True)

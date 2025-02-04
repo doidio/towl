@@ -88,7 +88,8 @@ def mesh_ray_parallel(
     q = wp.mesh_query_ray(
         mesh, ray_start, image_z_axis, image_z_depth,
     )
-    if q.result:  # 物理光照参数
+    if q.result:
+        # 物理光照参数
         view_dir = -wp.normalize(image_z_axis)  # 视线方向
         normal = wp.normalize(q.normal)
 
@@ -133,12 +134,32 @@ def mesh_ray_parallel(
 
 
 @wp.kernel
+def mesh_slice(
+        mesh: wp.uint64, mesh_max_dist: wp.float32, base_color: wp.vec3, opacity: float,
+        image: wp.array(dtype=wp.vec3, ndim=2), image_origin: wp.vec3, image_iso_spacing: float,
+        image_x_axis: wp.vec3, image_y_axis: wp.vec3,
+):
+    i, j = wp.tid()
+
+    position = image_origin
+    position += float(i) * image_iso_spacing * image_x_axis
+    position += float(j) * image_iso_spacing * image_y_axis
+
+    opacity = wp.clamp(opacity, 0.0, 1.0)
+
+    if mesh > wp.uint64(0):
+        if wp.mesh_query_point_sign_normal(
+                mesh, position, mesh_max_dist, wp.float32(1e-3),
+        ).sign < 0:
+            image[i, j] = opacity * base_color * 255.0 + (1.0 - opacity) * image[i, j]
+
+
+@wp.kernel
 def volume_slice(
         volume: wp.uint64, volume_origin: wp.vec3, volume_spacing: wp.vec3,
         image: wp.array(dtype=wp.uint8, ndim=2), image_origin: wp.vec3, image_iso_spacing: float,
         image_x_axis: wp.vec3, image_y_axis: wp.vec3,
         window_min: float, window_max: float,
-        mesh: wp.uint64, mesh_max_dist: wp.float32,
 ):
     i, j = wp.tid()
 
@@ -151,11 +172,5 @@ def volume_slice(
 
     pixel = wp.round((pixel - window_min) / (window_max - window_min) * 255.0)
     pixel = wp.clamp(pixel, 0.0, 255.0)
-
-    if mesh > wp.uint64(0):
-        if wp.mesh_query_point_sign_normal(
-                mesh, position, mesh_max_dist, wp.float32(1e-3),
-        ).sign < 0:
-            pixel = (pixel + 255.0) * 0.5
 
     image[i, j] = wp.uint8(pixel)

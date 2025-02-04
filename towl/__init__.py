@@ -5,8 +5,8 @@ from pathlib import Path
 import gradio as gr
 from loguru import logger
 
-import towl.kernel
-import towl.cad
+import towl.wp
+import towl.cq
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
