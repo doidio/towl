@@ -11,7 +11,7 @@ import warp as wp
 import towl as tl
 import towl.save_pb2 as pb
 
-g_keys = set(globals().keys())
+g_default = set(globals().keys())
 
 init_filename: Optional[str] = None
 
@@ -51,7 +51,7 @@ kp_image_xy: Optional[np.ndarray] = None
 
 femur_stem_rgb = [127, 191, 255]
 
-g_default = {_: globals()[_] for _ in globals() if _ not in g_keys}
+g_default = {_: globals()[_] for _ in globals() if _ not in g_default}
 
 
 def on_0_save():

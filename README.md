@@ -2,7 +2,7 @@
 
 > 数字医工开源平台
 
-## 设计原则
+## Strategic choices
 
 > #### 体素优于面网格
 > 相比三维重建之后的三角面片模型，医学专家更擅长阅读原始图像体素，直接洞察解剖细节
@@ -28,13 +28,11 @@
 - [CUDA Requirements](https://nvidia.github.io/warp/installation.html#cuda-requirements)
 - [CUDA Driver](https://www.nvidia.com/en-us/software/nvidia-app)
 - [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads)
-- [PyTorch](https://pytorch.org/get-started/locally)
-- [SAM2](https://github.com/facebookresearch/sam2)
 
 #### Python 3.11
 
 ```shell
-pip install -U numpy loguru gradio protobuf itk warp-lang cadquery usd-core
+pip install -U numpy loguru gradio protobuf itk warp-lang cadquery gmsh
 ```
 
 ## 启动应用

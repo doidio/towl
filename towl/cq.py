@@ -1,20 +1,36 @@
+import tempfile
+from pathlib import Path
+
 import cadquery as cq
 import cadquery.func
+import gmsh
 import numpy as np
-from vtkmodules.numpy_interface.dataset_adapter import WrapDataObject
 
 
-def _shape_to_mesh(shape, tol: float = 1e-3, atol: float = 1e-1, normals: bool = False):
-    obj = WrapDataObject(shape.toVtkPolyData(tolerance=tol, angularTolerance=atol, normals=normals))
+def _shape_to_mesh(shape, tol: float = 1.0):
+    try:
+        gmsh.clear()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            f = Path(tmpdir) / '.step'
+            cq.exporters.export(shape, f.as_posix())
+            gmsh.merge(f.as_posix())
 
-    if np.all(obj.Polygons.reshape((-1, 4))[:, 0] == 3):
-        points = np.array(obj.Points, dtype=float)
-        triangles = np.array(obj.Polygons.reshape((-1, 4))[:, 1:], dtype=float)
-        point_normals = np.array(obj.PointData['Normals'], dtype=float)
-        triangle_normals = np.array(obj.CellData['Normals'], dtype=float)
-        return points, triangles, point_normals, triangle_normals
-    else:
-        raise RuntimeError('Non-triangle mesh')
+        gmsh.model.mesh.setSize(gmsh.model.getEntities(0), tol)
+        gmsh.model.mesh.generate(3)
+        # gmsh.model.mesh.optimize('Netgen')
+
+        nodes = gmsh.model.mesh.get_nodes(-1, -1, False, False)
+        node0 = np.min(nodes[0])
+
+        points = nodes[1]
+        triangles = gmsh.model.mesh.get_elements(2)[2][0].reshape((3, -1)) - node0
+        tetrahedrons = gmsh.model.mesh.get_elements(3)[2][0].reshape((4, -1)) - node0
+    except Exception as e:
+        raise e
+    finally:
+        gmsh.clear()
+
+    return points, triangles, tetrahedrons
 
 
 def femoral_prothesis(splines):
@@ -22,4 +38,4 @@ def femoral_prothesis(splines):
     solid = cq.func.loft(*splines, splines[0])
     caps = [cq.func.face(solid.edges(_)) for _ in ('>Z', '<Z')]
     solid = cq.func.solid([*caps, solid.faces()])
-    return _shape_to_mesh(solid, 1e-5, 1e-1, True)
+    return _shape_to_mesh(solid)

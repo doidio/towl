@@ -2,11 +2,12 @@ import locale
 import os
 from pathlib import Path
 
+import gmsh
 import gradio as gr
 from loguru import logger
 
-import towl.wp
 import towl.cq
+import towl.wp
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
@@ -26,3 +27,5 @@ theme = [
     gr.themes.Soft(),
 ][3]
 logger.debug(f'[theme] {theme.__class__.__name__}')
+
+gmsh.initialize()
