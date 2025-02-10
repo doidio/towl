@@ -1,18 +1,10 @@
 //  [python]
 //  python -m pip install grpcio grpcio-tools
-//  python -m grpc_tools.protoc -I . --python_out=. --pyi_out=. --grpc_python_out=. save.proto
-
-//  [swift]
-//  brew install grpc-swift
-//  protoc --swift_out=. --grpc-swift_out=. --swift_opt=Visibility=Public save.proto
+//  python -m grpc_tools.protoc -I towl --python_out=towl --pyi_out=towl save.proto
 
 syntax = "proto3";
 
 package save;
-
-enum Version {
-  RPC250120 = 0;
-}
 
 enum DataType {
   UINT8 = 0;
@@ -54,6 +46,7 @@ message SaveTotalHip {
   optional Volume init_volume = 1;
   optional KeyBox main_region = 2;
 
-  optional string kp_name = 3;
-  optional KeyPoints kp_positions = 4;
+  bool xinv = 3;
+  optional string kp_name = 4;
+  optional KeyPoints kp_positions = 5;
 }

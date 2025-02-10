@@ -6,16 +6,11 @@ from typing import ClassVar as _ClassVar, Iterable as _Iterable, Mapping as _Map
 
 DESCRIPTOR: _descriptor.FileDescriptor
 
-class Version(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
-    __slots__ = ()
-    RPC250120: _ClassVar[Version]
-
 class DataType(int, metaclass=_enum_type_wrapper.EnumTypeWrapper):
     __slots__ = ()
     UINT8: _ClassVar[DataType]
     INT16: _ClassVar[DataType]
     FLOAT64: _ClassVar[DataType]
-RPC250120: Version
 UINT8: DataType
 INT16: DataType
 FLOAT64: DataType
@@ -75,13 +70,15 @@ class KeyBox(_message.Message):
     def __init__(self, min: _Optional[_Union[Floats, _Mapping]] = ..., max: _Optional[_Union[Floats, _Mapping]] = ...) -> None: ...
 
 class SaveTotalHip(_message.Message):
-    __slots__ = ("init_volume", "main_region", "kp_name", "kp_positions")
+    __slots__ = ("init_volume", "main_region", "xinv", "kp_name", "kp_positions")
     INIT_VOLUME_FIELD_NUMBER: _ClassVar[int]
     MAIN_REGION_FIELD_NUMBER: _ClassVar[int]
+    XINV_FIELD_NUMBER: _ClassVar[int]
     KP_NAME_FIELD_NUMBER: _ClassVar[int]
     KP_POSITIONS_FIELD_NUMBER: _ClassVar[int]
     init_volume: Volume
     main_region: KeyBox
+    xinv: bool
     kp_name: str
     kp_positions: KeyPoints
-    def __init__(self, init_volume: _Optional[_Union[Volume, _Mapping]] = ..., main_region: _Optional[_Union[KeyBox, _Mapping]] = ..., kp_name: _Optional[str] = ..., kp_positions: _Optional[_Union[KeyPoints, _Mapping]] = ...) -> None: ...
+    def __init__(self, init_volume: _Optional[_Union[Volume, _Mapping]] = ..., main_region: _Optional[_Union[KeyBox, _Mapping]] = ..., xinv: bool = ..., kp_name: _Optional[str] = ..., kp_positions: _Optional[_Union[KeyPoints, _Mapping]] = ...) -> None: ...

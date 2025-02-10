@@ -34,12 +34,17 @@ main_region_origin: Optional[np.ndarray] = None
 main_image_xy: Optional[np.ndarray] = None
 main_image_xz: Optional[np.ndarray] = None
 
+xinv = -1
+
 kp_names = ['骨盆髂前上棘', '骨盆耻骨结节']
 kp_names = [f'左侧{_}' for _ in kp_names] + [f'右侧{_}' for _ in kp_names]
-kp_names += ['股骨颈口上缘', '股骨颈口下缘', '股骨小粗隆髓腔中心', '股骨柄末端髓腔中心']
+kp_names += [
+    '股骨柄颈锥圆心',
+    '股骨颈口上缘', '股骨颈口下缘', '股骨小粗隆髓腔中心', '股骨柄末端髓腔中心',
+]
 
 kp_select_rgb = [255, 127, 127]
-kp_deselect_rgb = [0, 127, 255]
+kp_deselect_rgb = [85, 170, 255]
 kp_deselect_radius = 5
 
 kp_name_none = '取消选中'
@@ -49,7 +54,7 @@ kp_positions = {}
 kp_image_xz: Optional[np.ndarray] = None
 kp_image_xy: Optional[np.ndarray] = None
 
-femur_stem_rgb = [127, 191, 255]
+femur_stem_rgb = [85, 170, 255]
 
 g_default = {_: globals()[_] for _ in globals() if _ not in g_default}
 
@@ -81,6 +86,8 @@ def on_0_save():
 
     if kp_name is not None:
         save.kp_name = kp_name
+
+    save.xinv = xinv < 0
 
     if len(kp_positions) > 0:
         save.kp_positions.CopyFrom(pb.KeyPoints(
@@ -116,7 +123,7 @@ def on_0_load(filename):
     global init_filename, init_volume, init_volume_wp
     global init_volume_size, init_volume_spacing, init_volume_origin, init_volume_length
     global main_region_min, main_region_max
-    global kp_name, kp_positions
+    global xinv, kp_name, kp_positions
 
     if f.name.lower().endswith(suffix := '.save'):
         gr.Info('正在载入存档')
@@ -139,6 +146,8 @@ def on_0_load(filename):
         if save.HasField('main_region'):
             main_region_min = np.array(save.main_region.min.values)
             main_region_max = np.array(save.main_region.max.values)
+
+        xinv = -1 if save.xinv else 1
 
         if save.HasField('kp_name'):
             kp_name = save.kp_name
@@ -186,6 +195,11 @@ def on_1_main_region(r, a, i, l, p, s):
     global main_region_min, main_region_max
     main_region_min = np.min([[r, a, i], [l, p, s]], axis=0)
     main_region_max = np.max([[r, a, i], [l, p, s]], axis=0)
+
+
+def on_2_op_side(index):
+    global xinv
+    xinv = 1 if index > 0 else -1
 
 
 def on_2_kp_name(name):
@@ -249,14 +263,14 @@ def on_1_tab():
         if init_volume_wp is None:
             init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
 
-        wp.launch(kernel=tl.wp.volume_ray_parallel, dim=image[0].shape, inputs=[
+        wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=image[0].shape, inputs=[
             init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             image[0], wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1),
             main_region_length[2], main_region_window[0], *main_region_window,
         ])
 
-        wp.launch(kernel=tl.wp.volume_ray_parallel, dim=image[1].shape, inputs=[
+        wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=image[1].shape, inputs=[
             init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             image[1], wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
@@ -356,7 +370,7 @@ def on_2_tab():
                 init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
 
             kp_image_xy_ui = wp.full(shape=(main_region_size[0], main_region_size[1]), value=0, dtype=wp.uint8)
-            wp.launch(kernel=tl.wp.volume_slice, dim=kp_image_xy_ui.shape, inputs=[
+            wp.launch(kernel=tl.kernel.volume_slice, dim=kp_image_xy_ui.shape, inputs=[
                 init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
                 kp_image_xy_ui, wp.vec3(origin), main_region_spacing,
                 wp.vec3(1, 0, 0), wp.vec3(0, 1, 0),
@@ -395,6 +409,10 @@ def on_2_tab():
     kp_image_xz_ui = np.flipud(kp_image_xz_ui.swapaxes(0, 1))
 
     return {
+        _2_op_side: gr.Radio(
+            _ := ['右侧', '左侧'],
+            value=_[int(xinv > 0)], label='术侧', type='index', visible=True,
+        ),
         _2_kp_name: gr.Radio(
             [kp_name_none, *kp_names],
             value=kp_name, label='解剖标志', visible=True,
@@ -414,12 +432,14 @@ def on_2_tab():
 
 
 def on_3_tab():
+    taper_center = kp_positions.get('股骨柄颈锥圆心')
     neck = [kp_positions.get(_) for _ in ('股骨颈口上缘', '股骨颈口下缘')]
     canal = [kp_positions.get(_) for _ in ('股骨小粗隆髓腔中心', '股骨柄末端髓腔中心')]
 
-    if None in neck + canal:
+    if any([_ is None for _ in [taper_center] + neck + canal]):
         return {ui: ui.__class__(visible=False) for ui in all_ui[3]}
 
+    taper_center = np.array(taper_center)
     neck = np.array(neck)
     canal = np.array(canal)
 
@@ -427,10 +447,10 @@ def on_3_tab():
     neck_x = neck[0] - neck[1]
     neck_rx = 0.5 * np.linalg.norm(neck_x)
     neck_ry = 0.5 * neck_rx
-    # neck_z = neck_center - canal[0]
-    # neck_y = np.cross(neck_z, neck_x)
-    # neck_z = np.cross(neck_x, neck_y)
-    # neck_x, neck_y, neck_z = [_ / np.linalg.norm(_) for _ in (neck_x, neck_y, neck_z)]
+    neck_z = neck_center - canal[0]
+    neck_y = np.cross(neck_z, neck_x)
+    neck_z = np.cross(neck_x, neck_y)
+    neck_x, neck_y, neck_z = [_ / np.linalg.norm(_) for _ in (neck_x, neck_y, neck_z)]
 
     canal_z = canal[0] - canal[1]
     canal_x = canal[0] - neck[1]
@@ -453,7 +473,7 @@ def on_3_tab():
             init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
 
         canal_x_edges = wp.array(canal_x_edges, dtype=wp.vec3)
-        wp.launch(kernel=tl.wp.volume_query_rays, dim=(len(canal_x_edges),), inputs=[
+        wp.launch(kernel=tl.kernel.volume_query_rays, dim=(len(canal_x_edges),), inputs=[
             init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             canal_x_edges, wp.array(ray_dirs, dtype=wp.vec3),
             main_region_spacing, 1e6, 500.0,
@@ -510,7 +530,7 @@ def on_3_tab():
             ],
         ])
 
-        _ = tl.cq.femoral_prothesis(splines)
+        _ = tl.mesh.femoral_prothesis(splines, taper_center, neck_x)
         femoral_mesh = wp.Mesh(wp.array(_[0], wp.vec3), wp.array(_[1].flatten(), wp.int32),
                                support_winding_number=True)
 
@@ -518,7 +538,7 @@ def on_3_tab():
         main_region_length = main_region_max - main_region_min
 
         femur_image_xz_ui = wp.full(shape=(main_region_size[0], main_region_size[2]), value=0, dtype=wp.uint8)
-        wp.launch(kernel=tl.wp.volume_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
+        wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
             init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             femur_image_xz_ui, wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
@@ -529,7 +549,7 @@ def on_3_tab():
         femur_image_xz_ui = np.tile(femur_image_xz_ui[:, :, np.newaxis], (1, 1, 3))
         femur_image_xz_ui = wp.array(femur_image_xz_ui, dtype=wp.vec3)
 
-        wp.launch(kernel=tl.wp.mesh_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
+        wp.launch(kernel=tl.kernel.mesh_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
             femoral_mesh.id, wp.vec3(np.array(femur_stem_rgb) / 255.0),
             femur_image_xz_ui, wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
@@ -546,14 +566,14 @@ def on_3_tab():
         for i in range(20):
             i = i / 20.0
             c = P * (1 - i) + canal[1] * i
-            o = c - rx * canal_x - ry * canal_y
+            o = c - rx * canal_x * xinv - ry * canal_y
 
             size = tuple(max(round(2 * _ / main_region_spacing), 1) for _ in (rx, ry))
             image = wp.full(shape=size, value=0, dtype=wp.uint8)
-            wp.launch(kernel=tl.wp.volume_slice, dim=image.shape, inputs=[
+            wp.launch(kernel=tl.kernel.volume_slice, dim=image.shape, inputs=[
                 init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
                 image, wp.vec3(o), main_region_spacing,
-                wp.vec3(canal_x), wp.vec3(canal_y),
+                wp.vec3(canal_x * xinv), wp.vec3(canal_y),
                 *main_region_window,
             ])
 
@@ -561,11 +581,11 @@ def on_3_tab():
             image = np.tile(image[:, :, np.newaxis], (1, 1, 3))
             image = wp.array(image, dtype=wp.vec3)
 
-            wp.launch(kernel=tl.wp.mesh_slice, dim=image.shape, inputs=[
+            wp.launch(kernel=tl.kernel.mesh_slice, dim=image.shape, inputs=[
                 femoral_mesh.id, 1e6,
                 wp.vec3(np.array(femur_stem_rgb) / 255.0), 0.5,
                 image, wp.vec3(o), main_region_spacing,
-                wp.vec3(canal_x), wp.vec3(canal_y),
+                wp.vec3(canal_x * xinv), wp.vec3(canal_y),
             ])
 
             femur_image_xy_ui.append(image.numpy().astype(np.uint8).swapaxes(0, 1))
@@ -633,6 +653,7 @@ if __name__ == '__main__':
             - 在图像中定位解剖标志，正位透视定位左右(X)上下(Z)坐标，轴位切片定位左右(X)前后(Y)坐标
             ''')
 
+            _2_op_side = gr.Radio()
             _2_kp_name = gr.Radio()
 
             with gr.Row():
@@ -645,12 +666,11 @@ if __name__ == '__main__':
 
         with gr.Tab('生成股骨柄') as _3_tab:
             gr.Markdown('''
-            - CAD几何造型，细分面网格为wp.Mesh，使用wp.mesh_query_ray叠加渲染
-            - wp.sim, add_shape_sdf, add_soft_mesh
+            - 根据股骨颈口、髓腔形态，参数化自动生成相匹配的股骨柄假体外形
             ''')
 
-            _3_femur_image_xy = gr.Gallery()
             _3_femur_image_xz = gr.Image()
+            _3_femur_image_xy = gr.Gallery()
 
         # 控件集合
         all_ui = [[ui for name, ui in globals().items() if name.startswith(f'_{_}_') and 'tab' not in name]
@@ -701,9 +721,13 @@ if __name__ == '__main__':
 
         for ui in (_ := [_1_main_region_r, _1_main_region_a, _1_main_region_i,
                          _1_main_region_l, _1_main_region_p, _1_main_region_s]):
-            ui.release(
+            ui.input(
                 on_1_main_region, _, trigger_mode='once',
             ).success(on_1_tab, None, all_ui[1])
+
+        _2_op_side.select(  # 术侧
+            on_2_op_side, _2_op_side, trigger_mode='once',
+        ).success(on_2_tab, None, all_ui[2])
 
         _2_kp_name.select(  # 解剖标志
             on_2_kp_name, _2_kp_name, trigger_mode='once',
