@@ -20,11 +20,11 @@ def _shape_to_mesh(shape, tol: float = 1.0):
         # gmsh.model.mesh.optimize('Netgen')
 
         nodes = gmsh.model.mesh.get_nodes(-1, -1, False, False)
-        node0 = np.min(nodes[0])
+        node0 = int(np.min(nodes[0]))
 
-        points = nodes[1]
-        triangles = gmsh.model.mesh.get_elements(2)[2][0].reshape((3, -1)) - node0
-        tetrahedrons = gmsh.model.mesh.get_elements(3)[2][0].reshape((4, -1)) - node0
+        points = nodes[1].astype(float).reshape(-1, 3)
+        triangles = gmsh.model.mesh.get_elements(2)[2][0].astype(int).reshape(-1, 3) - node0
+        tetrahedrons = gmsh.model.mesh.get_elements(3)[2][0].astype(int).reshape(-1, 4) - node0
     except Exception as e:
         raise e
     finally:

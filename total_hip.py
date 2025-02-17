@@ -7,6 +7,7 @@ import gradio as gr
 import itk
 import numpy as np
 import warp as wp
+import warp.sim
 
 import towl as tl
 import towl.save_pb2 as pb
@@ -56,7 +57,9 @@ kp_image_xy: Optional[np.ndarray] = None
 
 femur_stem_rgb = [85, 170, 255]
 
-g_default = {_: globals()[_] for _ in globals() if _ not in g_default}
+femur_mesh: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
+
+g_default = {_: globals()[_] for _ in globals() if _ not in g_default and _ != 'g_default'}
 
 
 def on_0_save():
@@ -187,6 +190,7 @@ def on_0_load(filename):
 
 
 def on_0_unload():
+    print(g_default)
     globals().update(g_default)
     gr.Success('重置成功')
 
@@ -233,6 +237,101 @@ def on_2_image_xy_select(evt: gr.SelectData, _):
         kp_positions[kp_name] = [p0, p1, p[2]]
     else:
         raise gr.Error(f'数据错误 {kp_name} {p}', print_exception=False)
+
+
+def on_femur_sim():
+    if femur_mesh is None:
+        raise gr.Error('缺少股骨柄网格体', print_exception=False)
+
+    builder = wp.sim.ModelBuilder((0.0, 0.0, 1.0))
+
+    v3f = femur_mesh[0]
+    # v3i = femur_mesh[1].flatten()
+    v4i = femur_mesh[2].flatten()
+    
+    # mesh = wp.sim.Mesh(v3f.tolist(), v3i.tolist())
+    # builder.add_shape_mesh(
+    #     body=builder.add_body(),
+    #     mesh=mesh,
+    #     ke=1e5,
+    #     kd=2.5e2,
+    #     kf=5e2,
+    #     density=1e3,
+    # )
+
+    builder.add_soft_mesh(
+        pos=wp.vec3(0.0),
+        rot=wp.quat_identity(),
+        scale=1.0,
+        vel=wp.vec3(0.0),
+        vertices=[wp.vec3(_) for _ in v3f],
+        indices=v4i.tolist(),
+        density=1.0,
+        k_mu=2000.0,
+        k_lambda=2000.0,
+        k_damp=2.0,
+        tri_ke=0.0,
+        tri_ka=1e-8,
+        tri_kd=0.0,
+        tri_drag=0.0,
+        tri_lift=0.0,
+    )
+
+    ## 为什么不能用刚体模拟股骨髓腔？
+    # 骨皮质的阈值边界不光滑，刚体无法模拟扩髓的塑性变形，噪声边界造成错误干涉和反弹
+
+    ## 为什么不能用软体模拟股骨髓腔？
+    # 不能完全避免骨松质噪声干涉，并且可能导致骨皮质错误柔软，以及数值崩溃
+
+    ## 为什么可以用SPH流体模拟股骨髓腔？
+    # 流体各项异性物理属性符合骨皮质、骨松质的差异特性
+    # 流体无拓扑约束能模拟骨松质塑性变形
+    # 流体压力源于局部密度可以减弱噪声影响
+
+    ## 为什么要用FEM软体模拟股骨柄？
+    # 软体顶点受力，与流体粒子受力方式一致，而刚体不易计算多点受力的质心等效合力
+
+    model = builder.finalize()
+    model.ground = False
+
+    integrator = wp.sim.SemiImplicitIntegrator()
+    import warp.sim.render
+    renderer = wp.sim.render.SimRenderer(model, 'femur.usd')
+
+    state_0 = model.state()
+    state_1 = model.state()
+
+    wp.sim.eval_fk(model, model.joint_q, model.joint_qd, None, state_0)
+
+    sim_time = 0.0
+    sim_total_seconds = 5
+    fps = 60
+    frame_dt = 1.0 / fps
+    sim_steps = 10
+    sim_dt = frame_dt / sim_steps
+
+    with wp.ScopedCapture() as capture:
+        for _ in range(sim_steps):
+            state_0.clear_forces()
+            wp.sim.collide(model, state_0)
+            integrator.simulate(model, state_0, state_1, sim_dt)
+            state_0, state_1 = state_1, state_0
+
+    graph = capture.graph
+
+    for _ in range(fps * sim_total_seconds):
+        with wp.ScopedTimer('step', print=False):
+            wp.capture_launch(graph)
+
+        # print(state_1.body_q, state_1.particle_q)
+        sim_time += frame_dt
+
+        with wp.ScopedTimer("render", print=False):
+            renderer.begin_frame(sim_time)
+            renderer.render(state_0)
+            renderer.end_frame()
+
+    renderer.save()
 
 
 def on_0_tab():
@@ -530,9 +629,10 @@ def on_3_tab():
             ],
         ])
 
-        _ = tl.mesh.femoral_prothesis(splines, taper_center, neck_x)
-        femoral_mesh = wp.Mesh(wp.array(_[0], wp.vec3), wp.array(_[1].flatten(), wp.int32),
-                               support_winding_number=True)
+        global femur_mesh
+        femur_mesh = tl.mesh.femoral_prothesis(splines, taper_center, neck_x)
+        mesh = wp.Mesh(wp.array(femur_mesh[0], wp.vec3), wp.array(femur_mesh[1].flatten(), wp.int32),
+                       support_winding_number=True)
 
         global main_region_min, main_region_max, main_region_size, main_region_origin
         main_region_length = main_region_max - main_region_min
@@ -550,7 +650,7 @@ def on_3_tab():
         femur_image_xz_ui = wp.array(femur_image_xz_ui, dtype=wp.vec3)
 
         wp.launch(kernel=tl.kernel.mesh_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
-            femoral_mesh.id, wp.vec3(np.array(femur_stem_rgb) / 255.0),
+            mesh.id, wp.vec3(np.array(femur_stem_rgb) / 255.0),
             femur_image_xz_ui, wp.vec3(main_region_origin), main_region_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
             main_region_length[1],
@@ -582,7 +682,7 @@ def on_3_tab():
             image = wp.array(image, dtype=wp.vec3)
 
             wp.launch(kernel=tl.kernel.mesh_slice, dim=image.shape, inputs=[
-                femoral_mesh.id, 1e6,
+                mesh.id, 1e6,
                 wp.vec3(np.array(femur_stem_rgb) / 255.0), 0.5,
                 image, wp.vec3(o), main_region_spacing,
                 wp.vec3(canal_x * xinv), wp.vec3(canal_y),
@@ -601,6 +701,8 @@ def on_3_tab():
             femur_image_xy_ui, label='股骨柄截面',
             object_fit='contain', selected_index=0, columns=1, interactive=False, visible=True,
         ),
+        _3_femur_sim: gr.Button(visible=True, ),
+        _3_femur_sim_output: gr.Video(visible=True, ),
     }
 
 
@@ -670,7 +772,13 @@ if __name__ == '__main__':
             ''')
 
             _3_femur_image_xz = gr.Image()
-            _3_femur_image_xy = gr.Gallery()
+
+            with gr.Row():
+                _3_femur_image_xy = gr.Gallery()
+
+                with gr.Column():
+                    _3_femur_sim = gr.Button()
+                    _3_femur_sim_output = gr.Video()
 
         # 控件集合
         all_ui = [[ui for name, ui in globals().items() if name.startswith(f'_{_}_') and 'tab' not in name]
@@ -740,6 +848,8 @@ if __name__ == '__main__':
         _2_kp_image_xy.select(  # 轴位切片
             on_2_image_xy_select, _2_kp_image_xy, trigger_mode='once',
         ).success(on_2_tab, None, all_ui[2])
+
+        _3_femur_sim.click(on_femur_sim, None, _3_femur_sim_output)
 
         # 标签页
         _0_tab.select(on_0_tab, None, all_ui[0])

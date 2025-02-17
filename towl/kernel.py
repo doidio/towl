@@ -170,7 +170,7 @@ def mesh_slice(
     opacity = wp.clamp(opacity, 0.0, 1.0)
 
     if mesh > wp.uint64(0):
-        if wp.mesh_query_point_sign_normal(
-                mesh, position, mesh_max_dist, wp.float32(1e-3),
+        if wp.mesh_query_point_sign_winding_number(
+                mesh, position, mesh_max_dist, wp.float32(2.0), wp.float32(0.5),
         ).sign < 0:
             image[i, j] = opacity * base_color * 255.0 + (1.0 - opacity) * image[i, j]
