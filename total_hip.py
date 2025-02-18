@@ -7,7 +7,7 @@ import gradio as gr
 import itk
 import numpy as np
 import warp as wp
-import warp.sim
+import warp.sim  # noqa
 
 import towl as tl
 import towl.save_pb2 as pb
@@ -54,6 +54,15 @@ kp_positions = {}
 
 kp_image_xz: Optional[np.ndarray] = None
 kp_image_xy: Optional[np.ndarray] = None
+
+taper_center: Optional[np.ndarray] = None
+neck_center: Optional[np.ndarray] = None
+neck_x: Optional[np.ndarray] = None
+neck_y: Optional[np.ndarray] = None
+neck_z: Optional[np.ndarray] = None
+canal_x: Optional[np.ndarray] = None
+canal_y: Optional[np.ndarray] = None
+canal_z: Optional[np.ndarray] = None
 
 femur_stem_rgb = [85, 170, 255]
 
@@ -243,12 +252,15 @@ def on_femur_sim():
     if femur_mesh is None:
         raise gr.Error('缺少股骨柄网格体', print_exception=False)
 
-    builder = wp.sim.ModelBuilder((0.0, 0.0, 1.0))
+    if any([_ is None for _ in [neck_center, neck_z]]):
+        raise gr.Error('缺少必要的解剖标志', print_exception=False)
+
+    builder = wp.sim.ModelBuilder((0.0, 0.0, 1.0), 9.8)
 
     v3f = femur_mesh[0]
     # v3i = femur_mesh[1].flatten()
     v4i = femur_mesh[2].flatten()
-    
+
     # mesh = wp.sim.Mesh(v3f.tolist(), v3i.tolist())
     # builder.add_shape_mesh(
     #     body=builder.add_body(),
@@ -310,28 +322,40 @@ def on_femur_sim():
     sim_steps = 10
     sim_dt = frame_dt / sim_steps
 
+    global init_volume_wp
+    with wp.ScopedTimer('', print=False):
+        if init_volume_wp is None:
+            init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
+
     with wp.ScopedCapture() as capture:
         for _ in range(sim_steps):
             state_0.clear_forces()
             wp.sim.collide(model, state_0)
             integrator.simulate(model, state_0, state_1, sim_dt)
+
+            with wp.ScopedTimer('', print=False):
+                wp.launch(kernel=tl.kernel.femoral_prothesis_collision, dim=(state_1.particle_count,), inputs=[
+                    state_1.particle_q, state_1.particle_qd,
+                    init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+                    200.0, wp.vec3(neck_center), wp.vec3(neck_z),
+                ])
+
             state_0, state_1 = state_1, state_0
 
     graph = capture.graph
 
-    for _ in range(fps * sim_total_seconds):
-        with wp.ScopedTimer('step', print=False):
+    with wp.ScopedTimer('', print=False) as t:
+        for _ in range(fps * sim_total_seconds):
             wp.capture_launch(graph)
 
-        # print(state_1.body_q, state_1.particle_q)
-        sim_time += frame_dt
-
-        with wp.ScopedTimer("render", print=False):
             renderer.begin_frame(sim_time)
             renderer.render(state_0)
             renderer.end_frame()
 
+            sim_time += frame_dt
+
     renderer.save()
+    gr.Success(f'模拟完成 {t.elapsed} ms')
 
 
 def on_0_tab():
@@ -531,6 +555,8 @@ def on_2_tab():
 
 
 def on_3_tab():
+    global taper_center, neck_center, neck_x, neck_y, neck_z, canal_x, canal_y, canal_z
+
     taper_center = kp_positions.get('股骨柄颈锥圆心')
     neck = [kp_positions.get(_) for _ in ('股骨颈口上缘', '股骨颈口下缘')]
     canal = [kp_positions.get(_) for _ in ('股骨小粗隆髓腔中心', '股骨柄末端髓腔中心')]

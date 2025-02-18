@@ -174,3 +174,27 @@ def mesh_slice(
                 mesh, position, mesh_max_dist, wp.float32(2.0), wp.float32(0.5),
         ).sign < 0:
             image[i, j] = opacity * base_color * 255.0 + (1.0 - opacity) * image[i, j]
+
+
+@wp.kernel
+def femoral_prothesis_collision(
+        particles: wp.array(dtype=wp.vec3), velocities: wp.array(dtype=wp.vec3),
+        volume: wp.uint64, volume_origin: wp.vec3, volume_spacing: wp.vec3,
+        bound_threshold: float, bound_plane_center: wp.vec3, bound_plane_outer: wp.vec3,
+):
+    i = wp.tid()
+
+    c = particles[i]
+
+    if wp.dot(c - bound_plane_center, bound_plane_outer) > 0:
+        return
+
+    uvw = wp.cw_div(c - volume_origin, volume_spacing)
+    grad = wp.vec3(0.0)
+    pixel = wp.volume_sample_grad_f(volume, uvw, wp.Volume.LINEAR, grad)
+
+    if pixel > bound_threshold:
+        grad = wp.normalize(grad)
+        v = velocities[i]
+        v = v - 2.0 * wp.dot(v, grad) * grad
+        velocities[i] = v
