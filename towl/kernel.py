@@ -177,24 +177,123 @@ def mesh_slice(
 
 
 @wp.kernel
-def femoral_prothesis_collision(
+def femoral_prothesis_collide(
         particles: wp.array(dtype=wp.vec3), velocities: wp.array(dtype=wp.vec3),
+        forces: wp.array(dtype=wp.vec3), gravity: float,
         volume: wp.uint64, volume_origin: wp.vec3, volume_spacing: wp.vec3,
-        bound_threshold: float, bound_plane_center: wp.vec3, bound_plane_outer: wp.vec3,
+        bound_threshold: float,
+        neck_plane_center: wp.vec3, neck_plane_outer: wp.vec3,
+        canal_plane_center: wp.vec3, canal_plane_outer: wp.vec3,
 ):
     i = wp.tid()
 
     c = particles[i]
 
-    if wp.dot(c - bound_plane_center, bound_plane_outer) > 0:
+    if wp.dot(c - neck_plane_center, neck_plane_outer) > 0:
+        forces[i] = wp.normalize(canal_plane_outer) * gravity
         return
 
-    uvw = wp.cw_div(c - volume_origin, volume_spacing)
-    grad = wp.vec3(0.0)
-    pixel = wp.volume_sample_grad_f(volume, uvw, wp.Volume.LINEAR, grad)
+    if wp.dot(c - canal_plane_center, canal_plane_outer) < 0:
+        uvw = wp.cw_div(c - volume_origin, volume_spacing)
+        grad = wp.vec3(0.0)
+        pixel = wp.volume_sample_grad_f(volume, uvw, wp.Volume.LINEAR, grad)
 
-    if pixel > bound_threshold:
-        grad = wp.normalize(grad)
-        v = velocities[i]
-        v = v - 2.0 * wp.dot(v, grad) * grad
-        velocities[i] = v
+        if pixel > bound_threshold:
+            grad = wp.normalize(grad)
+            v = velocities[i]
+            v = v - 2.0 * wp.dot(v, grad) * grad
+            velocities[i] = v
+
+@wp.kernel
+def prothesis_render(
+        volume: wp.uint64, volume_origin: wp.vec3, volume_spacing: wp.vec3,
+        image: wp.array(dtype=wp.vec3, ndim=2), image_origin: wp.vec3, image_iso_spacing: float,
+        image_x_axis: wp.vec3, image_y_axis: wp.vec3, image_z_axis: wp.vec3,
+        image_z_depth: wp.float32,
+        threshold_min: float, window_min: float, window_max: float,
+        mesh: wp.uint64, base_color: wp.vec3,
+        cut_plane_center: wp.vec3, cut_plane_normal: wp.vec3,
+):
+    i, j = wp.tid()
+
+    # volume
+    ray_start = image_origin
+    ray_start += float(i) * image_iso_spacing * image_x_axis
+    ray_start += float(j) * image_iso_spacing * image_y_axis
+
+    step = image_iso_spacing * image_z_axis
+    pixel = float(0)
+
+    n = int(image_z_depth / image_iso_spacing)
+    pixel_n = float(0)
+
+    cut_plane_normal = wp.normalize(cut_plane_normal)
+
+    position = ray_start
+    for k in range(n):
+        position += step
+
+        uvw = wp.cw_div(position - volume_origin, volume_spacing)
+        p = wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR)
+
+        if threshold_min <= p:
+            pixel_n += 1.0
+
+            d = wp.dot(cut_plane_normal, position - cut_plane_center)
+            if d < 0.0:
+                pixel += p
+
+    if pixel_n > 0:
+        pixel /= pixel_n
+
+    pixel = wp.round((pixel - window_min) / (window_max - window_min) * 255.0)
+    pixel = wp.clamp(pixel, 0.0, 255.0)
+    image[i, j] = wp.vec3(pixel)
+
+    # mesh
+    q = wp.mesh_query_ray(
+        mesh, ray_start, image_z_axis, image_z_depth,
+    )
+    if q.result:
+        # 物理光照参数
+        view_dir = -wp.normalize(image_z_axis)  # 视线方向
+        normal = wp.normalize(q.normal)
+
+        metallic_factor = 0.3
+
+        # 基础材质参数
+        ambient_intensity = 0.1
+        ambient = ambient_intensity * base_color
+        shininess = 64  # 高光锐度
+        specular_strength = 0.8 * metallic_factor
+
+        # 光照计算
+        light_dir = wp.normalize(-image_z_axis)
+
+        # 漫反射
+        diffuse = wp.max(wp.dot(normal, light_dir), 0.0)
+
+        # Blinn-Phong 高光
+        H = wp.normalize(light_dir + view_dir)
+        NdotH = wp.max(wp.dot(normal, H), 0.0)
+        specular = specular_strength * wp.pow(NdotH, float(shininess))
+
+        # 菲涅尔效应增强金属感
+        fresnel = (1.0 - wp.max(wp.dot(view_dir, normal), 0.0)) ** 5.0
+        specular += fresnel * metallic_factor
+
+        # 漫反射分量（应用基础颜色和金属度）
+        diffuse_term = (1.0 - metallic_factor) * diffuse * base_color
+
+        # 高光分量（默认白色高光）
+        specular_color = wp.vec3(specular, specular, specular)
+
+        # 组合光照分量
+        final_color = ambient + diffuse_term + specular_color
+        final_color = wp.vec3(
+            wp.clamp(final_color[0], 0.0, 1.0),
+            wp.clamp(final_color[1], 0.0, 1.0),
+            wp.clamp(final_color[2], 0.0, 1.0)
+        )
+
+        image[i, j] = final_color * 255.0

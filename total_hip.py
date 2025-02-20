@@ -255,11 +255,14 @@ def on_femur_sim():
     if any([_ is None for _ in [neck_center, neck_z]]):
         raise gr.Error('缺少必要的解剖标志', print_exception=False)
 
-    builder = wp.sim.ModelBuilder((0.0, 0.0, 1.0), 9.8)
+    canal = [kp_positions.get(_) for _ in ('股骨小粗隆髓腔中心', '股骨柄末端髓腔中心')]
+
+    builder = wp.sim.ModelBuilder((0.0, 0.0, 1.0), 0.0)
 
     v3f = femur_mesh[0]
-    # v3i = femur_mesh[1].flatten()
+    v3i = femur_mesh[1].flatten()
     v4i = femur_mesh[2].flatten()
+    mesh = wp.Mesh(wp.array(v3f, wp.vec3), wp.array(v3i, wp.int32), None, True)
 
     # mesh = wp.sim.Mesh(v3f.tolist(), v3i.tolist())
     # builder.add_shape_mesh(
@@ -271,23 +274,25 @@ def on_femur_sim():
     #     density=1e3,
     # )
 
+    prothesis_a = builder.particle_count
     builder.add_soft_mesh(
-        pos=wp.vec3(0.0),
+        pos=wp.vec3(),
         rot=wp.quat_identity(),
         scale=1.0,
-        vel=wp.vec3(0.0),
+        vel=wp.vec3(),
         vertices=[wp.vec3(_) for _ in v3f],
         indices=v4i.tolist(),
         density=1.0,
-        k_mu=2000.0,
-        k_lambda=2000.0,
+        k_mu=1e5,
+        k_lambda=1.5e5,
         k_damp=2.0,
         tri_ke=0.0,
         tri_ka=1e-8,
         tri_kd=0.0,
-        tri_drag=0.0,
-        tri_lift=0.0,
+        tri_drag=0.1,
+        tri_lift=0.1,
     )
+    prothesis_b = builder.particle_count
 
     ## 为什么不能用刚体模拟股骨髓腔？
     # 骨皮质的阈值边界不光滑，刚体无法模拟扩髓的塑性变形，噪声边界造成错误干涉和反弹
@@ -303,6 +308,9 @@ def on_femur_sim():
     ## 为什么要用FEM软体模拟股骨柄？
     # 软体顶点受力，与流体粒子受力方式一致，而刚体不易计算多点受力的质心等效合力
 
+    ## 为什么不能用FEM软体模拟股骨柄？
+    # 软体模拟刚体需要特别小的时间步，容易引发数值崩溃
+
     model = builder.finalize()
     model.ground = False
 
@@ -316,33 +324,38 @@ def on_femur_sim():
     wp.sim.eval_fk(model, model.joint_q, model.joint_qd, None, state_0)
 
     sim_time = 0.0
-    sim_total_seconds = 5
-    fps = 60
-    frame_dt = 1.0 / fps
-    sim_steps = 10
-    sim_dt = frame_dt / sim_steps
+    sim_total_seconds = 10
+    frame_dt = 1.0 / (fps := 10)
+    sim_dt = frame_dt / (sim_steps := 900)
 
     global init_volume_wp
     with wp.ScopedTimer('', print=False):
         if init_volume_wp is None:
             init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
 
+    import importlib
+    importlib.reload(tl.kernel)
+
     with wp.ScopedCapture() as capture:
         for _ in range(sim_steps):
-            state_0.clear_forces()
             wp.sim.collide(model, state_0)
-            integrator.simulate(model, state_0, state_1, sim_dt)
+            state_0.clear_forces()
+            state_1.clear_forces()
 
             with wp.ScopedTimer('', print=False):
-                wp.launch(kernel=tl.kernel.femoral_prothesis_collision, dim=(state_1.particle_count,), inputs=[
-                    state_1.particle_q, state_1.particle_qd,
+                wp.launch(kernel=tl.kernel.femoral_prothesis_collide, dim=(state_0.particle_count,), inputs=[
+                    state_0.particle_q, state_0.particle_qd, state_0.particle_f, 9.80,
                     init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-                    200.0, wp.vec3(neck_center), wp.vec3(neck_z),
+                    500.0, wp.vec3(neck_center), wp.vec3(neck_z),
+                    wp.vec3(canal[0]), wp.vec3(canal_z),
                 ])
 
+            integrator.simulate(model, state_0, state_1, sim_dt)
             state_0, state_1 = state_1, state_0
 
     graph = capture.graph
+
+    main_region_length = main_region_max - main_region_min
 
     with wp.ScopedTimer('', print=False) as t:
         for _ in range(fps * sim_total_seconds):
@@ -353,6 +366,28 @@ def on_femur_sim():
             renderer.end_frame()
 
             sim_time += frame_dt
+
+            mesh.points.assign(state_0.particle_q[prothesis_a:prothesis_b])
+            mesh.refit()
+
+            image = wp.full(shape=(main_region_size[0], main_region_size[2]), value=wp.vec3(), dtype=wp.vec3)
+            wp.launch(kernel=tl.kernel.prothesis_render, dim=image.shape, inputs=[
+                init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+                image, wp.vec3(main_region_origin), main_region_spacing,
+                wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
+                main_region_length[1], main_region_window[0], *main_region_window,
+                mesh.id, wp.vec3(np.array(femur_stem_rgb) / 255.0),
+                wp.vec3(neck_center), wp.vec3(neck_z),
+            ])
+
+            image = np.flipud(image.numpy().astype(np.uint8).swapaxes(0, 1))
+
+            yield {
+                _3_femur_image_xz: gr.Image(
+                    image, image_mode='RGB', label='股骨柄透视',
+                    show_download_button=False, interactive=False, visible=True,
+                ),
+            }
 
     renderer.save()
     gr.Success(f'模拟完成 {t.elapsed} ms')
@@ -875,7 +910,7 @@ if __name__ == '__main__':
             on_2_image_xy_select, _2_kp_image_xy, trigger_mode='once',
         ).success(on_2_tab, None, all_ui[2])
 
-        _3_femur_sim.click(on_femur_sim, None, _3_femur_sim_output)
+        _3_femur_sim.click(on_femur_sim, None, [_3_femur_image_xz])
 
         # 标签页
         _0_tab.select(on_0_tab, None, all_ui[0])
