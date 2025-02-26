@@ -6,11 +6,8 @@ from typing import Optional
 import gradio as gr
 import itk
 import numpy as np
-import torch
-import trimesh
 import warp as wp
 import warp.sim  # noqa
-from diso import DiffDMC
 
 import towl as tl
 import towl.save_pb2 as pb
@@ -70,9 +67,9 @@ canal_z: Optional[np.ndarray] = None
 
 femur_stem_rgb = [85, 170, 255]
 
-prothesis_mesh: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
+prothesis_v_i: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
 
-femur_volume: Optional[wp.Volume] = None
+femur_v_i: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
 femur_region_origin: Optional[np.ndarray] = None
 femur_region_size: Optional[np.ndarray] = None
 
@@ -623,14 +620,14 @@ def on_3_tab():
             ],
         ])
 
-        global prothesis_mesh
-        prothesis_mesh = tl.mesh.femoral_prothesis(splines, taper_center, neck_x)
+        global prothesis_v_i
+        prothesis_v_i = tl.mesh.femoral_prothesis(splines, taper_center, neck_x)
 
         import pyvista as pv
-        indices3 = np.insert(prothesis_mesh[1].flatten(), np.arange(0, len(prothesis_mesh[1].flatten()), 3), 3)
-        pv.PolyData(prothesis_mesh[0], indices3).save('prothesis.stl')
+        indices3 = np.insert(prothesis_v_i[1].flatten(), np.arange(0, len(prothesis_v_i[1].flatten()), 3), 3)
+        pv.PolyData(prothesis_v_i[0], indices3).save('prothesis.stl')
 
-        mesh = wp.Mesh(wp.array(prothesis_mesh[0], wp.vec3), wp.array(prothesis_mesh[1].flatten(), wp.int32),
+        mesh = wp.Mesh(wp.array(prothesis_v_i[0], wp.vec3), wp.array(prothesis_v_i[1].flatten(), wp.int32),
                        support_winding_number=True)
 
         global main_region_min, main_region_max, main_region_size, main_region_origin
@@ -689,63 +686,48 @@ def on_3_tab():
 
             femur_image_xy_ui.append(image.numpy().astype(np.uint8).swapaxes(0, 1))
 
-        box = np.min(prothesis_mesh[0], axis=0), np.max(prothesis_mesh[0], axis=0)
+        global femur_region_size, femur_region_origin
+        box = np.min(prothesis_v_i[0], axis=0), np.max(prothesis_v_i[0], axis=0)
         l = box[1] - box[0]
         l = np.array([l[0] * 2.0, l[1] * 2.0, l[2]])
-        size = np.round(l / iso_spacing)
-        o = np.mean(box, axis=0) - size * iso_spacing * 0.5
+        femur_region_size = np.round(l / iso_spacing)
+        femur_region_origin = np.mean(box, axis=0) - femur_region_size * iso_spacing * 0.5
 
         bg_value = np.min(init_array)
-        sample = wp.full(shape=(*size,), value=bg_value, dtype=wp.float32)
-        sample_grad = wp.full(shape=(*size,), value=bg_value, dtype=wp.vec3)
-        wp.launch(kernel=tl.kernel.volume_sample_grad, dim=sample.shape, inputs=[
+        femur_region = wp.full(shape=(*femur_region_size,), value=bg_value, dtype=wp.float32)
+        wp.launch(kernel=tl.kernel.volume_sample, dim=femur_region.shape, inputs=[
             init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-            sample, sample_grad, wp.vec3(o), iso_spacing,
+            femur_region, wp.vec3(femur_region_origin), iso_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1),
             True,
         ])
 
-        wp.launch(kernel=tl.kernel.volume_clip_plane, dim=sample.shape, inputs=[
-            sample, wp.vec3(o), iso_spacing,
+        wp.launch(kernel=tl.kernel.volume_clip_plane, dim=femur_region.shape, inputs=[
+            femur_region, wp.vec3(femur_region_origin), iso_spacing,
             wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold,
         ])
 
-        # max_cubes = sample.shape[0] * sample.shape[1] * sample.shape[2]
-        # mc = wp.MarchingCubes(sample.shape[0], sample.shape[1], sample.shape[2], max_cubes, max_cubes)
-        # mc.surface(sample, bone_threshold)
-        # vertices = mc.verts.numpy() * iso_spacing + o
-        # indices = mc.indices.numpy()
-
-        # _ = torch.round((vertices + 0.5) * torch.asarray(sample.shape, dtype=torch.float, device='cuda'))
-        # vertices = _ * iso_spacing + torch.from_numpy(o).to('cuda')
-        # sample = bone_threshold - torch.from_numpy(sample.numpy().flatten()).to
-
         gr.Info('创建股骨网格体')
-        vertices, indices = DiffDMC(dtype=torch.float32)(-wp.to_torch(sample), None, isovalue=-bone_threshold)
-        vertices, indices = vertices.cpu().numpy(), indices.cpu().numpy()
-        vertices = vertices * iso_spacing * np.array(sample.shape) + o
-
-        # gr.Info('创建股骨碰撞体')
-        # femur_mesh = tl.mesh.trimesh_to_mesh(vertices, indices)
-
-        # trimesh.Trimesh(femur_mesh[0], femur_mesh[1]).export('femur.stl')
-
-        femur_mesh = [vertices, indices]
+        global femur_v_i
+        femur_v_i = tl.kernel.volume_dual_marching_cubes(femur_region, iso_spacing, femur_region_origin, bone_threshold)
 
         global femur_smb
-        femur_smb = wp.sim.ModelBuilder((0.0, 0.0, 1.0), -59.8)
+        femur_smb = wp.sim.ModelBuilder((0.0, 0.0, 1.0), 0.0)
 
         femur_smb.add_shape_mesh(
             body=-1,
-            mesh=wp.sim.Mesh(femur_mesh[0].tolist(), femur_mesh[1].flatten().tolist()),
+            mesh=wp.sim.Mesh(femur_v_i[0].tolist(), femur_v_i[1].flatten().tolist()),
             density=1.0,
+            has_shape_collision=False,
         )
 
-        ps_vertices = prothesis_mesh[0] + np.array([0.0, 0.0, 30.0])
+        ps_vertices = prothesis_v_i[0]  # + np.array([0.0, 0.0, 30.0])
+
         femur_smb.add_shape_mesh(
-            body=(ps := femur_smb.add_body(name='prothesis')),
-            mesh=(ps_mesh := wp.sim.Mesh(ps_vertices.tolist(), prothesis_mesh[1].flatten().tolist())),
+            body=(ps_body := femur_smb.add_body(name='prothesis')),
+            mesh=(ps_sim_mesh := wp.sim.Mesh(ps_vertices.tolist(), prothesis_v_i[1].flatten().tolist())),
             density=1.0,
+            has_shape_collision=False,
         )
 
         model = femur_smb.finalize()
@@ -765,42 +747,51 @@ def on_3_tab():
         frame_dt = 1.0 / (fps := 10)
         sim_dt = frame_dt / (sim_steps := 10)
 
-        ps_vertices = wp.array(ps_vertices, dtype=wp.vec3)
-        with wp.ScopedCapture() as capture:
-            for _ in range(sim_steps):
-                wp.sim.collide(model, state_0)
-                state_0.clear_forces()
-                state_1.clear_forces()
+        points = wp.array(ps_vertices, wp.vec3)
+        mesh = wp.Mesh(points, wp.array(prothesis_v_i[1].flatten(), wp.int32))
+        # with wp.ScopedCapture() as capture:
 
-                # ps_transform = state_0.body_q.list()[ps_body]
-                # ps_force = state_0.body_f.list()[ps_body]
-
-                # wp.launch(kernel=tl.kernel.femoral_prothesis_collide, dim=ps_vertices.shape, inputs=[
-                #     state_0.body_q, state_0.body_f,
-                #     ps, ps_mesh.com, 98.80,
-                #     ps_vertices,
-                #     init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-                #     bone_threshold, wp.vec3(neck_center), wp.vec3(neck_z),
-                #     wp.vec3(canal[0]), wp.vec3(canal_z),
-                # ])
-
-                integrator.simulate(model, state_0, state_1, sim_dt)
-                state_0, state_1 = state_1, state_0
-
-        graph = capture.graph
+        # graph = capture.graph
 
         with wp.ScopedTimer('', print=False) as t:
             for sec in range(sim_total_seconds):
                 gr.Info(f'模拟 {sec} 秒')
 
                 for _ in range(fps):
-                    wp.capture_launch(graph)
+                    # wp.capture_launch(graph)
+                    for _ in range(sim_steps):
+                        wp.sim.collide(model, state_0)
+                        state_0.clear_forces()
+                        state_1.clear_forces()
+
+                        wp.launch(kernel=tl.kernel.transform_points, dim=points.shape, inputs=[
+                            state_0.body_q, ps_body, points, mesh.points,
+                        ])
+                        mesh.refit()
+
+                        wp.launch(kernel=tl.kernel.femoral_prothesis_collide, dim=femur_region.shape, inputs=[
+                            femur_region, wp.vec3(femur_region_origin), wp.vec3(iso_spacing), bone_threshold,
+                            mesh.id, ps_sim_mesh.com,
+                            state_0.body_f, ps_body,
+                            wp.vec3(neck_center), wp.vec3(neck_z),
+                            wp.vec3(canal[0]), wp.vec3(canal_z),
+                        ])
+
+                        body_f = state_0.body_f.numpy()
+                        body_f[0][5] = body_f[0][5] + 9.8
+                        state_0.body_f.assign(body_f.tolist())
+
+                        print(state_0.body_f, state_0.body_qd)
+
+                        integrator.simulate(model, state_0, state_1, sim_dt)
+                        state_0, state_1 = state_1, state_0
 
                     renderer.begin_frame(sim_time)
                     renderer.render(state_0)
                     renderer.end_frame()
 
                     sim_time += frame_dt
+
 
         renderer.save()
 

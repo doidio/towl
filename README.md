@@ -23,13 +23,15 @@
 
 ## 运行环境
 
-#### 依赖
+#### 准备 CUDA
 
 - [CUDA Requirements](https://nvidia.github.io/warp/installation.html#cuda-requirements)
 - [CUDA Driver](https://www.nvidia.com/en-us/software/nvidia-app)
 - [CUDA Toolkit](https://developer.nvidia.com/cuda-downloads)
 
-#### Python 3.11
+#### 准备 Python 3.11
+
+- [PyTorch](https://pytorch.org/get-started/locally)
 
 ```shell
 pip install -U numpy loguru gradio protobuf itk warp-lang cadquery gmsh diso

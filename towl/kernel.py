@@ -1,8 +1,39 @@
+import numpy as np
 import warp as wp
 
 wp.config.verbose = False
 wp.config.print_launches = False
 wp.init()
+
+
+def volume_dual_marching_cubes(volume: wp.array(dtype=wp.float32, ndim=3), spacing: float | np.ndarray,
+                               origin: np.ndarray,
+                               threshold: float):
+    import torch
+    from diso import DiffDMC
+    vertices, indices = DiffDMC(dtype=torch.float32)(-wp.to_torch(volume), None, isovalue=-threshold)
+    vertices, indices = vertices.cpu().numpy(), indices.cpu().numpy()
+    vertices = vertices * spacing * np.array(volume.shape) + origin
+    return vertices, indices
+
+
+def volume_marching_cubes(volume: wp.array(dtype=wp.float32, ndim=3), spacing: float | np.ndarray, origin: np.ndarray,
+                          threshold: float):
+    max_cubes = volume.shape[0] * volume.shape[1] * volume.shape[2]
+    mc = wp.MarchingCubes(volume.shape[0], volume.shape[1], volume.shape[2], max_cubes, max_cubes)
+    mc.surface(volume, threshold)
+    vertices = mc.verts.numpy() * spacing + origin
+    indices = mc.indices.numpy()
+    return vertices, indices
+
+
+@wp.kernel
+def transform_points(
+        body_q: wp.array(dtype=wp.transform), body: int,
+        in_points: wp.array(dtype=wp.vec3), out_points: wp.array(dtype=wp.vec3),
+):
+    i = wp.tid()
+    out_points[i] = wp.transform_point(body_q[body], in_points[i])
 
 
 @wp.kernel
@@ -64,19 +95,19 @@ def volume_sample_grad(
 
 @wp.kernel
 def volume_clip_plane(
-        array: wp.array(dtype=wp.float32, ndim=3), origin: wp.vec3, spacing: float,
+        volume_array: wp.array(dtype=wp.float32, ndim=3), volume_origin: wp.vec3, volume_spacing: float,
         plane_center: wp.vec3, plane_normal: wp.vec3, threshold: float,
 ):
     i, j, k = wp.tid()
 
-    p = origin + wp.vec3(float(i), float(j), float(k)) * spacing
+    p = volume_origin + wp.vec3(float(i), float(j), float(k)) * volume_spacing
 
     d = wp.dot(wp.normalize(plane_normal), p - plane_center)
 
     if d <= 0.0:
-        array[i, j, k] = d + threshold
-    elif d < spacing * 1.5 and array[i, j, k] > threshold:
-        array[i, j, k] = d + threshold
+        volume_array[i, j, k] = d + threshold
+    elif d < volume_spacing * 1.5 and volume_array[i, j, k] > threshold:
+        volume_array[i, j, k] = d + threshold
 
 
 @wp.kernel
@@ -242,32 +273,56 @@ def mesh_slice(
 
 @wp.kernel
 def femoral_prothesis_collide(
-        body_q: wp.array(dtype=wp.transform), body_f: wp.array(dtype=wp.spatial_vector),
-        ps: int, ps_com: wp.vec3, ps_gravity: float,
-        ps_vertices: wp.array(dtype=wp.vec3),
-        volume: wp.uint64, volume_origin: wp.vec3, volume_spacing: wp.vec3,
+        volume_array: wp.array(dtype=wp.float32, ndim=3), volume_origin: wp.vec3, volume_spacing: wp.vec3,
         bound_threshold: float,
+        mesh: wp.uint64, mesh_com: wp.vec3,
+        body_f: wp.array(dtype=wp.spatial_vector), body: int,
         neck_plane_center: wp.vec3, neck_plane_outer: wp.vec3,
         canal_plane_center: wp.vec3, canal_plane_outer: wp.vec3,
 ):
-    i = wp.tid()
+    i, j, k = wp.tid()
+    position = wp.cw_mul(wp.vec3(float(i), float(j), float(k)), volume_spacing) + volume_origin
 
-    c = wp.transform_point(body_q[ps], ps_vertices[i])
-    ps_com = wp.transform_point(body_q[ps], ps_com)
+    if wp.dot(position - neck_plane_center, neck_plane_outer) > 0:  # 颈口外力
+        return
+    elif wp.dot(position - canal_plane_center, canal_plane_outer) < 0:  # 髓内碰撞
+        if volume_array[i, j, k] > bound_threshold:
+            query = wp.mesh_query_point_sign_normal(mesh, position, wp.float32(1e6), wp.float32(1e-3))
 
-    if wp.dot(c - neck_plane_center, neck_plane_outer) > 0:  # 颈口外力
-        f = wp.normalize(neck_plane_outer) * ps_gravity
-        q = wp.cross(c - ps_com, f)
-        body_f[ps] += wp.spatial_vector(q[0], q[1], q[2], f[0], f[1], f[2])
-    elif wp.dot(c - canal_plane_center, canal_plane_outer) < 0:  # 髓内碰撞
-        uvw = wp.cw_div(c - volume_origin, volume_spacing)
-        grad = wp.vec3()
-        pixel = wp.volume_sample_grad_f(volume, uvw, wp.Volume.LINEAR, grad)
+            if query.sign < 0:
+                force_position = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
+                f = (position - force_position) * 0.001
+                q = wp.cross(force_position - mesh_com, f)
+                body_f[body] += wp.spatial_vector(q[0], q[1], q[2], f[0], f[1], f[2])
 
-        if pixel > bound_threshold:
-            f = wp.normalize(-grad) * ps_gravity
-            q = wp.cross(c - ps_com, f)
-            body_f[ps] += wp.spatial_vector(q[0], q[1], q[2], f[0], f[1], f[2])
+
+# @wp.kernel
+# def femoral_prothesis_collide_(
+#         volume_array: wp.array(dtype=wp.float32, ndim=3), volume_origin: wp.vec3, volume_spacing: wp.vec3,
+#         bound_threshold: float,
+#         body_q: wp.array(dtype=wp.transform), body_f: wp.array(dtype=wp.spatial_vector),
+#         ps_body: int, ps_com: wp.vec3, ps_gravity: float, ps_mesh: wp.uint64,
+#         neck_plane_center: wp.vec3, neck_plane_outer: wp.vec3,
+#         canal_plane_center: wp.vec3, canal_plane_outer: wp.vec3,
+# ):
+#     i = wp.tid()
+#
+#     c = wp.transform_point(body_q[ps_body], ps_vertices[i])
+#     ps_com = wp.transform_point(body_q[ps_body], ps_com)
+#
+#     if wp.dot(c - neck_plane_center, neck_plane_outer) > 0:  # 颈口外力
+#         f = wp.normalize(neck_plane_outer) * ps_gravity
+#         q = wp.cross(c - ps_com, f)
+#         body_f[ps_body] += wp.spatial_vector(q[0], q[1], q[2], f[0], f[1], f[2])
+#     elif wp.dot(c - canal_plane_center, canal_plane_outer) < 0:  # 髓内碰撞
+#         uvw = wp.cw_div(c - volume_origin, volume_spacing)
+#         grad = wp.vec3()
+#         pixel = wp.volume_sample_grad_f(volume, uvw, wp.Volume.LINEAR, grad)
+#
+#         if pixel > bound_threshold:
+#             f = wp.normalize(-grad) * ps_gravity
+#             q = wp.cross(c - ps_com, f)
+#             body_f[ps_body] += wp.spatial_vector(q[0], q[1], q[2], f[0], f[1], f[2])
 
 
 @wp.kernel
