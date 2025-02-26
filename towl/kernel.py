@@ -6,13 +6,77 @@ wp.init()
 
 
 @wp.kernel
-def volume_sample_positions(
+def volume_sample(
         volume: wp.uint64, volume_origin: wp.vec3, volume_spacing: wp.vec3,
-        positions: wp.array(dtype=wp.vec3), values: wp.array(dtype=float),
+        sample: wp.array(dtype=wp.float32, ndim=3), sample_origin: wp.vec3, sample_spacing: float,
+        sample_x_axis: wp.vec3, sample_y_axis: wp.vec3, sample_z_axis: wp.vec3,
+        skip_bounds: bool,
 ):
-    i = wp.tid()
-    uvw = wp.cw_div(positions[i] - volume_origin, volume_spacing)
-    values[i] = wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR)
+    i, j, k = wp.tid()
+
+    if skip_bounds:
+        if i == 0 or i == sample.shape[0] - 1:
+            return
+        if j == 0 or j == sample.shape[1] - 1:
+            return
+        if k == 0 or k == sample.shape[2] - 1:
+            return
+
+    p = sample_origin
+    p += float(i) * sample_spacing * sample_x_axis
+    p += float(j) * sample_spacing * sample_y_axis
+    p += float(k) * sample_spacing * sample_z_axis
+
+    uvw = wp.cw_div(p - volume_origin, volume_spacing)
+    pixel = wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR)
+    sample[i, j, k] = wp.float32(pixel)
+
+
+@wp.kernel
+def volume_sample_grad(
+        volume: wp.uint64, volume_origin: wp.vec3, volume_spacing: wp.vec3,
+        sample: wp.array(dtype=wp.float32, ndim=3), sample_grad: wp.array(dtype=wp.vec3, ndim=3),
+        sample_origin: wp.vec3, sample_spacing: float,
+        sample_x_axis: wp.vec3, sample_y_axis: wp.vec3, sample_z_axis: wp.vec3,
+        skip_bounds: bool,
+):
+    i, j, k = wp.tid()
+
+    if skip_bounds:
+        if i == 0 or i == sample.shape[0] - 1:
+            return
+        if j == 0 or j == sample.shape[1] - 1:
+            return
+        if k == 0 or k == sample.shape[2] - 1:
+            return
+
+    p = sample_origin
+    p += float(i) * sample_spacing * sample_x_axis
+    p += float(j) * sample_spacing * sample_y_axis
+    p += float(k) * sample_spacing * sample_z_axis
+
+    uvw = wp.cw_div(p - volume_origin, volume_spacing)
+    grad = wp.vec3()
+    pixel = wp.volume_sample_grad_f(volume, uvw, wp.Volume.LINEAR, grad)
+    sample[i, j, k] = wp.float32(pixel)
+    sample_grad[i, j, k] = grad
+
+
+@wp.kernel
+def volume_clip_plane(
+        array: wp.array(dtype=wp.float32, ndim=3), origin: wp.vec3, spacing: float,
+        plane_center: wp.vec3, plane_normal: wp.vec3, threshold: float,
+):
+    i, j, k = wp.tid()
+
+    p = origin + wp.vec3(float(i), float(j), float(k)) * spacing
+
+    d = wp.dot(wp.normalize(plane_normal), p - plane_center)
+
+    if d <= 0.0:
+        array[i, j, k] = d + threshold
+    elif d < spacing * 1.5 and array[i, j, k] > threshold:
+        array[i, j, k] = d + threshold
 
 
 @wp.kernel
@@ -178,8 +242,9 @@ def mesh_slice(
 
 @wp.kernel
 def femoral_prothesis_collide(
-        particles: wp.array(dtype=wp.vec3), velocities: wp.array(dtype=wp.vec3),
-        forces: wp.array(dtype=wp.vec3), gravity: float,
+        body_q: wp.array(dtype=wp.transform), body_f: wp.array(dtype=wp.spatial_vector),
+        ps: int, ps_com: wp.vec3, ps_gravity: float,
+        ps_vertices: wp.array(dtype=wp.vec3),
         volume: wp.uint64, volume_origin: wp.vec3, volume_spacing: wp.vec3,
         bound_threshold: float,
         neck_plane_center: wp.vec3, neck_plane_outer: wp.vec3,
@@ -187,22 +252,23 @@ def femoral_prothesis_collide(
 ):
     i = wp.tid()
 
-    c = particles[i]
+    c = wp.transform_point(body_q[ps], ps_vertices[i])
+    ps_com = wp.transform_point(body_q[ps], ps_com)
 
-    if wp.dot(c - neck_plane_center, neck_plane_outer) > 0:
-        forces[i] = wp.normalize(canal_plane_outer) * gravity
-        return
-
-    if wp.dot(c - canal_plane_center, canal_plane_outer) < 0:
+    if wp.dot(c - neck_plane_center, neck_plane_outer) > 0:  # 颈口外力
+        f = wp.normalize(neck_plane_outer) * ps_gravity
+        q = wp.cross(c - ps_com, f)
+        body_f[ps] += wp.spatial_vector(q[0], q[1], q[2], f[0], f[1], f[2])
+    elif wp.dot(c - canal_plane_center, canal_plane_outer) < 0:  # 髓内碰撞
         uvw = wp.cw_div(c - volume_origin, volume_spacing)
-        grad = wp.vec3(0.0)
+        grad = wp.vec3()
         pixel = wp.volume_sample_grad_f(volume, uvw, wp.Volume.LINEAR, grad)
 
         if pixel > bound_threshold:
-            grad = wp.normalize(grad)
-            v = velocities[i]
-            v = v - 2.0 * wp.dot(v, grad) * grad
-            velocities[i] = v
+            f = wp.normalize(-grad) * ps_gravity
+            q = wp.cross(c - ps_com, f)
+            body_f[ps] += wp.spatial_vector(q[0], q[1], q[2], f[0], f[1], f[2])
+
 
 @wp.kernel
 def prothesis_render(
@@ -211,7 +277,7 @@ def prothesis_render(
         image_x_axis: wp.vec3, image_y_axis: wp.vec3, image_z_axis: wp.vec3,
         image_z_depth: wp.float32,
         threshold_min: float, window_min: float, window_max: float,
-        mesh: wp.uint64, base_color: wp.vec3,
+        mesh: wp.uint64, mesh_transform: wp.transform, base_color: wp.vec3,
         cut_plane_center: wp.vec3, cut_plane_normal: wp.vec3,
 ):
     i, j = wp.tid()

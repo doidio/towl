@@ -32,7 +32,7 @@
 #### Python 3.11
 
 ```shell
-pip install -U numpy loguru gradio protobuf itk warp-lang cadquery gmsh
+pip install -U numpy loguru gradio protobuf itk warp-lang cadquery gmsh diso
 ```
 
 ## 启动应用

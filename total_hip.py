@@ -6,8 +6,11 @@ from typing import Optional
 import gradio as gr
 import itk
 import numpy as np
+import torch
+import trimesh
 import warp as wp
 import warp.sim  # noqa
+from diso import DiffDMC
 
 import towl as tl
 import towl.save_pb2 as pb
@@ -16,16 +19,17 @@ g_default = set(globals().keys())
 
 init_filename: Optional[str] = None
 
-init_volume: Optional[np.ndarray] = None
-init_volume_wp: Optional[wp.Volume] = None
+init_array: Optional[np.ndarray] = None
+init_volume: Optional[wp.Volume] = None
 
 init_volume_size: Optional[np.ndarray] = None
 init_volume_spacing: Optional[np.ndarray] = None
 init_volume_origin: Optional[np.ndarray] = None
 init_volume_length: Optional[np.ndarray] = None
 
-main_region_spacing = 0.5
+iso_spacing = 0.5
 main_region_window = [-100.0, 900.0]
+bone_threshold = 200.0
 
 main_region_min: Optional[np.ndarray] = None
 main_region_max: Optional[np.ndarray] = None
@@ -66,7 +70,13 @@ canal_z: Optional[np.ndarray] = None
 
 femur_stem_rgb = [85, 170, 255]
 
-femur_mesh: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
+prothesis_mesh: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
+
+femur_volume: Optional[wp.Volume] = None
+femur_region_origin: Optional[np.ndarray] = None
+femur_region_size: Optional[np.ndarray] = None
+
+femur_smb: Optional[wp.sim.ModelBuilder] = None
 
 g_default = {_: globals()[_] for _ in globals() if _ not in g_default and _ != 'g_default'}
 
@@ -78,11 +88,11 @@ def on_0_save():
     gr.Info('开始保存')
     save = pb.SaveTotalHip()
 
-    if init_volume is not None:
+    if init_array is not None:
         save.init_volume.CopyFrom(pb.Volume(
             dtype=pb.DataType.INT16,
-            data=init_volume.tobytes(),
-            background=np.min(init_volume),
+            data=init_array.tobytes(),
+            background=np.min(init_array),
             region=pb.Volume.Region(
                 size=init_volume_size,
                 spacing=init_volume_spacing,
@@ -132,7 +142,7 @@ def on_0_load(filename):
     if not f.is_file() or not f.exists():
         raise gr.Error('选中无效', print_exception=False)
 
-    global init_filename, init_volume, init_volume_wp
+    global init_filename, init_array, init_volume
     global init_volume_size, init_volume_spacing, init_volume_origin, init_volume_length
     global main_region_min, main_region_max
     global xinv, kp_name, kp_positions
@@ -149,7 +159,9 @@ def on_0_load(filename):
 
         if save.HasField('init_volume'):
             _ = [*save.init_volume.region.size]
-            init_volume = np.frombuffer(save.init_volume.data, np.int16).reshape(_)
+            init_array = np.frombuffer(save.init_volume.data, np.int16).reshape(_)
+            init_volume = wp.Volume.load_from_numpy(init_array, bg_value=np.min(init_array))
+
             init_volume_size = np.array(save.init_volume.region.size)
             init_volume_spacing = np.array(save.init_volume.region.spacing)
             init_volume_origin = np.array(save.init_volume.region.origin)
@@ -187,7 +199,8 @@ def on_0_load(filename):
             init_volume_origin = np.array(itk.origin(image))
             init_volume_length = init_volume_size * init_volume_spacing
 
-            init_volume = itk.array_from_image(image).swapaxes(0, 2).copy()
+            init_array = itk.array_from_image(image).swapaxes(0, 2).copy()
+            init_volume = wp.Volume.load_from_numpy(init_array, bg_value=np.min(init_array))
 
             main_region_min = np.zeros(3)
             main_region_max = init_volume_length.copy()
@@ -224,8 +237,8 @@ def on_2_image_xz_select(evt: gr.SelectData, image):
     if kp_name not in kp_names:
         raise gr.Error('未选中解剖标志', print_exception=False)
 
-    p0 = main_region_origin[0] + main_region_spacing * evt.index[0]
-    p2 = main_region_origin[2] + main_region_spacing * (image.shape[0] - evt.index[1])
+    p0 = main_region_origin[0] + iso_spacing * evt.index[0]
+    p2 = main_region_origin[2] + iso_spacing * (image.shape[0] - evt.index[1])
     kp_positions[kp_name] = [p0, p2]
 
 
@@ -237,8 +250,8 @@ def on_2_image_xy_select(evt: gr.SelectData, _):
     if kp_name not in kp_positions:
         raise gr.Error(f'未先选透视点 {kp_name}', print_exception=False)
 
-    p0 = main_region_origin[0] + main_region_spacing * evt.index[0]
-    p1 = main_region_origin[1] + main_region_spacing * evt.index[1]
+    p0 = main_region_origin[0] + iso_spacing * evt.index[0]
+    p1 = main_region_origin[1] + iso_spacing * evt.index[1]
 
     if len(p := kp_positions[kp_name]) == 2:
         kp_positions[kp_name] = [p0, p1, p[1]]
@@ -249,69 +262,15 @@ def on_2_image_xy_select(evt: gr.SelectData, _):
 
 
 def on_femur_sim():
-    if femur_mesh is None:
-        raise gr.Error('缺少股骨柄网格体', print_exception=False)
+    if femur_smb is None:
+        raise gr.Error('未创建股骨柄', print_exception=False)
 
     if any([_ is None for _ in [neck_center, neck_z]]):
         raise gr.Error('缺少必要的解剖标志', print_exception=False)
 
     canal = [kp_positions.get(_) for _ in ('股骨小粗隆髓腔中心', '股骨柄末端髓腔中心')]
 
-    builder = wp.sim.ModelBuilder((0.0, 0.0, 1.0), 0.0)
-
-    v3f = femur_mesh[0]
-    v3i = femur_mesh[1].flatten()
-    v4i = femur_mesh[2].flatten()
-    mesh = wp.Mesh(wp.array(v3f, wp.vec3), wp.array(v3i, wp.int32), None, True)
-
-    # mesh = wp.sim.Mesh(v3f.tolist(), v3i.tolist())
-    # builder.add_shape_mesh(
-    #     body=builder.add_body(),
-    #     mesh=mesh,
-    #     ke=1e5,
-    #     kd=2.5e2,
-    #     kf=5e2,
-    #     density=1e3,
-    # )
-
-    prothesis_a = builder.particle_count
-    builder.add_soft_mesh(
-        pos=wp.vec3(),
-        rot=wp.quat_identity(),
-        scale=1.0,
-        vel=wp.vec3(),
-        vertices=[wp.vec3(_) for _ in v3f],
-        indices=v4i.tolist(),
-        density=1.0,
-        k_mu=1e5,
-        k_lambda=1.5e5,
-        k_damp=2.0,
-        tri_ke=0.0,
-        tri_ka=1e-8,
-        tri_kd=0.0,
-        tri_drag=0.1,
-        tri_lift=0.1,
-    )
-    prothesis_b = builder.particle_count
-
-    ## 为什么不能用刚体模拟股骨髓腔？
-    # 骨皮质的阈值边界不光滑，刚体无法模拟扩髓的塑性变形，噪声边界造成错误干涉和反弹
-
-    ## 为什么不能用软体模拟股骨髓腔？
-    # 不能完全避免骨松质噪声干涉，并且可能导致骨皮质错误柔软，以及数值崩溃
-
-    ## 为什么可以用SPH流体模拟股骨髓腔？
-    # 流体各项异性物理属性符合骨皮质、骨松质的差异特性
-    # 流体无拓扑约束能模拟骨松质塑性变形
-    # 流体压力源于局部密度可以减弱噪声影响
-
-    ## 为什么要用FEM软体模拟股骨柄？
-    # 软体顶点受力，与流体粒子受力方式一致，而刚体不易计算多点受力的质心等效合力
-
-    ## 为什么不能用FEM软体模拟股骨柄？
-    # 软体模拟刚体需要特别小的时间步，容易引发数值崩溃
-
-    model = builder.finalize()
+    model = femur_smb.finalize()
     model.ground = False
 
     integrator = wp.sim.SemiImplicitIntegrator()
@@ -326,29 +285,16 @@ def on_femur_sim():
     sim_time = 0.0
     sim_total_seconds = 10
     frame_dt = 1.0 / (fps := 10)
-    sim_dt = frame_dt / (sim_steps := 900)
+    sim_dt = frame_dt / (sim_steps := 90)
 
-    global init_volume_wp
-    with wp.ScopedTimer('', print=False):
-        if init_volume_wp is None:
-            init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
-
-    import importlib
-    importlib.reload(tl.kernel)
+    # import importlib
+    # importlib.reload(tl.kernel)
 
     with wp.ScopedCapture() as capture:
         for _ in range(sim_steps):
             wp.sim.collide(model, state_0)
             state_0.clear_forces()
             state_1.clear_forces()
-
-            with wp.ScopedTimer('', print=False):
-                wp.launch(kernel=tl.kernel.femoral_prothesis_collide, dim=(state_0.particle_count,), inputs=[
-                    state_0.particle_q, state_0.particle_qd, state_0.particle_f, 9.80,
-                    init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-                    500.0, wp.vec3(neck_center), wp.vec3(neck_z),
-                    wp.vec3(canal[0]), wp.vec3(canal_z),
-                ])
 
             integrator.simulate(model, state_0, state_1, sim_dt)
             state_0, state_1 = state_1, state_0
@@ -367,27 +313,26 @@ def on_femur_sim():
 
             sim_time += frame_dt
 
-            mesh.points.assign(state_0.particle_q[prothesis_a:prothesis_b])
-            mesh.refit()
+            print(_, state_0.body_q)
 
-            image = wp.full(shape=(main_region_size[0], main_region_size[2]), value=wp.vec3(), dtype=wp.vec3)
-            wp.launch(kernel=tl.kernel.prothesis_render, dim=image.shape, inputs=[
-                init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-                image, wp.vec3(main_region_origin), main_region_spacing,
-                wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
-                main_region_length[1], main_region_window[0], *main_region_window,
-                mesh.id, wp.vec3(np.array(femur_stem_rgb) / 255.0),
-                wp.vec3(neck_center), wp.vec3(neck_z),
-            ])
-
-            image = np.flipud(image.numpy().astype(np.uint8).swapaxes(0, 1))
-
-            yield {
-                _3_femur_image_xz: gr.Image(
-                    image, image_mode='RGB', label='股骨柄透视',
-                    show_download_button=False, interactive=False, visible=True,
-                ),
-            }
+            # image = wp.full(shape=(main_region_size[0], main_region_size[2]), value=wp.vec3(), dtype=wp.vec3)
+            # wp.launch(kernel=tl.kernel.prothesis_render, dim=image.shape, inputs=[
+            #     init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+            #     image, wp.vec3(main_region_origin), iso_spacing,
+            #     wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
+            #     main_region_length[1], main_region_window[0], *main_region_window,
+            #     mesh.id, state_0.body_q[0], wp.vec3(np.array(femur_stem_rgb) / 255.0),
+            #     wp.vec3(neck_center), wp.vec3(neck_z),
+            # ])
+            #
+            # image = np.flipud(image.numpy().astype(np.uint8).swapaxes(0, 1))
+            #
+            # yield {
+            #     _3_femur_image_xz: gr.Image(
+            #         image, image_mode='RGB', label='股骨柄透视',
+            #         show_download_button=False, interactive=False, visible=True,
+            #     ),
+            # }
 
     renderer.save()
     gr.Success(f'模拟完成 {t.elapsed} ms')
@@ -404,33 +349,29 @@ def on_0_tab():
 
 
 def on_1_tab():
-    if init_volume is None:
+    if init_array is None:
         return {ui: ui.__class__(visible=False) for ui in all_ui[1]}
 
     global main_region_min, main_region_max, main_region_size, main_region_origin
     main_region_length = main_region_max - main_region_min
-    main_region_size = (main_region_length / main_region_spacing).astype(int)
+    main_region_size = (main_region_length / iso_spacing).astype(int)
     main_region_size = np.max([main_region_size, [1, 1, 1]], axis=0)
     main_region_origin = init_volume_origin + main_region_min
 
     image = [wp.full(shape=(main_region_size[0], main_region_size[1]), value=0, dtype=wp.uint8),
              wp.full(shape=(main_region_size[0], main_region_size[2]), value=0, dtype=wp.uint8)]
 
-    global init_volume_wp
     with wp.ScopedTimer('on_1_image', print=False) as t:
-        if init_volume_wp is None:
-            init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
-
         wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=image[0].shape, inputs=[
-            init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-            image[0], wp.vec3(main_region_origin), main_region_spacing,
+            init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+            image[0], wp.vec3(main_region_origin), iso_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1),
             main_region_length[2], main_region_window[0], *main_region_window,
         ])
 
         wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=image[1].shape, inputs=[
-            init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-            image[1], wp.vec3(main_region_origin), main_region_spacing,
+            init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+            image[1], wp.vec3(main_region_origin), iso_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
             main_region_length[1], main_region_window[0], *main_region_window,
         ])
@@ -454,14 +395,14 @@ def on_1_tab():
             0,
             round(float(init_volume_length[1])),
             float(main_region_min[1]),
-            step=main_region_spacing,
+            step=iso_spacing,
             label='前', visible=True,
         ),
         _1_main_region_p: gr.Slider(
             0,
             round(float(init_volume_length[1])),
             float(main_region_max[1]),
-            step=main_region_spacing,
+            step=iso_spacing,
             label='后', visible=True,
         ),
         _1_main_image_xz: gr.Image(
@@ -473,28 +414,28 @@ def on_1_tab():
             0,
             round(float(init_volume_length[0])),
             float(main_region_min[0]),
-            step=main_region_spacing,
+            step=iso_spacing,
             label='右', visible=True,
         ),
         _1_main_region_l: gr.Slider(
             0,
             round(float(init_volume_length[0])),
             float(main_region_max[0]),
-            step=main_region_spacing,
+            step=iso_spacing,
             label='左', visible=True,
         ),
         _1_main_region_i: gr.Slider(
             0,
             round(float(init_volume_length[2])),
             float(main_region_min[2]),
-            step=main_region_spacing,
+            step=iso_spacing,
             label='下', visible=True,
         ),
         _1_main_region_s: gr.Slider(
             0,
             round(float(init_volume_length[2])),
             float(main_region_max[2]),
-            step=main_region_spacing,
+            step=iso_spacing,
             label='上', visible=True,
         ),
     }
@@ -509,28 +450,24 @@ def on_2_tab():
 
     if (p := kp_positions.get(kp_name)) is not None:
         if len(p) == 3:
-            x = round((p[0] - main_region_origin[0]) / main_region_spacing)
-            y = round((p[1] - main_region_origin[1]) / main_region_spacing)
-            z = round((p[2] - main_region_origin[2]) / main_region_spacing)
+            x = round((p[0] - main_region_origin[0]) / iso_spacing)
+            y = round((p[1] - main_region_origin[1]) / iso_spacing)
+            z = round((p[2] - main_region_origin[2]) / iso_spacing)
         else:
-            x = round((p[0] - main_region_origin[0]) / main_region_spacing)
+            x = round((p[0] - main_region_origin[0]) / iso_spacing)
             y = None
-            z = round((p[1] - main_region_origin[2]) / main_region_spacing)
+            z = round((p[1] - main_region_origin[2]) / iso_spacing)
 
         kp_image_xz_ui[x, :] = kp_select_rgb
         kp_image_xz_ui[:, z] = kp_select_rgb
 
-        origin = main_region_origin + np.array([0, 0, z * main_region_spacing])
+        origin = main_region_origin + np.array([0, 0, z * iso_spacing])
 
-        global init_volume_wp
         with wp.ScopedTimer('', print=False) as t:
-            if init_volume_wp is None:
-                init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
-
             kp_image_xy_ui = wp.full(shape=(main_region_size[0], main_region_size[1]), value=0, dtype=wp.uint8)
             wp.launch(kernel=tl.kernel.volume_slice, dim=kp_image_xy_ui.shape, inputs=[
-                init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-                kp_image_xy_ui, wp.vec3(origin), main_region_spacing,
+                init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+                kp_image_xy_ui, wp.vec3(origin), iso_spacing,
                 wp.vec3(1, 0, 0), wp.vec3(0, 1, 0),
                 *main_region_window,
             ])
@@ -550,11 +487,11 @@ def on_2_tab():
     else:
         for p in kp_positions.values():
             if len(p) == 3:
-                x = round((p[0] - main_region_origin[0]) / main_region_spacing)
-                z = round((p[2] - main_region_origin[2]) / main_region_spacing)
+                x = round((p[0] - main_region_origin[0]) / iso_spacing)
+                z = round((p[2] - main_region_origin[2]) / iso_spacing)
             else:
-                x = round((p[0] - main_region_origin[0]) / main_region_spacing)
-                z = round((p[1] - main_region_origin[2]) / main_region_spacing)
+                x = round((p[0] - main_region_origin[0]) / iso_spacing)
+                z = round((p[1] - main_region_origin[2]) / iso_spacing)
 
             x_min = min(max(x - kp_deselect_radius, 0), kp_image_xz_ui.shape[0])
             x_max = min(max(x + kp_deselect_radius, 0), kp_image_xz_ui.shape[0])
@@ -627,16 +564,12 @@ def on_3_tab():
         -canal_x, -canal_x, -canal_x, -canal_x,
     ]
 
-    global init_volume_wp
     with wp.ScopedTimer('', print=False) as t:
-        if init_volume_wp is None:
-            init_volume_wp = wp.Volume.load_from_numpy(init_volume, bg_value=np.min(init_volume))
-
         canal_x_edges = wp.array(canal_x_edges, dtype=wp.vec3)
         wp.launch(kernel=tl.kernel.volume_query_rays, dim=(len(canal_x_edges),), inputs=[
-            init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+            init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
             canal_x_edges, wp.array(ray_dirs, dtype=wp.vec3),
-            main_region_spacing, 1e6, 500.0,
+            iso_spacing, 1e6, bone_threshold,
             canal_x_edges,
         ])
         canal_x_edges = canal_x_edges.numpy()  # - np.array(ray_dirs) * 2.0
@@ -690,9 +623,14 @@ def on_3_tab():
             ],
         ])
 
-        global femur_mesh
-        femur_mesh = tl.mesh.femoral_prothesis(splines, taper_center, neck_x)
-        mesh = wp.Mesh(wp.array(femur_mesh[0], wp.vec3), wp.array(femur_mesh[1].flatten(), wp.int32),
+        global prothesis_mesh
+        prothesis_mesh = tl.mesh.femoral_prothesis(splines, taper_center, neck_x)
+
+        import pyvista as pv
+        indices3 = np.insert(prothesis_mesh[1].flatten(), np.arange(0, len(prothesis_mesh[1].flatten()), 3), 3)
+        pv.PolyData(prothesis_mesh[0], indices3).save('prothesis.stl')
+
+        mesh = wp.Mesh(wp.array(prothesis_mesh[0], wp.vec3), wp.array(prothesis_mesh[1].flatten(), wp.int32),
                        support_winding_number=True)
 
         global main_region_min, main_region_max, main_region_size, main_region_origin
@@ -700,8 +638,8 @@ def on_3_tab():
 
         femur_image_xz_ui = wp.full(shape=(main_region_size[0], main_region_size[2]), value=0, dtype=wp.uint8)
         wp.launch(kernel=tl.kernel.volume_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
-            init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-            femur_image_xz_ui, wp.vec3(main_region_origin), main_region_spacing,
+            init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+            femur_image_xz_ui, wp.vec3(main_region_origin), iso_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
             main_region_length[1], main_region_window[0], *main_region_window,
         ])
@@ -712,7 +650,7 @@ def on_3_tab():
 
         wp.launch(kernel=tl.kernel.mesh_ray_parallel, dim=femur_image_xz_ui.shape, inputs=[
             mesh.id, wp.vec3(np.array(femur_stem_rgb) / 255.0),
-            femur_image_xz_ui, wp.vec3(main_region_origin), main_region_spacing,
+            femur_image_xz_ui, wp.vec3(main_region_origin), iso_spacing,
             wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
             main_region_length[1],
         ])
@@ -729,11 +667,11 @@ def on_3_tab():
             c = P * (1 - i) + canal[1] * i
             o = c - rx * canal_x * xinv - ry * canal_y
 
-            size = tuple(max(round(2 * _ / main_region_spacing), 1) for _ in (rx, ry))
+            size = tuple(max(round(2 * _ / iso_spacing), 1) for _ in (rx, ry))
             image = wp.full(shape=size, value=0, dtype=wp.uint8)
             wp.launch(kernel=tl.kernel.volume_slice, dim=image.shape, inputs=[
-                init_volume_wp.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-                image, wp.vec3(o), main_region_spacing,
+                init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+                image, wp.vec3(o), iso_spacing,
                 wp.vec3(canal_x * xinv), wp.vec3(canal_y),
                 *main_region_window,
             ])
@@ -745,13 +683,128 @@ def on_3_tab():
             wp.launch(kernel=tl.kernel.mesh_slice, dim=image.shape, inputs=[
                 mesh.id, 1e6,
                 wp.vec3(np.array(femur_stem_rgb) / 255.0), 0.5,
-                image, wp.vec3(o), main_region_spacing,
+                image, wp.vec3(o), iso_spacing,
                 wp.vec3(canal_x * xinv), wp.vec3(canal_y),
             ])
 
             femur_image_xy_ui.append(image.numpy().astype(np.uint8).swapaxes(0, 1))
 
-    gr.Success(f'切片成功 {t.elapsed:.1f} ms')
+        box = np.min(prothesis_mesh[0], axis=0), np.max(prothesis_mesh[0], axis=0)
+        l = box[1] - box[0]
+        l = np.array([l[0] * 2.0, l[1] * 2.0, l[2]])
+        size = np.round(l / iso_spacing)
+        o = np.mean(box, axis=0) - size * iso_spacing * 0.5
+
+        bg_value = np.min(init_array)
+        sample = wp.full(shape=(*size,), value=bg_value, dtype=wp.float32)
+        sample_grad = wp.full(shape=(*size,), value=bg_value, dtype=wp.vec3)
+        wp.launch(kernel=tl.kernel.volume_sample_grad, dim=sample.shape, inputs=[
+            init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+            sample, sample_grad, wp.vec3(o), iso_spacing,
+            wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1),
+            True,
+        ])
+
+        wp.launch(kernel=tl.kernel.volume_clip_plane, dim=sample.shape, inputs=[
+            sample, wp.vec3(o), iso_spacing,
+            wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold,
+        ])
+
+        # max_cubes = sample.shape[0] * sample.shape[1] * sample.shape[2]
+        # mc = wp.MarchingCubes(sample.shape[0], sample.shape[1], sample.shape[2], max_cubes, max_cubes)
+        # mc.surface(sample, bone_threshold)
+        # vertices = mc.verts.numpy() * iso_spacing + o
+        # indices = mc.indices.numpy()
+
+        # _ = torch.round((vertices + 0.5) * torch.asarray(sample.shape, dtype=torch.float, device='cuda'))
+        # vertices = _ * iso_spacing + torch.from_numpy(o).to('cuda')
+        # sample = bone_threshold - torch.from_numpy(sample.numpy().flatten()).to
+
+        gr.Info('创建股骨网格体')
+        vertices, indices = DiffDMC(dtype=torch.float32)(-wp.to_torch(sample), None, isovalue=-bone_threshold)
+        vertices, indices = vertices.cpu().numpy(), indices.cpu().numpy()
+        vertices = vertices * iso_spacing * np.array(sample.shape) + o
+
+        # gr.Info('创建股骨碰撞体')
+        # femur_mesh = tl.mesh.trimesh_to_mesh(vertices, indices)
+
+        # trimesh.Trimesh(femur_mesh[0], femur_mesh[1]).export('femur.stl')
+
+        femur_mesh = [vertices, indices]
+
+        global femur_smb
+        femur_smb = wp.sim.ModelBuilder((0.0, 0.0, 1.0), -59.8)
+
+        femur_smb.add_shape_mesh(
+            body=-1,
+            mesh=wp.sim.Mesh(femur_mesh[0].tolist(), femur_mesh[1].flatten().tolist()),
+            density=1.0,
+        )
+
+        ps_vertices = prothesis_mesh[0] + np.array([0.0, 0.0, 30.0])
+        femur_smb.add_shape_mesh(
+            body=(ps := femur_smb.add_body(name='prothesis')),
+            mesh=(ps_mesh := wp.sim.Mesh(ps_vertices.tolist(), prothesis_mesh[1].flatten().tolist())),
+            density=1.0,
+        )
+
+        model = femur_smb.finalize()
+        model.ground = False
+
+        integrator = wp.sim.SemiImplicitIntegrator()
+        import warp.sim.render
+        renderer = wp.sim.render.SimRenderer(model, 'femur.usd')
+
+        state_0 = model.state()
+        state_1 = model.state()
+
+        wp.sim.eval_fk(model, model.joint_q, model.joint_qd, None, state_0)
+
+        sim_time = 0.0
+        sim_total_seconds = 60
+        frame_dt = 1.0 / (fps := 10)
+        sim_dt = frame_dt / (sim_steps := 10)
+
+        ps_vertices = wp.array(ps_vertices, dtype=wp.vec3)
+        with wp.ScopedCapture() as capture:
+            for _ in range(sim_steps):
+                wp.sim.collide(model, state_0)
+                state_0.clear_forces()
+                state_1.clear_forces()
+
+                # ps_transform = state_0.body_q.list()[ps_body]
+                # ps_force = state_0.body_f.list()[ps_body]
+
+                # wp.launch(kernel=tl.kernel.femoral_prothesis_collide, dim=ps_vertices.shape, inputs=[
+                #     state_0.body_q, state_0.body_f,
+                #     ps, ps_mesh.com, 98.80,
+                #     ps_vertices,
+                #     init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
+                #     bone_threshold, wp.vec3(neck_center), wp.vec3(neck_z),
+                #     wp.vec3(canal[0]), wp.vec3(canal_z),
+                # ])
+
+                integrator.simulate(model, state_0, state_1, sim_dt)
+                state_0, state_1 = state_1, state_0
+
+        graph = capture.graph
+
+        with wp.ScopedTimer('', print=False) as t:
+            for sec in range(sim_total_seconds):
+                gr.Info(f'模拟 {sec} 秒')
+
+                for _ in range(fps):
+                    wp.capture_launch(graph)
+
+                    renderer.begin_frame(sim_time)
+                    renderer.render(state_0)
+                    renderer.end_frame()
+
+                    sim_time += frame_dt
+
+        renderer.save()
+
+    gr.Success(f'创建假体成功 {t.elapsed:.1f} ms')
 
     return {
         _3_femur_image_xz: gr.Image(

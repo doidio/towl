@@ -29,3 +29,4 @@ theme = [
 logger.debug(f'[theme] {theme.__class__.__name__}')
 
 gmsh.initialize()
+gmsh.option.setNumber('General.Terminal', 0)
