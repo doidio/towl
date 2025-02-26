@@ -26,7 +26,7 @@ init_volume_length: Optional[np.ndarray] = None
 
 iso_spacing = 0.5
 main_region_window = [-100.0, 900.0]
-bone_threshold = 200.0
+bone_threshold = 300.0
 
 main_region_min: Optional[np.ndarray] = None
 main_region_max: Optional[np.ndarray] = None
@@ -718,80 +718,55 @@ def on_3_tab():
             body=-1,
             mesh=wp.sim.Mesh(femur_v_i[0].tolist(), femur_v_i[1].flatten().tolist()),
             density=1.0,
-            has_shape_collision=False,
         )
 
-        ps_vertices = prothesis_v_i[0]  # + np.array([0.0, 0.0, 30.0])
+        ps_vertices = prothesis_v_i[0] + canal_z * 30.0
 
         femur_smb.add_shape_mesh(
-            body=(ps_body := femur_smb.add_body(name='prothesis')),
-            mesh=(ps_sim_mesh := wp.sim.Mesh(ps_vertices.tolist(), prothesis_v_i[1].flatten().tolist())),
+            body=femur_smb.add_body(name='prothesis'),
+            mesh=wp.sim.Mesh(ps_vertices.tolist(), prothesis_v_i[1].flatten().tolist()),
             density=1.0,
-            has_shape_collision=False,
         )
 
         model = femur_smb.finalize()
         model.ground = False
 
-        integrator = wp.sim.SemiImplicitIntegrator()
-        import warp.sim.render
-        renderer = wp.sim.render.SimRenderer(model, 'femur.usd')
-
         state_0 = model.state()
         state_1 = model.state()
 
-        wp.sim.eval_fk(model, model.joint_q, model.joint_qd, None, state_0)
+        integrator = wp.sim.XPBDIntegrator()
+        import warp.sim.render
+        renderer = wp.sim.render.SimRenderer(model, 'femur.usd')
 
         sim_time = 0.0
         sim_total_seconds = 60
         frame_dt = 1.0 / (fps := 10)
         sim_dt = frame_dt / (sim_steps := 10)
 
-        points = wp.array(ps_vertices, wp.vec3)
-        mesh = wp.Mesh(points, wp.array(prothesis_v_i[1].flatten(), wp.int32))
-        # with wp.ScopedCapture() as capture:
+        body_gravity = [0.0, 0.0, 0.0, 0.0, 0.0, -9.8e6]
 
-        # graph = capture.graph
+        with wp.ScopedCapture() as capture:
+            for _ in range(sim_steps):
+                wp.sim.collide(model, state_0)
+                state_0.clear_forces()
+                state_1.clear_forces()
 
-        with wp.ScopedTimer('', print=False) as t:
-            for sec in range(sim_total_seconds):
-                gr.Info(f'模拟 {sec} 秒')
+                state_0.body_f.assign(body_gravity)
 
-                for _ in range(fps):
-                    # wp.capture_launch(graph)
-                    for _ in range(sim_steps):
-                        wp.sim.collide(model, state_0)
-                        state_0.clear_forces()
-                        state_1.clear_forces()
+                integrator.simulate(model, state_0, state_1, sim_dt)
+                state_0, state_1 = state_1, state_0
 
-                        wp.launch(kernel=tl.kernel.transform_points, dim=points.shape, inputs=[
-                            state_0.body_q, ps_body, points, mesh.points,
-                        ])
-                        mesh.refit()
+        for sec in range(sim_total_seconds):
+            gr.Info(f'模拟 {sec} 秒')
 
-                        wp.launch(kernel=tl.kernel.femoral_prothesis_collide, dim=femur_region.shape, inputs=[
-                            femur_region, wp.vec3(femur_region_origin), wp.vec3(iso_spacing), bone_threshold,
-                            mesh.id, ps_sim_mesh.com,
-                            state_0.body_f, ps_body,
-                            wp.vec3(neck_center), wp.vec3(neck_z),
-                            wp.vec3(canal[0]), wp.vec3(canal_z),
-                        ])
+            for _ in range(fps):
+                wp.capture_launch(capture.graph)
 
-                        body_f = state_0.body_f.numpy()
-                        body_f[0][5] = body_f[0][5] + 9.8
-                        state_0.body_f.assign(body_f.tolist())
+                renderer.begin_frame(sim_time)
+                renderer.render(state_0)
+                renderer.end_frame()
 
-                        print(state_0.body_f, state_0.body_qd)
-
-                        integrator.simulate(model, state_0, state_1, sim_dt)
-                        state_0, state_1 = state_1, state_0
-
-                    renderer.begin_frame(sim_time)
-                    renderer.render(state_0)
-                    renderer.end_frame()
-
-                    sim_time += frame_dt
-
+                sim_time += frame_dt
 
         renderer.save()
 
