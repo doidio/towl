@@ -28,7 +28,7 @@ def volume_marching_cubes(volume: wp.array(dtype=wp.float32, ndim=3), spacing: f
 
 
 @wp.kernel
-def transform_points(
+def transform_body(
         body_q: wp.array(dtype=wp.transform), body: int,
         in_points: wp.array(dtype=wp.vec3), out_points: wp.array(dtype=wp.vec3),
 ):
@@ -119,11 +119,13 @@ def volume_query_rays(
 ):
     i = wp.tid()
     n = int(ray_max_length / ray_step_length)
+    p = ray_starts[i]
     for _ in range(n):
-        p = ray_starts[i] + ray_directions[i] * ray_step_length * float(_)
+        last_p = p
+        p += ray_directions[i] * ray_step_length
         uvw = wp.cw_div(p - volume_origin, volume_spacing)
         if wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR) > ray_stop_threshold:
-            ray_stops[i] = p
+            ray_stops[i] = last_p
             return
 
 
@@ -284,16 +286,18 @@ def femoral_prothesis_collide(
     position = wp.cw_mul(wp.vec3(float(i), float(j), float(k)), volume_spacing) + volume_origin
 
     if wp.dot(position - neck_plane_center, neck_plane_outer) > 0:  # 颈口外力
-        return
-    elif wp.dot(position - canal_plane_center, canal_plane_outer) < 0:  # 髓内碰撞
-        if volume_array[i, j, k] > bound_threshold:
-            query = wp.mesh_query_point_sign_normal(mesh, position, wp.float32(1e6), wp.float32(1e-3))
-
-            if query.sign < 0:
-                force_position = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
-                f = (position - force_position) * 0.001
-                q = wp.cross(force_position - mesh_com, f)
-                body_f[body] += wp.spatial_vector(q[0], q[1], q[2], f[0], f[1], f[2])
+        f = wp.normalize(neck_plane_outer) * 9.8e2
+        q = wp.cross(position - mesh_com, f)
+        body_f[body] += wp.spatial_vector(q[0], q[1], q[2], f[0], f[1], f[2])
+    # elif wp.dot(position - canal_plane_center, canal_plane_outer) < 0:  # 髓内碰撞
+    #     if volume_array[i, j, k] > bound_threshold:
+    #         query = wp.mesh_query_point_sign_normal(mesh, position, wp.float32(1e6), wp.float32(1e-3))
+    #
+    #         if query.sign < 0:
+    #             force_position = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
+    #             f = (position - force_position) * 0.001
+    #             q = wp.cross(force_position - mesh_com, f)
+    #             body_f[body] += wp.spatial_vector(q[0], q[1], q[2], f[0], f[1], f[2])
 
 
 # @wp.kernel
@@ -327,12 +331,12 @@ def femoral_prothesis_collide(
 
 @wp.kernel
 def prothesis_render(
-        volume: wp.uint64, volume_origin: wp.vec3, volume_spacing: wp.vec3,
+        volume: wp.uint64, volume_origin: wp.vec3, volume_spacing: wp.vec3, bound_threshold: float,
         image: wp.array(dtype=wp.vec3, ndim=2), image_origin: wp.vec3, image_iso_spacing: float,
+        image_depth: wp.float32,
         image_x_axis: wp.vec3, image_y_axis: wp.vec3, image_z_axis: wp.vec3,
-        image_z_depth: wp.float32,
         threshold_min: float, window_min: float, window_max: float,
-        mesh: wp.uint64, mesh_transform: wp.transform, base_color: wp.vec3,
+        mesh: wp.uint64, base_color: wp.vec3,
         cut_plane_center: wp.vec3, cut_plane_normal: wp.vec3,
 ):
     i, j = wp.tid()
@@ -345,8 +349,10 @@ def prothesis_render(
     step = image_iso_spacing * image_z_axis
     pixel = float(0)
 
-    n = int(image_z_depth / image_iso_spacing)
+    n = int(image_depth / image_iso_spacing)
     pixel_n = float(0)
+    contact_a_n = float(0)
+    contact_p_n = float(0)
 
     cut_plane_normal = wp.normalize(cut_plane_normal)
 
@@ -364,16 +370,33 @@ def prothesis_render(
             if d < 0.0:
                 pixel += p
 
+                if p > bound_threshold:
+                    query = wp.mesh_query_point_sign_normal(mesh, position, wp.float32(1e6), wp.float32(1e-3))
+                    closest = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
+                    normal = wp.mesh_eval_face_normal(mesh, query.face)
+                    if wp.length(position - closest) < image_iso_spacing * 2.0:
+                        if wp.dot(normal, image_z_axis) < 0.0:
+                            contact_a_n += 1.0
+                        else:
+                            contact_p_n += 1.0
+
     if pixel_n > 0:
         pixel /= pixel_n
 
     pixel = wp.round((pixel - window_min) / (window_max - window_min) * 255.0)
     pixel = wp.clamp(pixel, 0.0, 255.0)
-    image[i, j] = wp.vec3(pixel)
+
+    if wp.max(contact_a_n, contact_p_n) > 0.0:
+        if contact_a_n > contact_p_n:
+            image[i, j] = wp.vec3(255.0, 0.0, 0.0)
+        else:
+            image[i, j] = wp.vec3(127.0, 0.0, 0.0)
+    else:
+        image[i, j] = wp.vec3(pixel)
 
     # mesh
     q = wp.mesh_query_ray(
-        mesh, ray_start, image_z_axis, image_z_depth,
+        mesh, ray_start, image_z_axis, image_depth,
     )
     if q.result:
         # 物理光照参数
@@ -417,4 +440,7 @@ def prothesis_render(
             wp.clamp(final_color[2], 0.0, 1.0)
         )
 
-        image[i, j] = final_color * 255.0
+        if wp.max(contact_a_n, contact_p_n) > 0.0:
+            image[i, j] = 0.5 * image[i, j] + 0.5 * final_color * 255.0
+        else:
+            image[i, j] = final_color * 255.0

@@ -34,7 +34,7 @@
 - [PyTorch](https://pytorch.org/get-started/locally)
 
 ```shell
-pip install -U numpy loguru gradio protobuf itk warp-lang cadquery gmsh diso
+pip install -U numpy loguru gradio protobuf itk warp-lang cadquery gmsh diso imageio
 ```
 
 ## 启动应用

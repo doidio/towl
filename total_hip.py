@@ -4,8 +4,10 @@ from pathlib import Path
 from typing import Optional
 
 import gradio as gr
+import imageio.v3 as iio
 import itk
 import numpy as np
+import trimesh
 import warp as wp
 import warp.sim  # noqa
 
@@ -26,7 +28,7 @@ init_volume_length: Optional[np.ndarray] = None
 
 iso_spacing = 0.5
 main_region_window = [-100.0, 900.0]
-bone_threshold = 300.0
+bone_threshold = 500.0
 
 main_region_min: Optional[np.ndarray] = None
 main_region_max: Optional[np.ndarray] = None
@@ -70,10 +72,12 @@ femur_stem_rgb = [85, 170, 255]
 prothesis_v_i: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
 
 femur_v_i: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
+femur_region: Optional[np.ndarray] = None
 femur_region_origin: Optional[np.ndarray] = None
 femur_region_size: Optional[np.ndarray] = None
 
 femur_smb: Optional[wp.sim.ModelBuilder] = None
+ps_body: Optional[int] = None
 
 g_default = {_: globals()[_] for _ in globals() if _ not in g_default and _ != 'g_default'}
 
@@ -216,8 +220,8 @@ def on_0_unload():
 
 def on_1_main_region(r, a, i, l, p, s):
     global main_region_min, main_region_max
-    main_region_min = np.min([[r, a, i], [l, p, s]], axis=0)
-    main_region_max = np.max([[r, a, i], [l, p, s]], axis=0)
+    main_region_min = np.min(np.array([[r, a, i], [l, p, s]]), axis=0)
+    main_region_max = np.max(np.array([[r, a, i], [l, p, s]]), axis=0)
 
 
 def on_2_op_side(index):
@@ -265,44 +269,50 @@ def on_femur_sim():
     if any([_ is None for _ in [neck_center, neck_z]]):
         raise gr.Error('缺少必要的解剖标志', print_exception=False)
 
-    canal = [kp_positions.get(_) for _ in ('股骨小粗隆髓腔中心', '股骨柄末端髓腔中心')]
-
     model = femur_smb.finalize()
     model.ground = False
-
-    integrator = wp.sim.SemiImplicitIntegrator()
-    import warp.sim.render
-    renderer = wp.sim.render.SimRenderer(model, 'femur.usd')
 
     state_0 = model.state()
     state_1 = model.state()
 
-    wp.sim.eval_fk(model, model.joint_q, model.joint_qd, None, state_0)
+    integrator = wp.sim.XPBDIntegrator(10)
+    import warp.sim.render
+    renderer = wp.sim.render.SimRenderer(model, 'femur.usd')
 
     sim_time = 0.0
-    sim_total_seconds = 10
-    frame_dt = 1.0 / (fps := 10)
-    sim_dt = frame_dt / (sim_steps := 90)
+    sim_total_seconds = 2
+    frame_dt = 1.0 / (fps := [15, 5])[0]
+    sim_dt = frame_dt / (sim_steps := 20)
 
-    # import importlib
-    # importlib.reload(tl.kernel)
+    points = wp.array(prothesis_v_i[0], wp.vec3)
+    mesh = wp.Mesh(wp.array(prothesis_v_i[0], wp.vec3), wp.array(prothesis_v_i[1].flatten(), wp.int32))
 
-    with wp.ScopedCapture() as capture:
-        for _ in range(sim_steps):
-            wp.sim.collide(model, state_0)
-            state_0.clear_forces()
-            state_1.clear_forces()
-
-            integrator.simulate(model, state_0, state_1, sim_dt)
-            state_0, state_1 = state_1, state_0
-
-    graph = capture.graph
-
+    size = np.array(femur_region.shape)
+    center = femur_region_origin + size * iso_spacing * 0.5
+    size = (size * 2 + 8) // 16 * 16
+    length = size * iso_spacing
+    origin = center - length * 0.5
+    origin[1] = main_region_origin[1]
     main_region_length = main_region_max - main_region_min
 
-    with wp.ScopedTimer('', print=False) as t:
-        for _ in range(fps * sim_total_seconds):
-            wp.capture_launch(graph)
+    image = wp.full(shape=(size[0], size[2]), value=wp.vec3(), dtype=wp.vec3)
+
+    frames = []
+
+    for sec in range(sim_total_seconds):
+        gr.Info(f'模拟置入 {sec + 1}/{sim_total_seconds} 秒')
+
+        for frame in range(fps[0]):
+            for _ in range(sim_steps):
+                wp.sim.collide(model, state_0)
+
+                state_0.clear_forces()
+                state_1.clear_forces()
+
+                state_0.body_f.assign([[0.0, 0.0, 0.0, *(canal_z * -9.8e6)]])
+
+                integrator.simulate(model, state_0, state_1, sim_dt)
+                state_0, state_1 = state_1, state_0
 
             renderer.begin_frame(sim_time)
             renderer.render(state_0)
@@ -310,29 +320,34 @@ def on_femur_sim():
 
             sim_time += frame_dt
 
-            print(_, state_0.body_q)
+            wp.launch(kernel=tl.kernel.transform_body, dim=mesh.points.shape, inputs=[
+                state_0.body_q, ps_body, points, mesh.points,
+            ])
+            mesh.refit()
 
-            # image = wp.full(shape=(main_region_size[0], main_region_size[2]), value=wp.vec3(), dtype=wp.vec3)
-            # wp.launch(kernel=tl.kernel.prothesis_render, dim=image.shape, inputs=[
-            #     init_volume.id, wp.vec3(init_volume_origin), wp.vec3(init_volume_spacing),
-            #     image, wp.vec3(main_region_origin), iso_spacing,
-            #     wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
-            #     main_region_length[1], main_region_window[0], *main_region_window,
-            #     mesh.id, state_0.body_q[0], wp.vec3(np.array(femur_stem_rgb) / 255.0),
-            #     wp.vec3(neck_center), wp.vec3(neck_z),
-            # ])
-            #
-            # image = np.flipud(image.numpy().astype(np.uint8).swapaxes(0, 1))
-            #
-            # yield {
-            #     _3_femur_image_xz: gr.Image(
-            #         image, image_mode='RGB', label='股骨柄透视',
-            #         show_download_button=False, interactive=False, visible=True,
-            #     ),
-            # }
+            wp.launch(kernel=tl.kernel.prothesis_render, dim=image.shape, inputs=[
+                init_volume.id, wp.vec3(init_volume_origin), init_volume_spacing, bone_threshold,
+                image, origin, iso_spacing, main_region_length[1],
+                wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0),
+                main_region_window[0], *main_region_window,
+                mesh.id, wp.vec3(np.array(femur_stem_rgb) / 255.0),
+                wp.vec3(neck_center), wp.vec3(neck_z),
+            ])
 
+            image_ui = np.flipud(image.numpy().astype(np.uint8).swapaxes(0, 1))
+            frames.append(image_ui)
+
+            yield {
+                _3_femur_sim_output: gr.Image(
+                    image_ui, image_mode='RGB', label='股骨柄物理模拟',
+                    show_download_button=False, interactive=False, visible=True,
+                ),
+            }
+
+    iio.imwrite('psf.mp4', frames, fps=fps[1])
     renderer.save()
-    gr.Success(f'模拟完成 {t.elapsed} ms')
+
+    gr.Success(f'模拟完成')
 
 
 def on_0_tab():
@@ -552,6 +567,8 @@ def on_3_tab():
     canal_x = np.cross(canal_y, canal_z)
     canal_x, canal_y, canal_z = [_ / np.linalg.norm(_) for _ in (canal_x, canal_y, canal_z)]
 
+    gr.Info('股骨柄建模')
+
     canal_x_edges = [
         canal[0], 0.7 * canal[0] + 0.3 * canal[1], 0.4 * canal[0] + 0.6 * canal[1], canal[1],
         canal[0], 0.7 * canal[0] + 0.3 * canal[1], 0.4 * canal[0] + 0.6 * canal[1], canal[1],
@@ -569,7 +586,7 @@ def on_3_tab():
             iso_spacing, 1e6, bone_threshold,
             canal_x_edges,
         ])
-        canal_x_edges = canal_x_edges.numpy()  # - np.array(ray_dirs) * 2.0
+        canal_x_edges = canal_x_edges.numpy() - np.array(ray_dirs) * iso_spacing
 
         canal_x_edges = canal_x_edges.reshape((2, -1, 3)).astype(float)
         canal_rx = 0.5 * np.linalg.norm(canal_x_edges[0, :] - canal_x_edges[1, :], axis=1)
@@ -622,13 +639,12 @@ def on_3_tab():
 
         global prothesis_v_i
         prothesis_v_i = tl.mesh.femoral_prothesis(splines, taper_center, neck_x)
-
-        import pyvista as pv
-        indices3 = np.insert(prothesis_v_i[1].flatten(), np.arange(0, len(prothesis_v_i[1].flatten()), 3), 3)
-        pv.PolyData(prothesis_v_i[0], indices3).save('prothesis.stl')
+        trimesh.Trimesh(*prothesis_v_i[:2]).export('prothesis.stl')
 
         mesh = wp.Mesh(wp.array(prothesis_v_i[0], wp.vec3), wp.array(prothesis_v_i[1].flatten(), wp.int32),
                        support_winding_number=True)
+
+        gr.Info('股骨柄透视')
 
         global main_region_min, main_region_max, main_region_size, main_region_origin
         main_region_length = main_region_max - main_region_min
@@ -653,6 +669,8 @@ def on_3_tab():
         ])
 
         femur_image_xz_ui = np.flipud(femur_image_xz_ui.numpy().astype(np.uint8).swapaxes(0, 1))
+
+        gr.Info('股骨柄截面')
 
         AP, AB = neck[1] - canal[0], canal[1] - canal[0]
         P = canal[0] + np.dot(AP, AB) / np.dot(AB, AB) * AB
@@ -686,7 +704,9 @@ def on_3_tab():
 
             femur_image_xy_ui.append(image.numpy().astype(np.uint8).swapaxes(0, 1))
 
-        global femur_region_size, femur_region_origin
+        gr.Info('股骨三维重建')
+
+        global femur_region, femur_region_size, femur_region_origin
         box = np.min(prothesis_v_i[0], axis=0), np.max(prothesis_v_i[0], axis=0)
         l = box[1] - box[0]
         l = np.array([l[0] * 2.0, l[1] * 2.0, l[2]])
@@ -707,9 +727,20 @@ def on_3_tab():
             wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold,
         ])
 
-        gr.Info('创建股骨网格体')
+        wp.launch(kernel=tl.kernel.volume_clip_plane, dim=femur_region.shape, inputs=[
+            femur_region, wp.vec3(femur_region_origin), iso_spacing,
+            wp.vec3(neck_center), wp.vec3(-canal_z), bone_threshold,
+        ])
+
         global femur_v_i
         femur_v_i = tl.kernel.volume_dual_marching_cubes(femur_region, iso_spacing, femur_region_origin, bone_threshold)
+        mesh = trimesh.Trimesh(femur_v_i[0], femur_v_i[1])
+        mesh.fix_normals()
+        mesh = max(mesh.split(), key=lambda _: _.volume)
+        femur_v_i = mesh.vertices, mesh.faces
+        trimesh.Trimesh(*prothesis_v_i[:2]).export('femur.stl')
+
+        gr.Info('准备物理模拟器')
 
         global femur_smb
         femur_smb = wp.sim.ModelBuilder((0.0, 0.0, 1.0), 0.0)
@@ -720,57 +751,17 @@ def on_3_tab():
             density=1.0,
         )
 
-        ps_vertices = prothesis_v_i[0] + canal_z * 30.0
+        ps_origin = canal_z * np.linalg.norm(canal[0] - canal[1])
+        ps_origin = wp.transform(ps_origin.tolist(), wp.quat_identity())
 
+        global ps_body
         femur_smb.add_shape_mesh(
-            body=femur_smb.add_body(name='prothesis'),
-            mesh=wp.sim.Mesh(ps_vertices.tolist(), prothesis_v_i[1].flatten().tolist()),
+            body=(ps_body := femur_smb.add_body(ps_origin, name='prothesis')),  # noqa
+            mesh=wp.sim.Mesh(prothesis_v_i[0].tolist(), prothesis_v_i[1].flatten().tolist()),
             density=1.0,
         )
 
-        model = femur_smb.finalize()
-        model.ground = False
-
-        state_0 = model.state()
-        state_1 = model.state()
-
-        integrator = wp.sim.XPBDIntegrator()
-        import warp.sim.render
-        renderer = wp.sim.render.SimRenderer(model, 'femur.usd')
-
-        sim_time = 0.0
-        sim_total_seconds = 60
-        frame_dt = 1.0 / (fps := 10)
-        sim_dt = frame_dt / (sim_steps := 10)
-
-        body_gravity = [0.0, 0.0, 0.0, 0.0, 0.0, -9.8e6]
-
-        with wp.ScopedCapture() as capture:
-            for _ in range(sim_steps):
-                wp.sim.collide(model, state_0)
-                state_0.clear_forces()
-                state_1.clear_forces()
-
-                state_0.body_f.assign(body_gravity)
-
-                integrator.simulate(model, state_0, state_1, sim_dt)
-                state_0, state_1 = state_1, state_0
-
-        for sec in range(sim_total_seconds):
-            gr.Info(f'模拟 {sec} 秒')
-
-            for _ in range(fps):
-                wp.capture_launch(capture.graph)
-
-                renderer.begin_frame(sim_time)
-                renderer.render(state_0)
-                renderer.end_frame()
-
-                sim_time += frame_dt
-
-        renderer.save()
-
-    gr.Success(f'创建假体成功 {t.elapsed:.1f} ms')
+    gr.Success(f'生成股骨柄完成 {t.elapsed:.1f} ms')
 
     return {
         _3_femur_image_xz: gr.Image(
@@ -781,8 +772,11 @@ def on_3_tab():
             femur_image_xy_ui, label='股骨柄截面',
             object_fit='contain', selected_index=0, columns=1, interactive=False, visible=True,
         ),
-        _3_femur_sim: gr.Button(visible=True, ),
-        _3_femur_sim_output: gr.Video(visible=True, ),
+        _3_femur_sim: gr.Button('开始模拟', visible=True, ),
+        _3_femur_sim_output: gr.Image(
+            None, image_mode='RGB', label='股骨柄物理模拟',
+            show_download_button=False, interactive=False, visible=True,
+        ),
     }
 
 
@@ -858,7 +852,7 @@ if __name__ == '__main__':
 
                 with gr.Column():
                     _3_femur_sim = gr.Button()
-                    _3_femur_sim_output = gr.Video()
+                    _3_femur_sim_output = gr.Image()
 
         # 控件集合
         all_ui = [[ui for name, ui in globals().items() if name.startswith(f'_{_}_') and 'tab' not in name]
@@ -929,7 +923,7 @@ if __name__ == '__main__':
             on_2_image_xy_select, _2_kp_image_xy, trigger_mode='once',
         ).success(on_2_tab, None, all_ui[2])
 
-        _3_femur_sim.click(on_femur_sim, None, [_3_femur_image_xz])
+        _3_femur_sim.click(on_femur_sim, None, [_3_femur_sim_output])
 
         # 标签页
         _0_tab.select(on_0_tab, None, all_ui[0])
