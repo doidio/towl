@@ -161,7 +161,7 @@ def on_0_load(filename):
         if save.HasField('init_volume'):
             _ = [*save.init_volume.region.size]
             init_array = np.frombuffer(save.init_volume.data, np.int16).reshape(_)
-            init_volume = wp.Volume.load_from_numpy(init_array, bg_value=np.min(init_array))
+            init_volume = wp.Volume.load_from_numpy(init_array, bg_value=float(np.min(init_array)))
 
             init_volume_size = np.array(save.init_volume.region.size)
             init_volume_spacing = np.array(save.init_volume.region.spacing)
@@ -201,7 +201,7 @@ def on_0_load(filename):
             init_volume_length = init_volume_size * init_volume_spacing
 
             init_array = itk.array_from_image(image).swapaxes(0, 2).copy()
-            init_volume = wp.Volume.load_from_numpy(init_array, bg_value=np.min(init_array))
+            init_volume = wp.Volume.load_from_numpy(init_array, bg_value=float(np.min(init_array)))
 
             main_region_min = np.zeros(3)
             main_region_max = init_volume_length.copy()
