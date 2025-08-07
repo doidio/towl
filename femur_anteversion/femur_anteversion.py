@@ -1,6 +1,6 @@
 # CUDA driver & PyTorch
 # pip install git+https://github.com/newton-physics/newton@f701455313df2ee83ec881d6612657882f2472a0
-# pip install -U itk warp-lang newton-clips==0.1.4
+# pip install itk warp-lang diso newton-clips==0.1.4
 
 import argparse
 import json
@@ -13,7 +13,6 @@ import warp as wp
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--name', required=True)
-parser.add_argument('--sim_dir')
 args = parser.parse_args()
 
 name = args.name
@@ -35,13 +34,13 @@ bone_threshold = cfg['骨阈值']
 prothesis_path = cfg['假体']
 margin = np.array(cfg['边距'])
 keypoints = np.array([spacing * cfg[_] for _ in (
-    '股骨柄颈锥圆心', '股骨颈口外缘', '股骨颈口内缘', '股骨小粗隆髓腔中心', '股骨柄末端髓腔中心',
+    '股骨颈口外缘', '股骨颈口内缘', '股骨小粗隆髓腔中心', '股骨柄末端髓腔中心',
 )])
 (
-    taper_center, neck_lateral, neck_medial, canal_entry, canal_deep,
+    neck_lateral, neck_medial, canal_entry, canal_deep,
 ) = keypoints
 
-# 计算股骨颈截骨面
+# 股骨颈截骨面坐标系
 neck_center = 0.5 * (neck_lateral + neck_medial)
 neck_x = neck_lateral - neck_medial
 neck_rx = 0.5 * np.linalg.norm(neck_x)
@@ -51,6 +50,7 @@ neck_y = np.cross(neck_z, neck_x)
 neck_z = np.cross(neck_x, neck_y)
 neck_x, neck_y, neck_z = [_ / np.linalg.norm(_) for _ in (neck_x, neck_y, neck_z)]
 
+# 股骨近端髓腔坐标系
 canal_z = canal_entry - canal_deep
 canal_x = canal_entry - neck_medial
 canal_y = np.cross(canal_z, canal_x)
@@ -78,6 +78,7 @@ wp.context.launch(femur_proximal_region, region.shape, [
 
 # 等值面网格重建
 femur_mesh = diff_dmc(region, iso_spacing, region_origin, bone_threshold)
+femur_mesh.export('femur.stl')
 femur_mesh.apply_translation([-canal_entry[0], -canal_entry[1], -box[1][2]])
 femur_mesh.apply_scale(1e-2)
 
@@ -94,7 +95,7 @@ builder = newton.ModelBuilder('Z')
 builder.add_shape_mesh(
     body=-1,
     mesh=newton.Mesh(femur_mesh.vertices, femur_mesh.faces.flatten()),
-    cfg=builder.ShapeConfig(),
+    cfg=builder.ShapeConfig(mu=0.0),
     key='femur',
 )
 
@@ -105,10 +106,9 @@ mesh.apply_translation([0, 0, -np.min(mesh.vertices[:, 2])])
 mesh.apply_scale(1e-2)
 builder.add_shape_mesh(
     body=builder.add_body(),
-    xform=(0, 0, 0, 0, 0, 0, 1),
     mesh=newton.Mesh(mesh.vertices, mesh.faces.flatten()),
-    cfg=builder.ShapeConfig(),
-    key='femur',
+    cfg=builder.ShapeConfig(mu=0.0),
+    key='prothesis',
 )
 
 model = builder.finalize()
@@ -120,11 +120,11 @@ renderer = newton.utils.SimRendererOpenGL(model)
 
 fps = 60
 frame_dt = 1.0 / fps
-sim_substeps = 500
+sim_substeps = 50
 sim_dt = frame_dt / sim_substeps
 sim_time = 0.0
 
-for fid in range(num_frames := 500):
+for fid in range(num_frames := 200):
     with wp.utils.ScopedTimer(f'frame: {fid}'):
         for _ in range(sim_substeps):
             contacts = model.collide(state_0)
