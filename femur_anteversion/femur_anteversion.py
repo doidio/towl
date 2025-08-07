@@ -4,6 +4,7 @@
 
 import argparse
 import json
+import warnings
 from pathlib import Path
 
 import itk
@@ -130,7 +131,7 @@ sim_substeps = 50
 sim_dt = frame_dt / sim_substeps
 sim_time = 0.0
 
-for fid in range(num_frames := 200):
+for fid in range(num_frames := 5000):
     with wp.utils.ScopedTimer(f'frame: {fid}'):
         for _ in range(sim_substeps):
             contacts = model.collide(state_0)
@@ -146,5 +147,20 @@ for fid in range(num_frames := 200):
     renderer.begin_frame(sim_time)
     renderer.render(state_0)
     renderer.end_frame()
+
+    # 静止，角速度 < 1 deg/s，线速度 < 1 mm/s
+    body_qd = state_0.body_qd.numpy()
+    angular = np.max(np.linalg.norm(body_qd[:, :3], axis=1))
+    linear = np.max(np.linalg.norm(body_qd[:, 3:], axis=1))
+
+    if angular < np.deg2rad(1) and linear < 1e-4:
+        break
+
+    # 失效，假体坠落过低
+    body_q = state_0.body_q.numpy()
+    z_min = np.min(body_q[:, 2])
+    if z_min < -region_length[2] * 2e-2:
+        warnings.warn(f'failed {name}')
+        break
 
 renderer.save()
