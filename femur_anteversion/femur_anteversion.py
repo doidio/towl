@@ -57,29 +57,34 @@ canal_y = np.cross(canal_z, canal_x)
 canal_x = np.cross(canal_y, canal_z)
 canal_x, canal_y, canal_z = [_ / np.linalg.norm(_) for _ in (canal_x, canal_y, canal_z)]
 
-# 重采样，股骨颈截骨
+# 区域坐标系
+_ = wp.quat_from_matrix(wp.types.mat33(np.array([canal_x, canal_y, canal_z]).T))
+xform = wp.types.transform(canal_deep - canal_z * margin[2], _)
+
+# 区域重采样，股骨颈截骨
+_ = [np.array(wp.transform_point(xform, wp.types.vec3(_))) for _ in keypoints]
 box = (
-    np.min(keypoints, axis=0) - margin,
-    np.max(keypoints, axis=0) + margin,
+    np.min(_, axis=0) - margin,
+    np.max(_, axis=0) + margin,
 )
-region_size = np.round((box[1] - box[0]) / (iso_spacing := 1.0))
-region_origin = box[0]
+region_size = np.ceil((box[1] - box[0]) / (iso_spacing := 1.0))
+region_length = region_size * iso_spacing
+region_origin = np.array([-0.5 * region_length[0], -0.5 * region_length[1], 0.0])
 
 from kernel import femur_proximal_region, diff_dmc
 
 region = wp.context.full(shape=(*region_size,), value=bg_value, dtype=wp.types.float32)
 wp.context.launch(femur_proximal_region, region.shape, [
     wp.types.uint64(volume.id), wp.types.vec3(spacing),
-    region, wp.types.vec3(region_origin), iso_spacing,
+    region, wp.types.vec3(region_origin), iso_spacing, xform,
     wp.types.vec3(neck_center), wp.types.vec3(-canal_z),
     wp.types.vec3(neck_center), wp.types.vec3(-neck_z),
     bone_threshold,
 ])
+# itk.imwrite(itk.image_from_array(region.numpy().transpose(2, 1, 0).copy()), 'region.nii.gz')
 
 # 等值面网格重建
 femur_mesh = diff_dmc(region, iso_spacing, region_origin, bone_threshold)
-femur_mesh.export('femur.stl')
-femur_mesh.apply_translation([-canal_entry[0], -canal_entry[1], -box[1][2]])
 femur_mesh.apply_scale(1e-2)
 
 # 物理模拟
@@ -100,10 +105,11 @@ builder.add_shape_mesh(
 )
 
 mesh = trimesh.load_mesh(f'fs/{prothesis_path}')
-mesh.vertices = np.vstack([mesh.vertices[:, 0], mesh.vertices[:, 2], mesh.vertices[:, 1]]).T
+mesh.vertices = np.vstack([-mesh.vertices[:, 0], mesh.vertices[:, 2], mesh.vertices[:, 1]]).T
 mesh.fix_normals()
-mesh.apply_translation([0, 0, -np.min(mesh.vertices[:, 2])])
+mesh.apply_translation([0, 0, region_length[2] - np.min(mesh.vertices[:, 2])])
 mesh.apply_scale(1e-2)
+
 builder.add_shape_mesh(
     body=builder.add_body(),
     mesh=newton.Mesh(mesh.vertices, mesh.faces.flatten()),

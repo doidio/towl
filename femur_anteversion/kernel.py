@@ -6,7 +6,7 @@ import warp as wp
 @wp.context.kernel
 def femur_proximal_region(
         volume: wp.types.uint64, spacing: wp.types.vec3,
-        region: wp.types.array(ndim=3), region_origin: wp.types.vec3, region_spacing: float,
+        region: wp.types.array(ndim=3), region_origin: wp.types.vec3, region_spacing: float, xform: wp.types.transform,
         neck_hcut_center: wp.types.vec3, neck_hcut_normal: wp.types.vec3,
         neck_vcut_center: wp.types.vec3, neck_vcut_normal: wp.types.vec3,
         bone_threshold: float,
@@ -15,6 +15,7 @@ def femur_proximal_region(
 
     # 采样值
     p = region_origin + region_spacing * wp.types.vec3(float(i), float(j), float(k))
+    p = wp.transform_point(xform, p)
 
     uvw = wp.cw_div(p, spacing)
     pixel = wp.volume_sample_f(volume, uvw, wp.types.Volume.LINEAR)
