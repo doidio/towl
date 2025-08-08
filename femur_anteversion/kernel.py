@@ -23,18 +23,20 @@ def femur_proximal_region(
     # 横切股骨颈
     d = wp.dot(wp.normalize(neck_hcut_normal), p - neck_hcut_center)
 
-    if d <= 0.0:
-        pixel = d + bone_threshold
-    elif d < region_spacing * 1.5 and pixel > bone_threshold:
-        pixel = d + bone_threshold
+    if pixel > bone_threshold:
+        if d <= 0.0:
+            pixel = d + bone_threshold
+        elif d < region_spacing * 1.5 and pixel > bone_threshold:
+            pixel = d + bone_threshold
 
     # 竖切股骨颈
     d = wp.dot(wp.normalize(neck_vcut_normal), p - neck_vcut_center)
 
-    if d <= 0.0:
-        pixel = d + bone_threshold
-    elif d < region_spacing * 1.5 and pixel > bone_threshold:
-        pixel = d + bone_threshold
+    if pixel > bone_threshold:
+        if d <= 0.0:
+            pixel = d + bone_threshold
+        elif d < region_spacing * 1.5 and pixel > bone_threshold:
+            pixel = d + bone_threshold
 
     region[i, j, k] = region.dtype(pixel)
 
