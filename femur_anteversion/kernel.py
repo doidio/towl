@@ -3,6 +3,16 @@ import trimesh
 import warp as wp
 
 
+def diff_dmc(volume: wp.types.array(dtype=wp.types.float32, ndim=3), spacing: float | np.ndarray,
+             origin: np.ndarray, threshold: float):
+    import torch
+    from diso import DiffDMC
+    vertices, indices = DiffDMC(dtype=torch.float32)(-wp.to_torch(volume), None, isovalue=-threshold)
+    vertices, indices = vertices.cpu().numpy(), indices.cpu().numpy()
+    vertices = vertices * spacing * np.array(volume.shape) + origin
+    return trimesh.Trimesh(vertices, indices)
+
+
 @wp.context.kernel
 def femur_proximal_region(
         volume: wp.types.uint64, spacing: wp.types.vec3,
@@ -41,11 +51,12 @@ def femur_proximal_region(
     region[i, j, k] = region.dtype(pixel)
 
 
-def diff_dmc(volume: wp.types.array(dtype=wp.types.float32, ndim=3), spacing: float | np.ndarray,
-             origin: np.ndarray, threshold: float):
-    import torch
-    from diso import DiffDMC
-    vertices, indices = DiffDMC(dtype=torch.float32)(-wp.to_torch(volume), None, isovalue=-threshold)
-    vertices, indices = vertices.cpu().numpy(), indices.cpu().numpy()
-    vertices = vertices * spacing * np.array(volume.shape) + origin
-    return trimesh.Trimesh(vertices, indices)
+@wp.context.kernel
+def femur_diff_region(
+        volume_0: wp.types.uint64, spacing_0: wp.types.vec3,
+        xform_0: wp.types.transform, origin_0: wp.types.vec3,
+        volume_1: wp.types.uint64, spacing_1: wp.types.vec3,
+        xform_1: wp.types.transform, origin_1: wp.types.vec3,
+        bone_threshold: float, align: wp.types.transform, diff_0: wp.types.array(ndim=3),
+):
+    i, j, k = wp.tid()
