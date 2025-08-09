@@ -80,7 +80,7 @@ def main(cfg_path: str, headless: bool = False, recompute: bool = False):
     _ = image_path.parent / f'{cfg_path.stem}_术前股骨.stl'
     femur_mesh.export(_.as_posix())
 
-    # 载入假体，竖直放置在地面(Z=0)上
+    # 载入假体，竖直放置在股骨区域上方
     prothesis_mesh = trimesh.load_mesh(f'fs/{prothesis_path}')
     prothesis_mesh.vertices = prothesis_mesh.vertices[:, [0, 2, 1]] * [-1, 1, 1]
     prothesis_mesh.vertices[:, 2] += region_height - np.min(prothesis_mesh.vertices[:, 2])
