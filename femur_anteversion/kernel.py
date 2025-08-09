@@ -14,12 +14,9 @@ def diff_dmc(volume: wp.types.array(dtype=wp.types.float32, ndim=3), spacing: fl
 
 
 @wp.context.kernel
-def femur_proximal_region(
+def femur_sample_region(
         volume: wp.types.uint64, spacing: wp.types.vec3,
         region: wp.types.array(ndim=3), region_origin: wp.types.vec3, region_spacing: float, xform: wp.types.transform,
-        neck_hcut_center: wp.types.vec3, neck_hcut_normal: wp.types.vec3,
-        neck_vcut_center: wp.types.vec3, neck_vcut_normal: wp.types.vec3,
-        bone_threshold: float,
 ):
     i, j, k = wp.tid()
 
@@ -30,7 +27,20 @@ def femur_proximal_region(
     uvw = wp.cw_div(p, spacing)
     pixel = wp.volume_sample_f(volume, uvw, wp.types.Volume.LINEAR)
 
-    # 横切股骨颈
+    region[i, j, k] = region.dtype(pixel)
+
+
+@wp.context.kernel
+def femur_cut_head(
+        region: wp.types.array(ndim=3), region_origin: wp.types.vec3, region_spacing: float, xform: wp.types.transform,
+        neck_hcut_center: wp.types.vec3, neck_hcut_normal: wp.types.vec3, bone_threshold: float,
+):
+    i, j, k = wp.tid()
+    pixel = region[i, j, k]
+
+    p = region_origin + region_spacing * wp.types.vec3(float(i), float(j), float(k))
+    p = wp.transform_point(xform, p)
+
     d = wp.dot(wp.normalize(neck_hcut_normal), p - neck_hcut_center)
 
     if pixel > bone_threshold:
@@ -39,24 +49,4 @@ def femur_proximal_region(
         elif d < region_spacing * 1.5 and pixel > bone_threshold:
             pixel = d + bone_threshold
 
-    # 竖切股骨颈
-    d = wp.dot(wp.normalize(neck_vcut_normal), p - neck_vcut_center)
-
-    if pixel > bone_threshold:
-        if d <= 0.0:
-            pixel = d + bone_threshold
-        elif d < region_spacing * 1.5 and pixel > bone_threshold:
-            pixel = d + bone_threshold
-
     region[i, j, k] = region.dtype(pixel)
-
-
-@wp.context.kernel
-def femur_diff_region(
-        volume_0: wp.types.uint64, spacing_0: wp.types.vec3,
-        xform_0: wp.types.transform, origin_0: wp.types.vec3,
-        volume_1: wp.types.uint64, spacing_1: wp.types.vec3,
-        xform_1: wp.types.transform, origin_1: wp.types.vec3,
-        bone_threshold: float, align: wp.types.transform, diff_0: wp.types.array(ndim=3),
-):
-    i, j, k = wp.tid()
