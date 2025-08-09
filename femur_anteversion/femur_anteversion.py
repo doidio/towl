@@ -77,7 +77,7 @@ def main(cfg_path: str, headless: bool = False, recompute: bool = False):
         raise RuntimeError('Empty pre-op femur mesh')
     femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
 
-    _ = image_path.parent / f'{cfg_path.name}_术前股骨.stl'
+    _ = image_path.parent / f'{cfg_path.stem}_术前股骨.stl'
     femur_mesh.export(_.as_posix())
 
     # 载入假体，竖直放置在地面(Z=0)上
@@ -169,7 +169,7 @@ def main(cfg_path: str, headless: bool = False, recompute: bool = False):
     matrix = np.reshape(wp.transform_to_matrix(sim_xform), (4, 4))
     prothesis_mesh.apply_transform(matrix)
 
-    _ = image_path.parent / f'{cfg_path.name}_术前假体.stl'
+    _ = image_path.parent / f'{cfg_path.stem}_术前假体.stl'
     prothesis_mesh.export(_.as_posix())
 
     # 载入术后图像
@@ -218,7 +218,7 @@ def main(cfg_path: str, headless: bool = False, recompute: bool = False):
     femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
     femur_meshes.append(femur_mesh)
 
-    _ = image_path.parent / f'{cfg_path.name}_术后股骨.stl'
+    _ = image_path.parent / f'{cfg_path.stem}_术后股骨.stl'
     femur_mesh.export(_.as_posix())
 
     # 术后重建假体
@@ -228,7 +228,7 @@ def main(cfg_path: str, headless: bool = False, recompute: bool = False):
     # prothesis_mesh = max(prothesis_mesh.split(), key=lambda c: c.area)
     prothesis_meshes.append(prothesis_mesh)
 
-    _ = image_path.parent / f'{cfg_path.name}_术后假体.stl'
+    _ = image_path.parent / f'{cfg_path.stem}_术后假体.stl'
     prothesis_mesh.export(_.as_posix())
 
     # 股骨配准
@@ -242,7 +242,7 @@ def main(cfg_path: str, headless: bool = False, recompute: bool = False):
         raise RuntimeError('Empty post-op femur mesh')
     femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
 
-    _ = image_path.parent / f'{cfg_path.name}_术后股骨_远端.stl'
+    _ = image_path.parent / f'{cfg_path.stem}_术后股骨_远端.stl'
     femur_mesh.export(_.as_posix())
 
     matrix = None
@@ -262,13 +262,13 @@ def main(cfg_path: str, headless: bool = False, recompute: bool = False):
     femur_meshes[1].apply_transform(matrix)
     prothesis_mesh.apply_transform(matrix)
 
-    _ = image_path.parent / f'{cfg_path.name}_术后股骨_远端_配准.stl'
+    _ = image_path.parent / f'{cfg_path.stem}_术后股骨_远端_配准.stl'
     femur_mesh.export(_.as_posix())
 
-    _ = image_path.parent / f'{cfg_path.name}_术后股骨_配准.stl'
+    _ = image_path.parent / f'{cfg_path.stem}_术后股骨_配准.stl'
     femur_meshes[1].export(_.as_posix())
 
-    _ = image_path.parent / f'{cfg_path.name}_术后假体_配准.stl'
+    _ = image_path.parent / f'{cfg_path.stem}_术后假体_配准.stl'
     prothesis_mesh.export(_.as_posix())
 
 
