@@ -146,12 +146,12 @@ def main(cfg_path: str, headless: bool = False, recompute: bool = False, substep
             linear = np.max(np.linalg.norm(body_qd[:, 3:], axis=1))
 
             # 失败，假体速度崩溃或位置过低
-            if np.isnan(body_qd[0]).any() or np.min(body_q[:, 2]) < -region_height * 2e-2:
+            if np.isnan(body_qd[0]).any() or np.min(body_q[:, 2]) < -region_height * 1e-2:
                 warnings.warn(f'sim failed {cfg_path.as_posix()}')
                 break
 
             # 静止，角速度 < 1 deg/s，线速度 < 1 mm/s
-            elif angular < np.deg2rad(1) and linear < 1e-4:
+            elif angular < np.deg2rad(1) and linear < 1e-3:
                 print(f'sim completed {cfg_path.as_posix()}')
                 sim_xform = body_q[0].copy()
                 sim_xform[:3] *= 1e2
