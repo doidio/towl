@@ -14,34 +14,35 @@ def diff_dmc(volume: wp.types.array(dtype=wp.types.float32, ndim=3), spacing: fl
 
 
 @wp.context.kernel
-def femur_sample_region(
+def region_sample(
         volume: wp.types.uint64, spacing: wp.types.vec3,
-        region: wp.types.array(ndim=3), region_origin: wp.types.vec3, region_spacing: float, xform: wp.types.transform,
+        region_array: wp.types.array(ndim=3), region_origin: wp.types.vec3, region_spacing: float,
+        region_xform: wp.types.transform,
 ):
     i, j, k = wp.tid()
 
     # 采样值
     p = region_origin + region_spacing * wp.types.vec3(float(i), float(j), float(k))
-    p = wp.transform_point(xform, p)
+    p = wp.transform_point(region_xform, p)
 
     uvw = wp.cw_div(p, spacing)
     pixel = wp.volume_sample_f(volume, uvw, wp.types.Volume.LINEAR)
 
-    region[i, j, k] = region.dtype(pixel)
+    region_array[i, j, k] = region_array.dtype(pixel)
 
 
 @wp.context.kernel
-def femur_cut_head(
-        region: wp.types.array(ndim=3), region_origin: wp.types.vec3, region_spacing: float, xform: wp.types.transform,
-        neck_hcut_center: wp.types.vec3, neck_hcut_normal: wp.types.vec3, bone_threshold: float,
+def planar_cut(
+        region_array: wp.types.array(ndim=3), region_origin: wp.types.vec3, region_spacing: float,
+        region_xform: wp.types.transform, center: wp.types.vec3, normal: wp.types.vec3, bone_threshold: float,
 ):
     i, j, k = wp.tid()
-    pixel = region[i, j, k]
+    pixel = region_array[i, j, k]
 
     p = region_origin + region_spacing * wp.types.vec3(float(i), float(j), float(k))
-    p = wp.transform_point(xform, p)
+    p = wp.transform_point(region_xform, p)
 
-    d = wp.dot(wp.normalize(neck_hcut_normal), p - neck_hcut_center)
+    d = wp.dot(wp.normalize(normal), p - center)
 
     if pixel > bone_threshold:
         if d <= 0.0:
@@ -49,4 +50,4 @@ def femur_cut_head(
         elif d < region_spacing * 1.5 and pixel > bone_threshold:
             pixel = d + bone_threshold
 
-    region[i, j, k] = region.dtype(pixel)
+    region_array[i, j, k] = region_array.dtype(pixel)
