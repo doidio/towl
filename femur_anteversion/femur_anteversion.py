@@ -22,7 +22,7 @@ locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 newtonclips.SAVE_DIR = '.clips'
 
 
-def main(cfg_path: str, headless: bool = False, recompute: bool = False, substeps: int = 100):
+def main(cfg_path: str, headless: bool = False, overwrite: bool = False, substeps: int = 100):
     cfg_path = Path(cfg_path)
     cfg = json.loads(cfg_path.read_text('utf-8'))
 
@@ -85,7 +85,7 @@ def main(cfg_path: str, headless: bool = False, recompute: bool = False, substep
     std_prothesis_mesh.fix_normals()
 
     # 假体植入碰撞模拟
-    if (pre_region_to_std := cfg.get('术前区域变换到标准假体')) and not recompute:
+    if (pre_region_to_std := cfg.get('术前区域变换到标准假体')) and not overwrite:
         pre_region_to_std = wp.types.transform(*pre_region_to_std)
     else:
         builder = newton.ModelBuilder('Z')
@@ -229,7 +229,7 @@ def main(cfg_path: str, headless: bool = False, recompute: bool = False, substep
     femur_distal_mesh = max(femur_distal_mesh.split(), key=lambda c: c.area)
 
     # 利用股骨配准术前术后区域
-    if (post_to_pre_region := cfg.get('术后区域变换到术前区域')) and not recompute:
+    if (post_to_pre_region := cfg.get('术后区域变换到术前区域')) and not overwrite:
         post_to_pre_region = wp.types.transform(*post_to_pre_region)
     else:
         matrix = None
@@ -261,7 +261,7 @@ def main(cfg_path: str, headless: bool = False, recompute: bool = False, substep
     twin_prothesis_mesh.apply_transform(pre_region_to_std)
 
     # 利用股骨配准术前术后区域
-    if (twin_to_std_prothesis := cfg.get('配准假体变换到标准假体')) and not recompute:
+    if (twin_to_std_prothesis := cfg.get('配准假体变换到标准假体')) and not overwrite:
         twin_to_std_prothesis = wp.types.transform(*twin_to_std_prothesis)
     else:
         matrix = None
@@ -357,9 +357,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--headless', default=False)
-    parser.add_argument('--recompute', default=False)
+    parser.add_argument('--overwrite', default=False)
     parser.add_argument('--substeps', default=100)
     args = parser.parse_args()
 
     with wp.utils.ScopedTimer(args.config):
-        main(args.config, args.headless, args.recompute, args.substeps)
+        main(args.config, args.headless, args.overwrite, args.substeps)
