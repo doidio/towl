@@ -63,8 +63,8 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     ) = subregion(*keypoints, margin, iso_spacing)
     region_height = region_size[2] * iso_spacing
 
-    # 术前股骨重建，碰撞皮质骨表面
-    from kernel import diff_dmc, region_sample, planar_cut, canal_expand
+    # 术前股骨重建，小粗隆以上匹配较低骨阈值
+    from kernel import diff_dmc, region_sample, planar_cut
     femur_region = wp.context.full(shape=(*region_size,), value=bg_value, dtype=wp.types.float32)
     wp.context.launch(region_sample, femur_region.shape, [
         wp.types.uint64(volume.id), wp.types.vec3(spacing),
@@ -78,18 +78,31 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
         wp.types.vec3(neck_center), wp.types.vec3(-neck_z), bone_threshold[0],
     ])
-
-    # 小粗隆以下扩髓
-    _ = 0.5 * keypoints[1] + 0.5 * keypoints[2]
-    wp.context.launch(canal_expand, femur_region.shape, [
+    wp.context.launch(planar_cut, femur_region.shape, [
         femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(_), wp.types.vec3(-canal_z), bone_threshold[0], bone_threshold[1],
+        wp.types.vec3(keypoints[2]), wp.types.vec3(canal_z), bone_threshold[0],
     ])
 
-    femur_mesh = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
-    if femur_mesh.is_empty:
+    femur_mesh_proximal = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
+    if femur_mesh_proximal.is_empty:
         raise RuntimeError('Empty pre-op femur mesh')
-    femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
+    femur_mesh_proximal = max(femur_mesh_proximal.split(), key=lambda c: c.area)
+
+    # 术前股骨重建，小粗隆以下匹配较低骨阈值
+    femur_region = wp.context.full(shape=(*region_size,), value=bg_value, dtype=wp.types.float32)
+    wp.context.launch(region_sample, femur_region.shape, [
+        wp.types.uint64(volume.id), wp.types.vec3(spacing),
+        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+    ])
+    wp.context.launch(planar_cut, femur_region.shape, [
+        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+        wp.types.vec3(keypoints[2]), wp.types.vec3(-canal_z), bone_threshold[1],
+    ])
+
+    femur_mesh_distal = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[1])
+    if femur_mesh_distal.is_empty:
+        raise RuntimeError('Empty pre-op femur mesh')
+    femur_mesh_distal = max(femur_mesh_distal.split(), key=lambda c: c.area)
 
     # 载入假体，竖直放置在股骨区域上方
     std_prothesis_mesh = trimesh.load_mesh(f'fs/{prothesis_path}')
@@ -103,12 +116,20 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     else:
         builder = newton.ModelBuilder('Z')
 
-        vertices = femur_mesh.vertices * 1e-2  # mm -> cm
+        vertices = femur_mesh_proximal.vertices * 1e-2  # mm -> cm
         builder.add_shape_mesh(
-            mesh=newton.Mesh(vertices, femur_mesh.faces.flatten()),
+            mesh=newton.Mesh(vertices, femur_mesh_proximal.faces.flatten()),
             body=-1,  # 固定刚体
             cfg=builder.ShapeConfig(mu=0, ke=1e3),  # 零摩擦系数
-            key='femur',
+            key='femur_proximal',
+        )
+
+        vertices = femur_mesh_distal.vertices * 1e-2  # mm -> cm
+        builder.add_shape_mesh(
+            mesh=newton.Mesh(vertices, femur_mesh_distal.faces.flatten()),
+            body=-1,  # 固定刚体
+            cfg=builder.ShapeConfig(mu=0, ke=1e3),  # 零摩擦系数
+            key='femur_distal',
         )
 
         vertices = std_prothesis_mesh.vertices * 1e-2  # mm -> cm
@@ -178,10 +199,14 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
                 cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
                 break
 
-            if contacts.rigid_contact_count.numpy()[0] > 0:
-                force = [[0.0, -500.0, 0.0, 0.0, 0.0, 0.0]]  # 力矩迫使柄压紧股骨距
+            if contacts.rigid_contact_count.numpy()[0] > 0:  # 开始接触时施加Y轴力矩迫使柄压紧近端前内壁
+                force = [[0.0, -50.0, 0.0, 0.0, 0.0, -50.0]]
                 substeps = 500
                 sim_dt = frame_dt / substeps
+
+                if linear < 10e-2:  # 即将稳定时施加Z轴力矩迫使柄压紧近端后方股骨距
+                    force = [[0.0, -50.0, 50.0, 0.0, 0.0, -50.0]]
+                    print('TorsionZ')
 
         renderer.save()
 
