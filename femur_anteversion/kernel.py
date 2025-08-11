@@ -51,3 +51,23 @@ def planar_cut(
             pixel = d + bone_threshold
 
     region_array[i, j, k] = region_array.dtype(pixel)
+
+
+@wp.context.kernel
+def canal_expand(
+        region_array: wp.types.array(ndim=3), region_origin: wp.types.vec3, region_spacing: float,
+        region_xform: wp.types.transform, center: wp.types.vec3, normal: wp.types.vec3,
+        bone_threshold_min: float, bone_threshold_max: float,
+):
+    i, j, k = wp.tid()
+    pixel = region_array[i, j, k]
+
+    p = region_origin + region_spacing * wp.types.vec3(float(i), float(j), float(k))
+    p = wp.transform_point(region_xform, p)
+
+    d = wp.dot(wp.normalize(normal), p - center)
+
+    if d > 0.0 and pixel <= bone_threshold_max:
+        pixel += bone_threshold_min - bone_threshold_max
+
+    region_array[i, j, k] = region_array.dtype(pixel)

@@ -26,7 +26,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     cfg_path = Path(cfg_path)
     cfg = json.loads(cfg_path.read_text('utf-8'))
 
-    bone_threshold = cfg['可压缩骨阈值']
+    bone_threshold = cfg['骨阈值']
     prothesis_threshold = cfg['假体阈值']
     prothesis_path = cfg['假体']
     margin = np.array(cfg['边距'])
@@ -64,7 +64,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     region_height = region_size[2] * iso_spacing
 
     # 术前股骨重建，碰撞皮质骨表面
-    from kernel import diff_dmc, region_sample, planar_cut
+    from kernel import diff_dmc, region_sample, planar_cut, canal_expand
     femur_region = wp.context.full(shape=(*region_size,), value=bg_value, dtype=wp.types.float32)
     wp.context.launch(region_sample, femur_region.shape, [
         wp.types.uint64(volume.id), wp.types.vec3(spacing),
@@ -72,10 +72,21 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     ])
     wp.context.launch(planar_cut, femur_region.shape, [
         femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(keypoints[1]), wp.types.vec3(-canal_z), bone_threshold[1],
+        wp.types.vec3(neck_center), wp.types.vec3(-canal_z), bone_threshold[0],
+    ])
+    wp.context.launch(planar_cut, femur_region.shape, [
+        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+        wp.types.vec3(neck_center), wp.types.vec3(-neck_z), bone_threshold[0],
     ])
 
-    femur_mesh = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[1])
+    # 小粗隆以下扩髓
+    _ = 0.5 * keypoints[1] + 0.5 * keypoints[2]
+    wp.context.launch(canal_expand, femur_region.shape, [
+        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+        wp.types.vec3(_), wp.types.vec3(-canal_z), bone_threshold[0], bone_threshold[1],
+    ])
+
+    femur_mesh = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
     if femur_mesh.is_empty:
         raise RuntimeError('Empty pre-op femur mesh')
     femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
@@ -154,8 +165,8 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
                 warnings.warn(f'sim failed {cfg_path.as_posix()}')
                 break
 
-            # 静止，角速度 < 1 deg/s，线速度 < 1 mm/s
-            elif angular < 1 and linear < 1e-2:
+            # 静止，角速度 < 1.5 deg/s，线速度 < 1.0 mm/s
+            elif angular < 1.5 and linear < 1.0e-2:
                 print(f'sim completed {cfg_path.as_posix()}')
                 sim_xform = body_q[0].copy()
                 sim_xform[:3] *= 1e2
@@ -182,7 +193,11 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     ])
     wp.context.launch(planar_cut, femur_region.shape, [
         femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(keypoints[1]), wp.types.vec3(-canal_z), bone_threshold[0],
+        wp.types.vec3(neck_center), wp.types.vec3(-canal_z), bone_threshold[0],
+    ])
+    wp.context.launch(planar_cut, femur_region.shape, [
+        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+        wp.types.vec3(neck_center), wp.types.vec3(-neck_z), bone_threshold[0],
     ])
 
     femur_mesh = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
@@ -235,6 +250,14 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     wp.context.launch(region_sample, femur_region.shape, [
         wp.types.uint64(volume.id), wp.types.vec3(spacing),
         femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+    ])
+    wp.context.launch(planar_cut, femur_region.shape, [
+        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+        wp.types.vec3(neck_center), wp.types.vec3(-canal_z), bone_threshold[0],
+    ])
+    wp.context.launch(planar_cut, femur_region.shape, [
+        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+        wp.types.vec3(neck_center), wp.types.vec3(-neck_z), bone_threshold[0],
     ])
     femur_regions.append(femur_region)
 
