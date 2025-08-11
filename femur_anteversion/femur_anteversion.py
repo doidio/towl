@@ -136,12 +136,15 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
         state_0.body_q.assign(((0, 0, region_height * 1e-2, 0, 0, 0, 1),))  # 初始位置升高
 
+        force = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]
         for fid in range(5000):
             with wp.utils.ScopedTimer('', print=False) as t:
                 for _ in range(substeps):
                     contacts = model.collide(state_0)
                     state_0.clear_forces()
                     state_1.clear_forces()
+
+                    state_0.body_f.assign(force)
 
                     solver.step(state_0, state_1, control, contacts, sim_dt)
 
@@ -158,7 +161,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
             angular = np.rad2deg(np.max(np.linalg.norm(body_qd[:, :3], axis=1)))
             linear = np.max(np.linalg.norm(body_qd[:, 3:], axis=1))
 
-            print(f'sim frame {fid} velocity {angular:.2f} deg/s {linear*1e2:.2f} mm/s took {t.elapsed:.3f} ms')
+            print(f'sim frame {fid} velocity {angular:.2f} deg/s {linear * 1e2:.2f} mm/s took {t.elapsed:.3f} ms')
 
             # 失败，假体速度崩溃或位置过低
             if np.isnan(body_qd[0]).any() or np.min(body_q[:, 2]) < -region_height * 1e-2:
@@ -175,8 +178,10 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
                 cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
                 break
 
-            substeps = 500 if contacts.rigid_contact_count.numpy()[0] > 0 else 100
-            sim_dt = frame_dt / substeps
+            if contacts.rigid_contact_count.numpy()[0] > 0:
+                force = [[0.0, -500.0, 0.0, 0.0, 0.0, 0.0]]  # 力矩迫使柄压紧股骨距
+                substeps = 500
+                sim_dt = frame_dt / substeps
 
         renderer.save()
 
@@ -251,6 +256,13 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         wp.types.uint64(volume.id), wp.types.vec3(spacing),
         femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
     ])
+
+    # 术后重建假体
+    post_prothesis_mesh = diff_dmc(femur_region, iso_spacing, region_origin, prothesis_threshold)
+    if post_prothesis_mesh.is_empty:
+        raise RuntimeError('Empty post-op prothesis mesh')
+
+    # 截骨后重建股骨
     wp.context.launch(planar_cut, femur_region.shape, [
         femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
         wp.types.vec3(neck_center), wp.types.vec3(-canal_z), bone_threshold[0],
@@ -266,11 +278,6 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         raise RuntimeError('Empty post-op femur mesh')
     femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
     femur_meshes.append(femur_mesh)
-
-    # 术后重建假体
-    post_prothesis_mesh = diff_dmc(femur_region, iso_spacing, region_origin, prothesis_threshold)
-    if post_prothesis_mesh.is_empty:
-        raise RuntimeError('Empty post-op prothesis mesh')
 
     # 术后截取股骨远端无伪影部分
     wp.context.launch(planar_cut, femur_region.shape, [
