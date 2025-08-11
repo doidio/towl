@@ -62,6 +62,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         region_xform, region_size, region_origin,
     ) = subregion(*keypoints, margin, iso_spacing)
     region_height = region_size[2] * iso_spacing
+    op_side = float(np.sign(canal_y[1]))
 
     # 术前股骨重建，小粗隆以上匹配较低骨阈值
     from kernel import diff_dmc, region_sample, planar_cut
@@ -205,8 +206,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
                 sim_dt = frame_dt / substeps
 
                 if linear < 10e-2:  # 即将稳定时施加Z轴力矩迫使柄压紧近端后方股骨距
-                    force = [[0.0, -50.0, 50.0, 0.0, 0.0, -50.0]]
-                    print('TorsionZ')
+                    force = [[0.0, -50.0, -50.0 * op_side, 0.0, 0.0, -50.0]]
 
         renderer.save()
 
@@ -234,7 +234,6 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     if femur_mesh.is_empty:
         raise RuntimeError('Empty pre-op femur mesh')
     femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
-    femur_mesh.export('pre.stl')
 
     # 载入术后图像
     image_paths, images, spacings, bg_values, volumes = [image_path], [image], [spacing], [bg_value], [volume]
@@ -314,7 +313,6 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     if femur_distal_mesh.is_empty:
         raise RuntimeError('Empty post-op femur mesh')
     femur_distal_mesh = max(femur_distal_mesh.split(), key=lambda c: c.area)
-    femur_distal_mesh.export('post.stl')
 
     # 利用股骨配准术前术后区域
     if (post_to_pre_region := cfg.get('术后区域变换到术前区域')) and not overwrite:
