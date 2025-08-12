@@ -15,6 +15,7 @@ import newtonclips
 import numpy as np
 import trimesh
 import warp as wp
+from PIL import Image
 from scipy.spatial.transform import Rotation
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
@@ -212,8 +213,6 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
     assert pre_region_to_std is not None
 
-    pre_region_to_std = np.reshape(wp.transform_to_matrix(pre_region_to_std), (4, 4))
-
     # 术前股骨重建，配准松质骨表面
     from kernel import diff_dmc, region_sample, planar_cut
     femur_region = wp.context.full(shape=(*region_size,), value=bg_value, dtype=wp.types.float32)
@@ -235,176 +234,202 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         raise RuntimeError('Empty pre-op femur mesh')
     femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
 
-    # 载入术后图像
-    image_paths, images, spacings, bg_values, volumes = [image_path], [image], [spacing], [bg_value], [volume]
+    if '术后' in cfg:
+        # 载入术后图像
+        image_paths, images, spacings, bg_values, volumes = [image_path], [image], [spacing], [bg_value], [volume]
 
-    image_paths.append(image_path := cfg_path.parent / cfg['术后']['原始图像'])
-    image = itk.imread(image_path.as_posix())
+        image_paths.append(image_path := cfg_path.parent / cfg['术后']['原始图像'])
+        image = itk.imread(image_path.as_posix())
 
-    spacing = np.array([*itk.spacing(image)])
+        spacing = np.array([*itk.spacing(image)])
 
-    if np.any((direction := np.array(image.GetDirection())) != np.eye(3)):
-        warnings.warn(f'Abnormal intrinsics {direction.tolist()}')
-        cfg['术后']['异常内参'] = direction.tolist()
+        if np.any((direction := np.array(image.GetDirection())) != np.eye(3)):
+            warnings.warn(f'Abnormal intrinsics {direction.tolist()}')
+            cfg['术后']['异常内参'] = direction.tolist()
+            cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
+            spacing *= np.diag(image.GetDirection())
+
+        spacings.append(spacing)
+        bg_values.append(bg_value := float(np.min(image)))
+
+        image = itk.array_from_image(image).transpose(2, 1, 0).copy()
+        images.append(image)
+        volumes.append(volume := wp.types.Volume.load_from_numpy(image, bg_value=bg_value))
+
+        # 载入术后配置
+        keypoints = np.array([spacing * cfg['术后'][_] for _ in (
+            '股骨颈口外缘', '股骨颈口内缘', '股骨小粗隆髓腔中心', '股骨柄末端髓腔中心', '股骨髁间窝中心',
+        )])
+
+        # 计算术前术后股骨全长区域，区域重合作为初配准
+        femur_meshes = [femur_mesh]
+
+        # 术后股骨区域，坐标系Z轴 = 股骨近端髓腔中轴
+        (
+            neck_center, neck_x, neck_y, neck_z,
+            canal_x, canal_y, canal_z,
+            region_xform, region_size, region_origin,
+        ) = subregion(*keypoints, margin, iso_spacing)
+        region_height = region_size[2] * iso_spacing
+
+        # 术后股骨重建，配准松质骨表面
+        from kernel import region_sample, diff_dmc
+        femur_region = wp.context.full(shape=(*region_size,), value=bg_value, dtype=wp.types.float32)
+        wp.context.launch(region_sample, femur_region.shape, [
+            wp.types.uint64(volume.id), wp.types.vec3(spacing),
+            femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+        ])
+
+        # 术后重建假体
+        post_prothesis_mesh = diff_dmc(femur_region, iso_spacing, region_origin, prothesis_threshold)
+        if post_prothesis_mesh.is_empty:
+            raise RuntimeError('Empty post-op prothesis mesh')
+
+        # 截骨后重建股骨
+        wp.context.launch(planar_cut, femur_region.shape, [
+            femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+            wp.types.vec3(neck_center), wp.types.vec3(-canal_z), bone_threshold[0],
+        ])
+        wp.context.launch(planar_cut, femur_region.shape, [
+            femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+            wp.types.vec3(neck_center), wp.types.vec3(-neck_z), bone_threshold[0],
+        ])
+
+        femur_mesh = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
+        if femur_mesh.is_empty:
+            raise RuntimeError('Empty post-op femur mesh')
+        femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
+        femur_meshes.append(femur_mesh)
+
+        # 术后截取股骨远端无伪影部分
+        wp.context.launch(planar_cut, femur_region.shape, [
+            femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+            wp.types.vec3(keypoints[3]), wp.types.vec3(-canal_z), bone_threshold[0],
+        ])
+
+        femur_distal_mesh = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
+        if femur_distal_mesh.is_empty:
+            raise RuntimeError('Empty post-op femur mesh')
+        femur_distal_mesh = max(femur_distal_mesh.split(), key=lambda c: c.area)
+
+        # 利用股骨配准术前术后区域
+        if (post_to_pre_region := cfg.get('术后区域变换到术前区域')) and not overwrite:
+            post_to_pre_region = wp.types.transform(*post_to_pre_region)
+        else:
+            matrix = None
+            mse_last: float | None = None
+            for i in range(200):
+                with wp.utils.ScopedTimer('', print=False) as t:
+                    matrix, _, mse = trimesh.registration.icp(
+                        femur_distal_mesh.vertices, femur_meshes[0], matrix, max_iterations=1,
+                        **dict(reflection=False, scale=False),
+                    )
+                print(f'Femur ICP {i} MSE {mse:.3f} mm took {t.elapsed:.3f} ms')
+
+                if i > 19 and mse_last - mse < 1e-3:  # 均方误差优化过少停止
+                    break
+
+                mse_last = mse
+
+            post_to_pre_region = wp.transform_from_matrix(wp.types.mat44(matrix))
+            cfg['术后区域变换到术前区域'] = np.array(post_to_pre_region).tolist()
+            cfg['术后区域变换到术前区域误差'] = mse
+            cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
+
+        assert post_to_pre_region is not None
+
+        post_to_pre_region_np = np.reshape(wp.transform_to_matrix(post_to_pre_region), (4, 4))
+        pre_region_to_std_np = np.reshape(wp.transform_to_matrix(pre_region_to_std), (4, 4))
+
+        # 假体在CAD坐标系评估差异
+        twin_prothesis_mesh = trimesh.Trimesh(post_prothesis_mesh.vertices, post_prothesis_mesh.faces)
+        twin_prothesis_mesh.apply_transform(post_to_pre_region_np)
+        twin_prothesis_mesh.apply_transform(pre_region_to_std_np)
+
+        # 利用股骨配准术前术后区域
+        if (twin_to_std_prothesis := cfg.get('配准假体变换到标准假体')) and not overwrite:
+            twin_to_std_prothesis = wp.types.transform(*twin_to_std_prothesis)
+        else:
+            matrix = None
+            mse_last: float | None = None
+            for i in range(200):
+                with wp.utils.ScopedTimer('', print=False) as t:
+                    matrix, _, mse = trimesh.registration.icp(
+                        std_prothesis_mesh.vertices, twin_prothesis_mesh, matrix, max_iterations=1,
+                        **dict(reflection=False, scale=False),
+                    )
+                print(f'Prothesis ICP {i} MSE {mse:.3f} mm took {t.elapsed:.3f} ms')
+
+                if i > 19 and mse_last - mse < 1e-3:  # 均方误差优化过少停止
+                    break
+
+                mse_last = mse
+
+            twin_to_std_prothesis = wp.transform_inverse(wp.transform_from_matrix(wp.types.mat44(matrix)))
+            cfg['配准假体变换到标准假体'] = np.array(twin_to_std_prothesis).tolist()
+            cfg['配准假体变换到标准假体误差'] = mse
+            cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
+
+        assert twin_to_std_prothesis is not None
+
+        p = wp.transform_get_translation(twin_to_std_prothesis)
+        q = wp.transform_get_rotation(twin_to_std_prothesis)
+        axis, angle = wp.quat_to_axis_angle(q)
+        euler = Rotation.from_quat(q).as_euler('XYZ', degrees=True)  # noqa
+        cfg['假体模拟与术后差异'] = {
+            '位置': list(p),
+            '欧拉角': list(euler),
+            '转轴': list(axis),
+            '转角': np.rad2deg(angle),
+        }
         cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
-        spacing *= np.diag(image.GetDirection())
 
-    spacings.append(spacing)
-    bg_values.append(bg_value := float(np.min(image)))
+        twin_to_std_prothesis_np = np.reshape(wp.transform_to_matrix(twin_to_std_prothesis), (4, 4))
 
-    image = itk.array_from_image(image).transpose(2, 1, 0).copy()
-    images.append(image)
-    volumes.append(volume := wp.types.Volume.load_from_numpy(image, bg_value=bg_value))
+        _ = image_path.parent / f'{cfg_path.stem}_术前假体.stl'
+        std_prothesis_mesh.export(_.as_posix())
 
-    # 载入术后配置
-    keypoints = np.array([spacing * cfg['术后'][_] for _ in (
-        '股骨颈口外缘', '股骨颈口内缘', '股骨小粗隆髓腔中心', '股骨柄末端髓腔中心', '股骨髁间窝中心',
-    )])
+        _ = image_path.parent / f'{cfg_path.stem}_术前股骨.stl'
+        femur_meshes[0].apply_transform(pre_region_to_std_np)
+        femur_meshes[0].export(_.as_posix())
 
-    # 计算术前术后股骨全长区域，区域重合作为初配准
-    region_xforms, region_sizes, region_origins = [region_xform], [region_size], [region_origin]
-    femur_regions, femur_meshes = [femur_region], [femur_mesh]
+        _ = image_path.parent / f'{cfg_path.stem}_术后股骨.stl'
+        femur_meshes[1].apply_transform(post_to_pre_region_np)
+        femur_meshes[1].apply_transform(pre_region_to_std_np)
+        femur_meshes[1].export(_.as_posix())
 
-    # 术后股骨区域，坐标系Z轴 = 股骨近端髓腔中轴
-    (
-        neck_center, neck_x, neck_y, neck_z,
-        canal_x, canal_y, canal_z,
-        region_xform, region_size, region_origin,
-    ) = subregion(*keypoints, margin, iso_spacing)
-    region_xforms.append(region_xform)
+        _ = image_path.parent / f'{cfg_path.stem}_术后假体_配准前.stl'
+        twin_prothesis_mesh.export(_.as_posix())
 
-    # 术后股骨重建，配准松质骨表面
-    from kernel import region_sample, diff_dmc
-    femur_region = wp.context.full(shape=(*region_size,), value=bg_value, dtype=wp.types.float32)
-    wp.context.launch(region_sample, femur_region.shape, [
-        wp.types.uint64(volume.id), wp.types.vec3(spacing),
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-    ])
+        _ = image_path.parent / f'{cfg_path.stem}_术后假体_配准后.stl'
+        twin_prothesis_mesh.apply_transform(twin_to_std_prothesis_np)
+        twin_prothesis_mesh.export(_.as_posix())
 
-    # 术后重建假体
-    post_prothesis_mesh = diff_dmc(femur_region, iso_spacing, region_origin, prothesis_threshold)
-    if post_prothesis_mesh.is_empty:
-        raise RuntimeError('Empty post-op prothesis mesh')
+        # 投影图
+        z = [np.min(femur_meshes[1].vertices[:,2]), np.max(femur_meshes[1].vertices[:,2])+margin[2]]
 
-    # 截骨后重建股骨
-    wp.context.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(neck_center), wp.types.vec3(-canal_z), bone_threshold[0],
-    ])
-    wp.context.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(neck_center), wp.types.vec3(-neck_z), bone_threshold[0],
-    ])
-    femur_regions.append(femur_region)
+        size, ray_spacing = np.array([400, 400]), 0.5
+        length = size * ray_spacing
+        origin = np.array([-0.5 * length[0], -0.5 * length[1], z[0]])
 
-    femur_mesh = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
-    if femur_mesh.is_empty:
-        raise RuntimeError('Empty post-op femur mesh')
-    femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
-    femur_meshes.append(femur_mesh)
+        mesh = wp.types.Mesh(
+            wp.types.array(std_prothesis_mesh.vertices, wp.types.vec3),
+            wp.types.array(std_prothesis_mesh.faces.flatten(), wp.types.int32),
+        )
 
-    # 术后截取股骨远端无伪影部分
-    wp.context.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(keypoints[3]), wp.types.vec3(-canal_z), bone_threshold[0],
-    ])
+        from kernel import region_raymarching
+        region = wp.context.zeros((*size,), wp.types.vec3ub)
+        wp.context.launch(region_raymarching, region.shape, [
+            region, wp.types.vec3(origin), wp.types.vec3(ray_spacing),
+            wp.types.vec3(1, 0, 0), wp.types.vec3(0, 1, 0), z[1] - z[0],
+            wp.types.uint64(volume.id), wp.types.vec3(spacing), region_xform * wp.transform_inverse(post_to_pre_region) * wp.transform_inverse(pre_region_to_std),
+            mesh.id,
+            100, -100, 900,
+        ])
 
-    femur_distal_mesh = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
-    if femur_distal_mesh.is_empty:
-        raise RuntimeError('Empty post-op femur mesh')
-    femur_distal_mesh = max(femur_distal_mesh.split(), key=lambda c: c.area)
-
-    # 利用股骨配准术前术后区域
-    if (post_to_pre_region := cfg.get('术后区域变换到术前区域')) and not overwrite:
-        post_to_pre_region = wp.types.transform(*post_to_pre_region)
+        Image.fromarray(np.rot90(region.numpy(), k=1)).save('raymarching.jpg')
     else:
-        matrix = None
-        mse_last: float | None = None
-        for i in range(200):
-            with wp.utils.ScopedTimer('', print=False) as t:
-                matrix, _, mse = trimesh.registration.icp(
-                    femur_distal_mesh.vertices, femur_meshes[0], matrix, max_iterations=1,
-                    **dict(reflection=False, scale=False),
-                )
-            print(f'Femur ICP {i} MSE {mse:.3f} mm took {t.elapsed:.3f} ms')
-
-            if i > 19 and mse_last - mse < 1e-3:  # 均方误差优化过少停止
-                break
-
-            mse_last = mse
-
-        post_to_pre_region = wp.transform_from_matrix(wp.types.mat44(matrix))
-        cfg['术后区域变换到术前区域'] = np.array(post_to_pre_region).tolist()
-        cfg['术后区域变换到术前区域误差'] = mse
-        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
-
-    assert post_to_pre_region is not None
-
-    post_to_pre_region = np.reshape(wp.transform_to_matrix(post_to_pre_region), (4, 4))
-
-    # 假体在CAD坐标系评估差异
-    twin_prothesis_mesh = trimesh.Trimesh(post_prothesis_mesh.vertices, post_prothesis_mesh.faces)
-    twin_prothesis_mesh.apply_transform(post_to_pre_region)
-    twin_prothesis_mesh.apply_transform(pre_region_to_std)
-
-    # 利用股骨配准术前术后区域
-    if (twin_to_std_prothesis := cfg.get('配准假体变换到标准假体')) and not overwrite:
-        twin_to_std_prothesis = wp.types.transform(*twin_to_std_prothesis)
-    else:
-        matrix = None
-        mse_last: float | None = None
-        for i in range(200):
-            with wp.utils.ScopedTimer('', print=False) as t:
-                matrix, _, mse = trimesh.registration.icp(
-                    std_prothesis_mesh.vertices, twin_prothesis_mesh, matrix, max_iterations=1,
-                    **dict(reflection=False, scale=False),
-                )
-            print(f'Prothesis ICP {i} MSE {mse:.3f} mm took {t.elapsed:.3f} ms')
-
-            if i > 19 and mse_last - mse < 1e-3:  # 均方误差优化过少停止
-                break
-
-            mse_last = mse
-
-        twin_to_std_prothesis = wp.transform_inverse(wp.transform_from_matrix(wp.types.mat44(matrix)))
-        cfg['配准假体变换到标准假体'] = np.array(twin_to_std_prothesis).tolist()
-        cfg['配准假体变换到标准假体误差'] = mse
-        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
-
-    assert twin_to_std_prothesis is not None
-
-    p = wp.transform_get_translation(twin_to_std_prothesis)
-    q = wp.transform_get_rotation(twin_to_std_prothesis)
-    axis, angle = wp.quat_to_axis_angle(q)
-    euler = Rotation.from_quat(q).as_euler('XYZ', degrees=True)  # noqa
-    cfg['假体模拟与术后差异'] = {
-        '位置': list(p),
-        '欧拉角': list(euler),
-        '转轴': list(axis),
-        '转角': np.rad2deg(angle),
-    }
-    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
-
-    twin_to_std_prothesis = np.reshape(wp.transform_to_matrix(twin_to_std_prothesis), (4, 4))
-
-    _ = image_path.parent / f'{cfg_path.stem}_术前假体.stl'
-    std_prothesis_mesh.export(_.as_posix())
-
-    _ = image_path.parent / f'{cfg_path.stem}_术前股骨.stl'
-    femur_meshes[0].apply_transform(pre_region_to_std)
-    femur_meshes[0].export(_.as_posix())
-
-    _ = image_path.parent / f'{cfg_path.stem}_术后股骨.stl'
-    femur_meshes[1].apply_transform(post_to_pre_region)
-    femur_meshes[1].apply_transform(pre_region_to_std)
-    femur_meshes[1].export(_.as_posix())
-
-    _ = image_path.parent / f'{cfg_path.stem}_术后假体_配准前.stl'
-    twin_prothesis_mesh.export(_.as_posix())
-
-    _ = image_path.parent / f'{cfg_path.stem}_术后假体_配准后.stl'
-    twin_prothesis_mesh.apply_transform(twin_to_std_prothesis)
-    twin_prothesis_mesh.export(_.as_posix())
+        print('Ignore post-op validation')
 
 
 def subregion(neck_lateral, neck_medial, canal_entry, canal_deep, ic_notch, margin, iso_spacing=1.0):
