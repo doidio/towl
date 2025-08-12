@@ -2,7 +2,7 @@
 # pip install torch --index-url https://download.pytorch.org/whl/cu128
 # pip install wheel diso
 # pip install git+https://github.com/newton-physics/newton@f701455313df2ee83ec881d6612657882f2472a0
-# pip install itk warp-lang pyglet trimesh rtree newton-clips==0.1.5
+# pip install itk warp-lang pyglet trimesh rtree scikit-learn newton-clips==0.1.5
 
 import argparse
 import json
@@ -15,7 +15,7 @@ import newtonclips
 import numpy as np
 import trimesh
 import warp as wp
-from PIL import Image
+from PIL import Image, ImageDraw
 from scipy.spatial.transform import Rotation
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
@@ -270,7 +270,6 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
             canal_x, canal_y, canal_z,
             region_xform, region_size, region_origin,
         ) = subregion(*keypoints, margin, iso_spacing)
-        region_height = region_size[2] * iso_spacing
 
         # 术后股骨重建，配准松质骨表面
         from kernel import region_sample, diff_dmc
@@ -406,9 +405,9 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         twin_prothesis_mesh.export(_.as_posix())
 
         # 投影图
-        z = [np.min(femur_meshes[1].vertices[:,2]), np.max(femur_meshes[1].vertices[:,2])+margin[2]]
+        z = [np.min(femur_meshes[1].vertices[:,2]), np.max(femur_meshes[1].vertices[:,2])]
 
-        size, ray_spacing = np.array([400, 400]), 0.5
+        size, ray_spacing = np.array([2000, 2000]), 0.1
         length = size * ray_spacing
         origin = np.array([-0.5 * length[0], -0.5 * length[1], z[0]])
 
@@ -417,17 +416,47 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
             wp.types.array(std_prothesis_mesh.faces.flatten(), wp.types.int32),
         )
 
+        std_to_post_region = wp.transform_inverse(post_to_pre_region) * wp.transform_inverse(pre_region_to_std)
+
         from kernel import region_raymarching
         region = wp.context.zeros((*size,), wp.types.vec3ub)
         wp.context.launch(region_raymarching, region.shape, [
             region, wp.types.vec3(origin), wp.types.vec3(ray_spacing),
             wp.types.vec3(1, 0, 0), wp.types.vec3(0, 1, 0), z[1] - z[0],
-            wp.types.uint64(volume.id), wp.types.vec3(spacing), region_xform * wp.transform_inverse(post_to_pre_region) * wp.transform_inverse(pre_region_to_std),
+            wp.types.uint64(volume.id), wp.types.vec3(spacing), region_xform * std_to_post_region,
             mesh.id,
-            100, -100, 900,
+            100, prothesis_threshold, -100, 900,
         ])
+        region = np.array(region.numpy())
 
-        Image.fromarray(np.rot90(region.numpy(), k=1)).save('raymarching.jpg')
+        points = np.argwhere(np.all(region == [255, 0, 0], axis=-1))
+
+        from sklearn.decomposition import PCA
+        pca = PCA(n_components=2)
+        pca.fit(points)
+
+        main_axis = pca.components_[0]  # 第一主成分方向
+        print(main_axis)
+
+        # 计算主轴角度（单位：度）
+        angle = np.rad2deg(np.arctan2(main_axis[1], main_axis[0]))
+        print(f"主轴角度: {angle:.2f}°")
+
+        img2d = Image.fromarray(np.rot90(region, k=1))
+        draw = ImageDraw.Draw(img2d)
+
+        cx, cy = pca.mean_  # 质心
+        vx, vy = main_axis  # PCA 方向向量
+        length = 1000  # 线长，可按需要改
+
+        x1 = int(cx - vx * length / 2)
+        y1 = region.shape[1] - int(cy - vy * length / 2)
+        x2 = int(cx + vx * length / 2)
+        y2 = region.shape[1] - int(cy + vy * length / 2)
+
+        draw.line((x1, y1, x2, y2), fill='blue', width=5)
+        img2d.save('raymarching.jpg')
+
     else:
         print('Ignore post-op validation')
 

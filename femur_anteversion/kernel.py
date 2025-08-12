@@ -59,7 +59,7 @@ def region_raymarching(
         x_axis: wp.types.vec3, y_axis: wp.types.vec3, z_length: float,
         volume: wp.types.uint64, volume_spacing: wp.types.vec3, xform: wp.types.transform,
         mesh: wp.types.uint64,
-        threshold_min: float, window_min: float, window_max: float,
+        threshold_min: float, threshold_max: float, window_min: float, window_max: float,
 ):
     i, j = wp.tid()
 
@@ -74,10 +74,12 @@ def region_raymarching(
     z_axis = wp.normalize(z_axis)
 
     step = spacing[2] * z_axis
-    pixel_sum = float(0)
+    gray_sum = float(0)
 
     n = int(wp.ceil(z_length / spacing[2]))
-    pixel_n = float(0)
+    grey_n = float(0)
+
+    red_n = float(0)
 
     p = ray_start
     for k in range(n):
@@ -87,13 +89,19 @@ def region_raymarching(
         pixel = wp.volume_sample_f(volume, uvw, wp.types.Volume.LINEAR)
 
         if threshold_min <= pixel:
-            pixel_sum += pixel
-            pixel_n += 1.0
+            gray_sum += pixel
+            grey_n += 1.0
 
-    if pixel_n > 0:
-        pixel_sum /= pixel_n
+            if threshold_max <= pixel:
+                red_n += 1.0
 
-    pixel_sum = wp.round((pixel_sum - window_min) / (window_max - window_min) * 255.0)
-    pixel_sum = wp.clamp(pixel_sum, 0.0, 255.0)
+    if grey_n > 0:
+        gray_sum /= grey_n
 
-    array[i, j] = array.dtype(wp.types.uint8(pixel_sum))
+    grey = wp.round((gray_sum - window_min) / (window_max - window_min) * 255.0)
+    grey = wp.clamp(grey, 0.0, 255.0)
+
+    if red_n > 0:
+        array[i, j] = array.dtype(wp.types.uint8(255), wp.types.uint8(0), wp.types.uint8(0))
+    else:
+        array[i, j] = array.dtype(wp.types.uint8(grey), wp.types.uint8(grey), wp.types.uint8(grey))
