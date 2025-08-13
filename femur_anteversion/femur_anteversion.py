@@ -1,8 +1,8 @@
 # CUDA driver & Toolkit & Microsoft Visual C++
 # pip install torch --index-url https://download.pytorch.org/whl/cu128
 # pip install wheel diso
-# pip install git+https://github.com/newton-physics/newton@f701455313df2ee83ec881d6612657882f2472a0
-# pip install itk warp-lang pyglet trimesh rtree scikit-learn newton-clips==0.1.5
+# pip install git+https://github.com/newton-physics/newton.git@b40af7391bdc12369355d4b26f9a12014878e1d5
+# pip install itk warp-lang pyglet trimesh rtree scikit-learn newton-clips==0.1.6
 
 import argparse
 import json
@@ -333,7 +333,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
             post_to_pre_region = wp.transform_from_matrix(wp.types.mat44(matrix))
             cfg['术后区域变换到术前区域'] = np.array(post_to_pre_region).tolist()
-            cfg['术后术前配准误差'] = mse
+            cfg['术前与术后配准误差'] = mse
             cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
 
         assert post_to_pre_region is not None
@@ -431,7 +431,6 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         img2d = img2d.numpy()
         rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
 
-        # 作图
         rgb = np.rot90(rgb, k=op_side)
         if op_side < 0:
             rgb = np.flipud(rgb)
@@ -454,7 +453,6 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         img2d = img2d.numpy()
         rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
 
-        # 作图
         rgb = np.rot90(rgb, k=op_side)
         if op_side < 0:
             rgb = np.flipud(rgb)
