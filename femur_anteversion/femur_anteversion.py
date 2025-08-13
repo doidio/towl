@@ -202,12 +202,12 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
                 cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
                 break
 
-            if contacts.rigid_contact_count.numpy()[0] > 0:  # 开始接触时施加Y轴力矩迫使柄压紧近端前内壁
+            if contacts.rigid_contact_count.numpy()[0] > 0:  # 开始接触时施加力矩(近内远外)迫使柄压紧近端前内壁
                 force = [[0.0, -50.0, 0.0, 0.0, 0.0, -50.0]]
                 substeps = 500
                 sim_dt = frame_dt / substeps
 
-                if linear < 10e-2:  # 即将稳定时施加Z轴力矩迫使柄压紧近端后方股骨距
+                if linear < 10e-2:  # 即将稳定时施加力矩(前倾减小)迫使柄压紧近端后方股骨距
                     force = [[0.0, -50.0, -50.0 * op_side, 0.0, 0.0, -50.0]]
 
         renderer.save()
