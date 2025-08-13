@@ -10,13 +10,14 @@ import locale
 import warnings
 from pathlib import Path
 
+import PIL.Image
 import newton.utils
 import newtonclips
 import numpy as np
 import trimesh
 import warp as wp
 from PIL import Image, ImageDraw
-from scipy.spatial.transform import Rotation
+from sklearn.decomposition import PCA
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
@@ -63,7 +64,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         region_xform, region_size, region_origin,
     ) = subregion(*keypoints, margin, iso_spacing)
     region_height = region_size[2] * iso_spacing
-    op_side = float(np.sign(canal_y[1]))
+    op_side = int(np.sign(canal_y[1]))
 
     # 术前股骨重建，小粗隆以上匹配较低骨阈值
     from kernel import diff_dmc, region_sample, planar_cut
@@ -332,7 +333,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
             post_to_pre_region = wp.transform_from_matrix(wp.types.mat44(matrix))
             cfg['术后区域变换到术前区域'] = np.array(post_to_pre_region).tolist()
-            cfg['术后区域变换到术前区域误差'] = mse
+            cfg['术后术前配准误差'] = mse
             cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
 
         assert post_to_pre_region is not None
@@ -340,53 +341,14 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         post_to_pre_region_np = np.reshape(wp.transform_to_matrix(post_to_pre_region), (4, 4))
         pre_region_to_std_np = np.reshape(wp.transform_to_matrix(pre_region_to_std), (4, 4))
 
-        # 假体在CAD坐标系评估差异
-        twin_prothesis_mesh = trimesh.Trimesh(post_prothesis_mesh.vertices, post_prothesis_mesh.faces)
-        twin_prothesis_mesh.apply_transform(post_to_pre_region_np)
-        twin_prothesis_mesh.apply_transform(pre_region_to_std_np)
-
-        # 利用股骨配准术前术后区域
-        if (twin_to_std_prothesis := cfg.get('配准假体变换到标准假体')) and not overwrite:
-            twin_to_std_prothesis = wp.types.transform(*twin_to_std_prothesis)
-        else:
-            matrix = None
-            mse_last: float | None = None
-            for i in range(200):
-                with wp.utils.ScopedTimer('', print=False) as t:
-                    matrix, _, mse = trimesh.registration.icp(
-                        std_prothesis_mesh.vertices, twin_prothesis_mesh, matrix, max_iterations=1,
-                        **dict(reflection=False, scale=False),
-                    )
-                print(f'Prothesis ICP {i} MSE {mse:.3f} mm took {t.elapsed:.3f} ms')
-
-                if i > 19 and mse_last - mse < 1e-3:  # 均方误差优化过少停止
-                    break
-
-                mse_last = mse
-
-            twin_to_std_prothesis = wp.transform_inverse(wp.transform_from_matrix(wp.types.mat44(matrix)))
-            cfg['配准假体变换到标准假体'] = np.array(twin_to_std_prothesis).tolist()
-            cfg['配准假体变换到标准假体误差'] = mse
-            cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
-
-        assert twin_to_std_prothesis is not None
-
-        p = wp.transform_get_translation(twin_to_std_prothesis)
-        q = wp.transform_get_rotation(twin_to_std_prothesis)
-        axis, angle = wp.quat_to_axis_angle(q)
-        euler = Rotation.from_quat(q).as_euler('XYZ', degrees=True)  # noqa
-        cfg['假体模拟与术后差异'] = {
-            '位置': list(p),
-            '欧拉角': list(euler),
-            '转轴': list(axis),
-            '转角': np.rad2deg(angle),
-        }
-        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
-
-        twin_to_std_prothesis_np = np.reshape(wp.transform_to_matrix(twin_to_std_prothesis), (4, 4))
-
+        # 变换到标准假体坐标系留样检验
         _ = image_path.parent / f'{cfg_path.stem}_术前假体.stl'
         std_prothesis_mesh.export(_.as_posix())
+
+        _ = image_path.parent / f'{cfg_path.stem}_术后假体.stl'
+        post_prothesis_mesh.apply_transform(post_to_pre_region_np)
+        post_prothesis_mesh.apply_transform(pre_region_to_std_np)
+        post_prothesis_mesh.export(_.as_posix())
 
         _ = image_path.parent / f'{cfg_path.stem}_术前股骨.stl'
         femur_meshes[0].apply_transform(pre_region_to_std_np)
@@ -397,19 +359,23 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         femur_meshes[1].apply_transform(pre_region_to_std_np)
         femur_meshes[1].export(_.as_posix())
 
-        _ = image_path.parent / f'{cfg_path.stem}_术后假体_配准前.stl'
-        twin_prothesis_mesh.export(_.as_posix())
+        # 计算植入深度误差
+        delta = float(np.min(std_prothesis_mesh.vertices[:,2])) - float(np.min(post_prothesis_mesh.vertices[:,2]))
+        cfg['模拟与术后深度误差'] = delta
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
 
-        _ = image_path.parent / f'{cfg_path.stem}_术后假体_配准后.stl'
-        twin_prothesis_mesh.apply_transform(twin_to_std_prothesis_np)
-        twin_prothesis_mesh.export(_.as_posix())
+        # 在标准假体坐标系(轴位)投影术后图像和模拟假体
+        ray_spacing = 0.1
 
-        # 投影图
-        z = [np.min(femur_meshes[1].vertices[:,2]), np.max(femur_meshes[1].vertices[:,2])]
+        box_femur = [_(femur_meshes[1].vertices, 0) for _ in (np.min, np.max)]
+        box_metal = [_(post_prothesis_mesh.vertices, 0) for _ in (np.min, np.max)]
+        box = [_([*box_femur, *box_metal], 0) for _ in (np.min, np.max)]
+        box[0] -= 10
+        box[1] += 10
+        x, y, z = np.transpose(box)
 
-        size, ray_spacing = np.array([2000, 2000]), 0.1
-        length = size * ray_spacing
-        origin = np.array([-0.5 * length[0], -0.5 * length[1], z[0]])
+        size = np.ceil([(x[1] - x[0]) / ray_spacing, (y[1] - y[0]) / ray_spacing])
+        origin = np.array([x[0], y[0], z[0]])
 
         mesh = wp.types.Mesh(
             wp.types.array(std_prothesis_mesh.vertices, wp.types.vec3),
@@ -419,44 +385,82 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         std_to_post_region = wp.transform_inverse(post_to_pre_region) * wp.transform_inverse(pre_region_to_std)
 
         from kernel import region_raymarching
-        region = wp.context.zeros((*size,), wp.types.vec3ub)
-        wp.context.launch(region_raymarching, region.shape, [
-            region, wp.types.vec3(origin), wp.types.vec3(ray_spacing),
-            wp.types.vec3(1, 0, 0), wp.types.vec3(0, 1, 0), z[1] - z[0],
+        img2d = wp.context.zeros((*size,), wp.types.vec4ub)
+        wp.context.launch(region_raymarching, img2d.shape, [
+            img2d, wp.types.vec3(origin), wp.types.vec3(ray_spacing),
+            wp.types.vec3(1, 0, 0), wp.types.vec3(0, 1, 0), wp.types.vec3(0, 0, 1), z[1] - z[0], box_femur[1][2] - z[0],
             wp.types.uint64(volume.id), wp.types.vec3(spacing), region_xform * std_to_post_region,
-            mesh.id,
-            100, prothesis_threshold, -100, 900,
+            mesh.id, 100, prothesis_threshold, -100, 900,
         ])
-        region = np.array(region.numpy())
+        img2d = img2d.numpy()
+        rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
+        rgb = Image.fromarray(np.flipud(np.rot90(rgb, k=op_side)))
 
-        points = np.argwhere(np.all(region == [255, 0, 0], axis=-1))
+        # 计算模拟前倾角误差
+        if len(points := np.argwhere(alpha == 255)):
+            pca = PCA(n_components=2)
+            pca.fit(points)
 
-        from sklearn.decomposition import PCA
-        pca = PCA(n_components=2)
-        pca.fit(points)
+            axis = np.array(pca.components_[0])  # 第一主成分方向
+            if axis[0] < 0:
+                axis *= -1
 
-        main_axis = pca.components_[0]  # 第一主成分方向
-        print(main_axis)
+            cfg['模拟与术后前倾角误差'] = np.rad2deg(np.arctan2(axis[1], axis[0])) * -op_side
+            cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
 
-        # 计算主轴角度（单位：度）
-        angle = np.rad2deg(np.arctan2(main_axis[1], main_axis[0]))
-        print(f"主轴角度: {angle:.2f}°")
+            if op_side > 0:
+                draw_line(rgb, pca.mean_, axis, size[0] * 0.5, 'white', 8)
+            else:
+                draw_line(rgb, size - pca.mean_, -axis, size[0] * 0.5, 'white', 8)
 
-        img2d = Image.fromarray(np.rot90(region, k=1))
-        draw = ImageDraw.Draw(img2d)
+        _ = image_path.parent / f'{cfg_path.stem}_术后轴位.jpg'
+        rgb.save(_.as_posix())
 
-        cx, cy = pca.mean_  # 质心
-        vx, vy = main_axis  # PCA 方向向量
-        length = 1000  # 线长，可按需要改
+        # 在标准假体坐标系(正位)投影术后图像和模拟假体
+        size = np.ceil([(x[1] - x[0]) / ray_spacing, (z[1] - z[0]) / ray_spacing])
+        origin = np.array([x[0], y[0], z[0]])
 
-        x1 = int(cx - vx * length / 2)
-        y1 = region.shape[1] - int(cy - vy * length / 2)
-        x2 = int(cx + vx * length / 2)
-        y2 = region.shape[1] - int(cy + vy * length / 2)
+        from kernel import region_raymarching
+        img2d = wp.context.zeros((*size,), wp.types.vec4ub)
+        wp.context.launch(region_raymarching, img2d.shape, [
+            img2d, wp.types.vec3(origin), wp.types.vec3(ray_spacing),
+            wp.types.vec3(1, 0, 0), wp.types.vec3(0, 0, 1), wp.types.vec3(0, 1, 0), y[1] - y[0], 0.0,
+            wp.types.uint64(volume.id), wp.types.vec3(spacing), region_xform * std_to_post_region,
+            mesh.id, 100, prothesis_threshold, -100, 900,
+        ])
+        img2d = img2d.numpy()
+        rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
 
-        draw.line((x1, y1, x2, y2), fill='blue', width=5)
-        img2d.save('raymarching.jpg')
+        # 作图
+        rgb = np.rot90(rgb, k=op_side)
+        if op_side < 0:
+            rgb = np.flipud(rgb)
+        rgb = Image.fromarray(rgb)
+        _ = image_path.parent / f'{cfg_path.stem}_术后正位.jpg'
+        rgb.save(_.as_posix())
 
+        # 在标准假体坐标系(侧位)投影术后图像和模拟假体
+        size = np.ceil([(x[1] - x[0]) / ray_spacing, (z[1] - z[0]) / ray_spacing])
+        origin = np.array([x[0], y[0], z[0]])
+
+        from kernel import region_raymarching
+        img2d = wp.context.zeros((*size,), wp.types.vec4ub)
+        wp.context.launch(region_raymarching, img2d.shape, [
+            img2d, wp.types.vec3(origin), wp.types.vec3(ray_spacing),
+            wp.types.vec3(0, 1, 0), wp.types.vec3(0, 0, 1), wp.types.vec3(1, 0, 0), x[1] - x[0], 0.0,
+            wp.types.uint64(volume.id), wp.types.vec3(spacing), region_xform * std_to_post_region,
+            mesh.id, 100, prothesis_threshold, -100, 900,
+        ])
+        img2d = img2d.numpy()
+        rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
+
+        # 作图
+        rgb = np.rot90(rgb, k=op_side)
+        if op_side < 0:
+            rgb = np.flipud(rgb)
+        rgb = Image.fromarray(rgb)
+        _ = image_path.parent / f'{cfg_path.stem}_术后侧位.jpg'
+        rgb.save(_.as_posix())
     else:
         print('Ignore post-op validation')
 
@@ -493,6 +497,13 @@ def subregion(neck_lateral, neck_medial, canal_entry, canal_deep, ic_notch, marg
     origin = np.array([-0.5 * length[0], -0.5 * length[1], 0.0])
 
     return neck_center, neck_x, neck_y, neck_z, canal_x, canal_y, canal_z, xform, size, origin
+
+
+def draw_line(image: PIL.Image.Image, mean, axis, hl, fill, width):
+    draw = ImageDraw.Draw(image)
+    x1, y1 = int(mean[0] - axis[0] * hl), int(mean[1] - axis[1] * hl)
+    x2, y2 = int(mean[0] + axis[0] * hl), int(mean[1] + axis[1] * hl)
+    draw.line((x1, y1, x2, y2), fill=fill, width=width)
 
 
 if __name__ == '__main__':
