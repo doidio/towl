@@ -3,7 +3,7 @@ import trimesh
 import warp as wp
 
 
-def diff_dmc(volume: wp.types.array(dtype=wp.types.float32, ndim=3), spacing: float | np.ndarray,
+def diff_dmc(volume: wp.array(dtype=wp.float32, ndim=3), spacing: float | np.ndarray,
              origin: np.ndarray, threshold: float):
     import torch
     from diso import DiffDMC
@@ -13,33 +13,33 @@ def diff_dmc(volume: wp.types.array(dtype=wp.types.float32, ndim=3), spacing: fl
     return trimesh.Trimesh(vertices, indices)
 
 
-@wp.context.kernel
+@wp.kernel
 def region_sample(
-        volume: wp.types.uint64, volume_spacing: wp.types.vec3,
-        array: wp.types.array(ndim=3), origin: wp.types.vec3, spacing: float,
-        xform: wp.types.transform,
+        volume: wp.uint64, volume_spacing: wp.vec3,
+        array: wp.array(ndim=3), origin: wp.vec3, spacing: float,
+        xform: wp.transform,
 ):
     i, j, k = wp.tid()
 
     # 采样值
-    p = origin + spacing * wp.types.vec3(float(i), float(j), float(k))
+    p = origin + spacing * wp.vec3(float(i), float(j), float(k))
     p = wp.transform_point(xform, p)
 
     uvw = wp.cw_div(p, volume_spacing)
-    pixel = wp.volume_sample_f(volume, uvw, wp.types.Volume.LINEAR)
+    pixel = wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR)
 
     array[i, j, k] = array.dtype(pixel)
 
 
-@wp.context.kernel
+@wp.kernel
 def planar_cut(
-        array: wp.types.array(ndim=3), origin: wp.types.vec3, spacing: float,
-        xform: wp.types.transform, center: wp.types.vec3, normal: wp.types.vec3, bone_threshold: float,
+        array: wp.array(ndim=3), origin: wp.vec3, spacing: float,
+        xform: wp.transform, center: wp.vec3, normal: wp.vec3, bone_threshold: float,
 ):
     i, j, k = wp.tid()
     pixel = array[i, j, k]
 
-    p = origin + spacing * wp.types.vec3(float(i), float(j), float(k))
+    p = origin + spacing * wp.vec3(float(i), float(j), float(k))
     p = wp.transform_point(xform, p)
 
     d = wp.dot(wp.normalize(normal), p - center)
@@ -53,12 +53,12 @@ def planar_cut(
     array[i, j, k] = array.dtype(pixel)
 
 
-@wp.context.kernel
+@wp.kernel
 def region_raymarching(
-        array: wp.types.array(ndim=2, dtype=wp.types.vec4ub), origin: wp.types.vec3, spacing: wp.types.vec3,
-        x_axis: wp.types.vec3, y_axis: wp.types.vec3, z_axis: wp.types.vec3, z_length: float, z_length_alpha: float,
-        volume: wp.types.uint64, volume_spacing: wp.types.vec3, xform: wp.types.transform,
-        mesh: wp.types.uint64, threshold_min: float, threshold_max: float, window_min: float, window_max: float,
+        array: wp.array(ndim=2, dtype=wp.vec4ub), origin: wp.vec3, spacing: wp.vec3,
+        x_axis: wp.vec3, y_axis: wp.vec3, z_axis: wp.vec3, z_length: float, z_length_alpha: float,
+        volume: wp.uint64, volume_spacing: wp.vec3, xform: wp.transform,
+        mesh: wp.uint64, threshold_min: float, threshold_max: float, window_min: float, window_max: float,
 ):
     i, j = wp.tid()
 
@@ -86,7 +86,7 @@ def region_raymarching(
         p += step
 
         uvw = wp.cw_div(wp.transform_point(xform, p), volume_spacing)
-        pixel = wp.volume_sample_f(volume, uvw, wp.types.Volume.LINEAR)
+        pixel = wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR)
 
         if threshold_min <= pixel:
             gray_sum += pixel
@@ -103,24 +103,24 @@ def region_raymarching(
     grey = wp.round((gray_sum - window_min) / (window_max - window_min) * 255.0)
     grey = wp.clamp(grey, 0.0, 255.0)
 
-    q = wp.mesh_query_ray(mesh, ray_start, z_axis, wp.types.float32(z_length))
+    q = wp.mesh_query_ray(mesh, ray_start, z_axis, wp.float32(z_length))
 
-    mesh_pbr = wp.types.vec3(255.0, 225.0, 0.0)
-    highlight_color = wp.types.vec3(255.0, 0.0, 0.0)
-    intersect_color = wp.types.vec3(255.0, 175.0, 0.0)
+    mesh_pbr = wp.vec3(255.0, 225.0, 0.0)
+    highlight_color = wp.vec3(255.0, 0.0, 0.0)
+    intersect_color = wp.vec3(255.0, 175.0, 0.0)
 
     if highlight_count > 0 and q.result:
-        rgb = wp.types.vec3(grey) * 0.5 + intersect_color * 0.5
+        rgb = wp.vec3(grey) * 0.5 + intersect_color * 0.5
     elif highlight_count > 0:
-        rgb = wp.types.vec3(grey) * 0.5 + highlight_color * 0.5
+        rgb = wp.vec3(grey) * 0.5 + highlight_color * 0.5
     elif q.result:
-        rgb = wp.types.vec3(grey) * 0.5 + mesh_pbr * 0.5
+        rgb = wp.vec3(grey) * 0.5 + mesh_pbr * 0.5
     else:
-        rgb = wp.types.vec3(grey)
+        rgb = wp.vec3(grey)
 
     if alpha_count > 0:
         a = 255.0
     else:
         a = 0.0
 
-    array[i, j] = array.dtype(wp.types.uint8(rgb[0]), wp.types.uint8(rgb[1]), wp.types.uint8(rgb[2]), wp.types.uint8(a))
+    array[i, j] = array.dtype(wp.uint8(rgb[0]), wp.uint8(rgb[1]), wp.uint8(rgb[2]), wp.uint8(a))

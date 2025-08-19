@@ -2,7 +2,8 @@
 # pip install torch --index-url https://download.pytorch.org/whl/cu128
 # pip install wheel diso
 # pip install git+https://github.com/newton-physics/newton.git@b40af7391bdc12369355d4b26f9a12014878e1d5
-# pip install itk warp-lang pyglet trimesh rtree scikit-learn newton-clips==0.1.6
+# pip install -U --pre warp-lang --extra-index-url=https://pypi.nvidia.com/
+# pip install itk pyglet trimesh rtree scikit-learn newton-clips==0.1.7
 
 import argparse
 import json
@@ -50,7 +51,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         spacing *= np.diag(image.GetDirection())
 
     image = itk.array_from_image(image).transpose(2, 1, 0).copy()
-    volume = wp.types.Volume.load_from_numpy(image, bg_value=bg_value)
+    volume = wp.Volume.load_from_numpy(image, bg_value=bg_value)
 
     # 载入术前配置
     keypoints = np.array([spacing * cfg['术前'][_] for _ in (
@@ -68,22 +69,22 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
     # 术前股骨重建，小粗隆以上匹配较低骨阈值
     from kernel import diff_dmc, region_sample, planar_cut
-    femur_region = wp.context.full(shape=(*region_size,), value=bg_value, dtype=wp.types.float32)
-    wp.context.launch(region_sample, femur_region.shape, [
-        wp.types.uint64(volume.id), wp.types.vec3(spacing),
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+    femur_region = wp.full(shape=(*region_size,), value=bg_value, dtype=wp.float32)
+    wp.launch(region_sample, femur_region.shape, [
+        wp.uint64(volume.id), wp.vec3(spacing),
+        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
     ])
-    wp.context.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(neck_center), wp.types.vec3(-canal_z), bone_threshold[0],
+    wp.launch(planar_cut, femur_region.shape, [
+        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+        wp.vec3(neck_center), wp.vec3(-canal_z), bone_threshold[0],
     ])
-    wp.context.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(neck_center), wp.types.vec3(-neck_z), bone_threshold[0],
+    wp.launch(planar_cut, femur_region.shape, [
+        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+        wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold[0],
     ])
-    wp.context.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(keypoints[2]), wp.types.vec3(canal_z), bone_threshold[0],
+    wp.launch(planar_cut, femur_region.shape, [
+        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+        wp.vec3(keypoints[2]), wp.vec3(canal_z), bone_threshold[0],
     ])
 
     femur_mesh_proximal = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
@@ -92,14 +93,14 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     femur_mesh_proximal = max(femur_mesh_proximal.split(), key=lambda c: c.area)
 
     # 术前股骨重建，小粗隆以下匹配较低骨阈值
-    femur_region = wp.context.full(shape=(*region_size,), value=bg_value, dtype=wp.types.float32)
-    wp.context.launch(region_sample, femur_region.shape, [
-        wp.types.uint64(volume.id), wp.types.vec3(spacing),
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+    femur_region = wp.full(shape=(*region_size,), value=bg_value, dtype=wp.float32)
+    wp.launch(region_sample, femur_region.shape, [
+        wp.uint64(volume.id), wp.vec3(spacing),
+        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
     ])
-    wp.context.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(keypoints[2]), wp.types.vec3(-canal_z), bone_threshold[1],
+    wp.launch(planar_cut, femur_region.shape, [
+        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+        wp.vec3(keypoints[2]), wp.vec3(-canal_z), bone_threshold[1],
     ])
 
     femur_mesh_distal = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[1])
@@ -115,7 +116,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
     # 假体植入碰撞模拟
     if (pre_region_to_std := cfg.get('术前区域变换到标准假体')) and not overwrite:
-        pre_region_to_std = wp.types.transform(*pre_region_to_std)
+        pre_region_to_std = wp.transform(*pre_region_to_std)
     else:
         builder = newton.ModelBuilder('Z')
 
@@ -197,7 +198,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
                 print(f'sim completed {cfg_path.as_posix()}')
                 sim_xform = body_q[0].copy()
                 sim_xform[:3] *= 1e2
-                pre_region_to_std = wp.transform_inverse(wp.types.transform(*sim_xform))
+                pre_region_to_std = wp.transform_inverse(wp.transform(*sim_xform))
                 cfg['术前区域变换到标准假体'] = np.array(pre_region_to_std).tolist()
                 cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
                 break
@@ -216,18 +217,18 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
     # 术前股骨重建，配准松质骨表面
     from kernel import diff_dmc, region_sample, planar_cut
-    femur_region = wp.context.full(shape=(*region_size,), value=bg_value, dtype=wp.types.float32)
-    wp.context.launch(region_sample, femur_region.shape, [
-        wp.types.uint64(volume.id), wp.types.vec3(spacing),
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+    femur_region = wp.full(shape=(*region_size,), value=bg_value, dtype=wp.float32)
+    wp.launch(region_sample, femur_region.shape, [
+        wp.uint64(volume.id), wp.vec3(spacing),
+        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
     ])
-    wp.context.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(neck_center), wp.types.vec3(-canal_z), bone_threshold[0],
+    wp.launch(planar_cut, femur_region.shape, [
+        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+        wp.vec3(neck_center), wp.vec3(-canal_z), bone_threshold[0],
     ])
-    wp.context.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-        wp.types.vec3(neck_center), wp.types.vec3(-neck_z), bone_threshold[0],
+    wp.launch(planar_cut, femur_region.shape, [
+        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+        wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold[0],
     ])
 
     femur_mesh = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
@@ -255,7 +256,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
         image = itk.array_from_image(image).transpose(2, 1, 0).copy()
         images.append(image)
-        volumes.append(volume := wp.types.Volume.load_from_numpy(image, bg_value=bg_value))
+        volumes.append(volume := wp.Volume.load_from_numpy(image, bg_value=bg_value))
 
         # 载入术后配置
         keypoints = np.array([spacing * cfg['术后'][_] for _ in (
@@ -274,10 +275,10 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
         # 术后股骨重建，配准松质骨表面
         from kernel import region_sample, diff_dmc
-        femur_region = wp.context.full(shape=(*region_size,), value=bg_value, dtype=wp.types.float32)
-        wp.context.launch(region_sample, femur_region.shape, [
-            wp.types.uint64(volume.id), wp.types.vec3(spacing),
-            femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
+        femur_region = wp.full(shape=(*region_size,), value=bg_value, dtype=wp.float32)
+        wp.launch(region_sample, femur_region.shape, [
+            wp.uint64(volume.id), wp.vec3(spacing),
+            femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
         ])
 
         # 术后重建假体
@@ -286,13 +287,13 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
             raise RuntimeError('Empty post-op prothesis mesh')
 
         # 截骨后重建股骨
-        wp.context.launch(planar_cut, femur_region.shape, [
-            femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-            wp.types.vec3(neck_center), wp.types.vec3(-canal_z), bone_threshold[0],
+        wp.launch(planar_cut, femur_region.shape, [
+            femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+            wp.vec3(neck_center), wp.vec3(-canal_z), bone_threshold[0],
         ])
-        wp.context.launch(planar_cut, femur_region.shape, [
-            femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-            wp.types.vec3(neck_center), wp.types.vec3(-neck_z), bone_threshold[0],
+        wp.launch(planar_cut, femur_region.shape, [
+            femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+            wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold[0],
         ])
 
         femur_mesh = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
@@ -302,9 +303,9 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         femur_meshes.append(femur_mesh)
 
         # 术后截取股骨远端无伪影部分
-        wp.context.launch(planar_cut, femur_region.shape, [
-            femur_region, wp.types.vec3(region_origin), iso_spacing, region_xform,
-            wp.types.vec3(keypoints[3]), wp.types.vec3(-canal_z), bone_threshold[0],
+        wp.launch(planar_cut, femur_region.shape, [
+            femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+            wp.vec3(keypoints[3]), wp.vec3(-canal_z), bone_threshold[0],
         ])
 
         femur_distal_mesh = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
@@ -314,7 +315,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
         # 利用股骨配准术前术后区域
         if (post_to_pre_region := cfg.get('术后区域变换到术前区域')) and not overwrite:
-            post_to_pre_region = wp.types.transform(*post_to_pre_region)
+            post_to_pre_region = wp.transform(*post_to_pre_region)
         else:
             matrix = None
             mse_last: float | None = None
@@ -331,7 +332,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
                 mse_last = mse
 
-            post_to_pre_region = wp.transform_from_matrix(wp.types.mat44(matrix))
+            post_to_pre_region = wp.transform_from_matrix(wp.mat44(matrix))
             cfg['术后区域变换到术前区域'] = np.array(post_to_pre_region).tolist()
             cfg['术前与术后配准误差'] = mse
             cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
@@ -377,19 +378,19 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         size = np.ceil([(x[1] - x[0]) / ray_spacing, (y[1] - y[0]) / ray_spacing])
         origin = np.array([x[0], y[0], z[0]])
 
-        mesh = wp.types.Mesh(
-            wp.types.array(std_prothesis_mesh.vertices, wp.types.vec3),
-            wp.types.array(std_prothesis_mesh.faces.flatten(), wp.types.int32),
+        mesh = wp.Mesh(
+            wp.array(std_prothesis_mesh.vertices, wp.vec3),
+            wp.array(std_prothesis_mesh.faces.flatten(), wp.int32),
         )
 
         std_to_post_region = wp.transform_inverse(post_to_pre_region) * wp.transform_inverse(pre_region_to_std)
 
         from kernel import region_raymarching
-        img2d = wp.context.zeros((*size,), wp.types.vec4ub)
-        wp.context.launch(region_raymarching, img2d.shape, [
-            img2d, wp.types.vec3(origin), wp.types.vec3(ray_spacing),
-            wp.types.vec3(1, 0, 0), wp.types.vec3(0, 1, 0), wp.types.vec3(0, 0, 1), z[1] - z[0], box_femur[1][2] - z[0],
-            wp.types.uint64(volume.id), wp.types.vec3(spacing), region_xform * std_to_post_region,
+        img2d = wp.zeros((*size,), wp.vec4ub)
+        wp.launch(region_raymarching, img2d.shape, [
+            img2d, wp.vec3(origin), wp.vec3(ray_spacing),
+            wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1), z[1] - z[0], box_femur[1][2] - z[0],
+            wp.uint64(volume.id), wp.vec3(spacing), region_xform * std_to_post_region,
             mesh.id, 100, prothesis_threshold, -100, 900,
         ])
         img2d = img2d.numpy()
@@ -421,11 +422,11 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         origin = np.array([x[0], y[0], z[0]])
 
         from kernel import region_raymarching
-        img2d = wp.context.zeros((*size,), wp.types.vec4ub)
-        wp.context.launch(region_raymarching, img2d.shape, [
-            img2d, wp.types.vec3(origin), wp.types.vec3(ray_spacing),
-            wp.types.vec3(1, 0, 0), wp.types.vec3(0, 0, 1), wp.types.vec3(0, 1, 0), y[1] - y[0], 0.0,
-            wp.types.uint64(volume.id), wp.types.vec3(spacing), region_xform * std_to_post_region,
+        img2d = wp.zeros((*size,), wp.vec4ub)
+        wp.launch(region_raymarching, img2d.shape, [
+            img2d, wp.vec3(origin), wp.vec3(ray_spacing),
+            wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0), y[1] - y[0], 0.0,
+            wp.uint64(volume.id), wp.vec3(spacing), region_xform * std_to_post_region,
             mesh.id, 100, prothesis_threshold, -100, 900,
         ])
         img2d = img2d.numpy()
@@ -443,11 +444,11 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         origin = np.array([x[0], y[0], z[0]])
 
         from kernel import region_raymarching
-        img2d = wp.context.zeros((*size,), wp.types.vec4ub)
-        wp.context.launch(region_raymarching, img2d.shape, [
-            img2d, wp.types.vec3(origin), wp.types.vec3(ray_spacing),
-            wp.types.vec3(0, 1, 0), wp.types.vec3(0, 0, 1), wp.types.vec3(1, 0, 0), x[1] - x[0], 0.0,
-            wp.types.uint64(volume.id), wp.types.vec3(spacing), region_xform * std_to_post_region,
+        img2d = wp.zeros((*size,), wp.vec4ub)
+        wp.launch(region_raymarching, img2d.shape, [
+            img2d, wp.vec3(origin), wp.vec3(ray_spacing),
+            wp.vec3(0, 1, 0), wp.vec3(0, 0, 1), wp.vec3(1, 0, 0), x[1] - x[0], 0.0,
+            wp.uint64(volume.id), wp.vec3(spacing), region_xform * std_to_post_region,
             mesh.id, 100, prothesis_threshold, -100, 900,
         ])
         img2d = img2d.numpy()
@@ -480,10 +481,10 @@ def subregion(neck_lateral, neck_medial, canal_entry, canal_deep, ic_notch, marg
     canal_x, canal_y, canal_z = [_ / np.linalg.norm(_) for _ in (canal_x, canal_y, canal_z)]
 
     # 区域坐标系
-    _ = wp.quat_from_matrix(wp.types.mat33(np.array([canal_x, canal_y, canal_z]).T))
-    xform = wp.types.transform(canal_deep - np.dot(canal_deep - ic_notch, canal_z) * canal_z, _)
+    _ = wp.quat_from_matrix(wp.mat33(np.array([canal_x, canal_y, canal_z]).T))
+    xform = wp.transform(canal_deep - np.dot(canal_deep - ic_notch, canal_z) * canal_z, _)
 
-    _ = [np.array(wp.transform_point(xform, wp.types.vec3(_))) for _ in (
+    _ = [np.array(wp.transform_point(xform, wp.vec3(_))) for _ in (
         neck_lateral, neck_medial, canal_entry, canal_deep, ic_notch,
     )]
     box = (
