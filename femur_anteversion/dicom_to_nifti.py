@@ -16,8 +16,8 @@ def main(path: str, series_uid: int | str):
         当 series_uid 为整数时，按 Python 索引方式读取对应顺序的序列（如 -1 表示最后一个）
         若未指定 series_uid，默认读取目录中的第一个序列
     """
-    path = Path(path)
-    image = itk.imread(path.absolute().as_posix(), series_uid=series_uid)
+    path = Path(path).absolute()
+    image = itk.imread(path.as_posix(), series_uid=series_uid)
     print(*itk.size(image))
     itk.imwrite(image, path.parent / f'{path.stem}.nii.gz')
 

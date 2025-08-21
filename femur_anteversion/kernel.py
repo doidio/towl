@@ -76,7 +76,7 @@ def region_raymarching(
     n = int(wp.ceil(z_length / spacing[2]))
     grey_count = float(0)
 
-    alpha_n = int(wp.ceil(z_length_alpha / spacing[2]))
+    alpha_n = int(wp.round(z_length_alpha / spacing[2]))
     alpha_count = float(0)
 
     highlight_count = float(0)
@@ -94,7 +94,7 @@ def region_raymarching(
 
             if threshold_max <= pixel:
                 highlight_count += 1.0
-                if k < alpha_n:
+                if k == alpha_n:
                     alpha_count += 1.0
 
     if grey_count > 0:

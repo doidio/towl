@@ -361,7 +361,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         femur_meshes[1].export(_.as_posix())
 
         # 计算植入深度误差
-        delta = float(np.min(std_prothesis_mesh.vertices[:,2])) - float(np.min(post_prothesis_mesh.vertices[:,2]))
+        delta = float(np.min(std_prothesis_mesh.vertices[:, 2])) - float(np.min(post_prothesis_mesh.vertices[:, 2]))
         cfg['模拟与术后深度误差'] = delta
         cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
 
@@ -395,9 +395,8 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         ])
         img2d = img2d.numpy()
         rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
-        rgb = Image.fromarray(np.flipud(np.rot90(rgb, k=op_side)))
 
-        # 计算模拟前倾角误差
+        # 绘制主轴线，计算模拟前倾角误差
         if len(points := np.argwhere(alpha == 255)):
             pca = PCA(n_components=2)
             pca.fit(points)
@@ -409,13 +408,23 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
             cfg['模拟与术后前倾角误差'] = np.rad2deg(np.arctan2(axis[1], axis[0])) * -op_side
             cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
 
+            rgb = Image.fromarray(np.flipud(np.rot90(rgb, k=op_side)))
+            alpha = Image.fromarray(np.flipud(np.rot90(alpha, k=op_side)))
             if op_side > 0:
-                draw_line(rgb, pca.mean_, axis, size[0] * 0.5, 'white', 8)
+                # draw_line(rgb, pca.mean_, axis, size[0] * 0.5, 'white', 8)
+                draw_line(alpha, pca.mean_, axis, size[0] * 0.5, 127, 8)
             else:
-                draw_line(rgb, size - pca.mean_, -axis, size[0] * 0.5, 'white', 8)
+                # draw_line(rgb, size - pca.mean_, -axis, size[0] * 0.5, 'white', 8)
+                draw_line(alpha, size - pca.mean_, -axis, size[0] * 0.5, 127, 8)
+        else:
+            warnings.warn('No prosthesis cross section found')
+            rgb = Image.fromarray(np.flipud(np.rot90(rgb, k=op_side)))
+            alpha = Image.fromarray(np.flipud(np.rot90(alpha, k=op_side)))
 
         _ = image_path.parent / f'{cfg_path.stem}_术后轴位.jpg'
         rgb.save(_.as_posix())
+        _ = image_path.parent / f'{cfg_path.stem}_术后轴位_截面.jpg'
+        alpha.save(_.as_posix())
 
         # 在标准假体坐标系(正位)投影术后图像和模拟假体
         size = np.ceil([(x[1] - x[0]) / ray_spacing, (z[1] - z[0]) / ray_spacing])
