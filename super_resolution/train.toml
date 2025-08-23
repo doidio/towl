@@ -1,4 +1,4 @@
-name = "train_hat_otf"
+name = "train_hat"
 model_type = "image"
 scale = 16
 use_amp = true
@@ -11,11 +11,11 @@ fast_matmul = true
 type = "paired"
 dataroot_gt = 'D:/py/towl/fs/UKBiobankDataset/train/gt'
 dataroot_lq = 'D:/py/towl/fs/UKBiobankDataset/train/lq'
-patch_size = 32
+patch_size = 16
 batch_size = 24
 #accumulate = 1
-augmentation = [ "none", "mixup", "cutmix", "resizemix", "cutblur" ]
-aug_prob = [ 0.5, 0.1, 0.1, 0.1, 0.5 ]
+augmentation = [ "none", "mixup", "resizemix" ]
+aug_prob = [ 0.8, 0.1, 0.1 ]
 
 [datasets.val]
 name = "val"
@@ -97,7 +97,7 @@ loss_weight = 0.75
 [train.gan_opt]
 type = "gan_loss"
 gan_type = "bce"
-loss_weight = 0.1
+loss_weight = 0.05
 
 #[train.msswd_opt]
 #type = "msswd_loss"
@@ -129,7 +129,7 @@ loss_weight = 0.1
 
 [logger]
 total_iter = 1000000
-save_checkpoint_freq = 100
+save_checkpoint_freq = 1000
 use_tb_logger = true
 #save_tb_img = true
 print_freq = 100
