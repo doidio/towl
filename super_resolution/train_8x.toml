@@ -1,6 +1,6 @@
-name = "train_hat"
+name = "train_8x"
 model_type = "image"
-scale = 16
+scale = 8
 use_amp = true
 bfloat16 = true
 fast_matmul = true
@@ -10,9 +10,9 @@ fast_matmul = true
 [datasets.train]
 type = "paired"
 dataroot_gt = 'D:/py/towl/fs/UKBiobankDataset/train/gt'
-dataroot_lq = 'D:/py/towl/fs/UKBiobankDataset/train/lq'
-patch_size = 16
-batch_size = 24
+dataroot_lq = 'D:/py/towl/fs/UKBiobankDataset/train/lq/8x'
+patch_size = 32
+batch_size = 20
 #accumulate = 1
 augmentation = [ "none", "mixup", "resizemix" ]
 aug_prob = [ 0.8, 0.1, 0.1 ]
@@ -21,11 +21,11 @@ aug_prob = [ 0.8, 0.1, 0.1 ]
 name = "val"
 type = "paired"
 dataroot_gt = 'D:/py/towl/fs/UKBiobankDataset/val/gt'
-dataroot_lq = 'D:/py/towl/fs/UKBiobankDataset/val/lq'
+dataroot_lq = 'D:/py/towl/fs/UKBiobankDataset/val/lq/8x'
 save_img = true
 
 [val]
-val_freq = 1000
+val_freq = 10000
 tile = -1
 save_lq = true
 [val.metrics.psnr]
@@ -97,7 +97,7 @@ loss_weight = 0.75
 [train.gan_opt]
 type = "gan_loss"
 gan_type = "bce"
-loss_weight = 0.05
+loss_weight = 0.02
 
 #[train.msswd_opt]
 #type = "msswd_loss"
