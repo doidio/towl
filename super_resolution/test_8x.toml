@@ -1,15 +1,17 @@
-# Results will be saved to neosr/experiments/results/
+# https://github.com/neosr-project/neosr/wiki/Installation-Instructions#manual-installation
+# cd neosr
+# uv run --isolated test.py -opt ../super_resolution/test_8x.toml
 
-name = "test_8x"
+name = "test_8x_Conf_55"
 model_type = "image"
 scale = 8
 #use_amp = true
 #compile = true
 
-[datasets.test_8x]
+[datasets.test]
 name = "test"
 type = "single"
-dataroot_lq = 'D:/py/towl/fs/UKBiobankDataset/test/8x/Conf_65'
+dataroot_lq = 'D:/py/towl/fs/UKBiobankDataset/test/8x/Conf_55'
 
 [val]
 tile = -1
@@ -20,4 +22,4 @@ type = "hat_m"
 #type = "hat_l"
 
 [path]
-pretrain_network_g = 'D:/py/towl/neosr/experiments/train_8x/models/net_g_20000.pth'
+pretrain_network_g = 'D:/py/towl/neosr/experiments/train_8x/models/net_g_50000.pth'

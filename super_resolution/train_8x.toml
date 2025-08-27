@@ -1,3 +1,7 @@
+# https://github.com/neosr-project/neosr/wiki/Installation-Instructions#manual-installation
+# cd neosr
+# uv run --isolated train.py -opt ../super_resolution/train_8x.toml
+
 name = "train_8x"
 model_type = "image"
 scale = 8
@@ -25,7 +29,7 @@ dataroot_lq = 'D:/py/towl/fs/UKBiobankDataset/val/lq/8x'
 save_img = true
 
 [val]
-val_freq = 10000
+val_freq = 1000
 tile = -1
 save_lq = true
 [val.metrics.psnr]

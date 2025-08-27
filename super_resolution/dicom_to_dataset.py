@@ -1,10 +1,5 @@
 # pip install numpy opencv-python chainner-ext pillow pydicom tqdm
 
-# https://github.com/neosr-project/neosr/wiki/Installation-Instructions#manual-installation
-# cd neosr
-# uv run --isolated train.py -opt ../super_resolution/train_8x.toml
-# uv run --isolated test.py -opt ../super_resolution/test_8x.toml
-
 import argparse
 import warnings
 import zipfile
@@ -85,8 +80,8 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
 
             gt_images, lq_images = [], []
             for ds in roi_ds:
-                # GT图scaling倍降采样之后的LQ图，是16的整数倍，避免tile推理
-                base = 16 * 16
+                # GT图8倍降采样之后的LQ图，是16的整数倍，避免tile推理
+                base = 8 * 16
                 h, w = ds.pixel_array.shape[:2]
 
                 pad_h = (base - h % base) % base
@@ -110,7 +105,7 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
                     # 降采样
                     lq_image = resize(lq_image, (w // scaling, h // scaling), rf, gamma_correction=True)
 
-                # 降低对比度，全身窗与局部窗不同，TODO
+                # 降低对比度，全身窗与局部窗不同
                 lq_image = ((lq_image - wl[1]) / wl[0] + 1) / 2
 
                 lq_image = (np.clip(lq_image, 0.0, 1.0) * 255.0).astype(np.uint8).squeeze()
@@ -157,7 +152,7 @@ if __name__ == '__main__':
         ) for it in zip(zip_files, bools)}
 
         try:
-            for _ in tqdm(as_completed(futures)):
+            for _ in tqdm(as_completed(futures), total=len(futures)):
                 try:
                     _.result()
                 except Exception as e:
