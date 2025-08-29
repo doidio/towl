@@ -59,7 +59,8 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
             pad_h = (base - h % base) % base
             pad_w = (base - w % base) % base
 
-            image = cv2.copyMakeBorder(ds.pixel_array, 0, pad_h, 0, pad_w, cv2.BORDER_REPLICATE)
+            image = cv2.copyMakeBorder(ds.pixel_array, 0, pad_h, 0, pad_w,
+                                       cv2.BORDER_CONSTANT, value=[np.min(ds.pixel_array)])
 
             _ = test_dir / 'TotalBody' / f'{Path(zip_file).stem}_TotalBody_{ds.InstanceNumber}.png'
             _.parent.mkdir(parents=True, exist_ok=True)
@@ -75,13 +76,14 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
             if len(roi_ds) != 2:
                 continue
 
+            wl_enabled = random() < 0.5
             wl = random() * 0.5 + 0.5, random() * 0.5 + 0.25
             rf = choice([ResizeFilter.Box, ResizeFilter.Linear, ResizeFilter.Lagrange, ResizeFilter.Gauss])
 
             gt_images, lq_images = [], []
             for ds in roi_ds:
                 # GT图8倍降采样之后的LQ图，是16的整数倍，避免tile推理
-                base = 8 * 16
+                base = 16 * 16  # TODO: 8 * 16
                 h, w = ds.pixel_array.shape[:2]
 
                 pad_h = (base - h % base) % base
@@ -90,7 +92,8 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
                 top, bottom = pad_h // 2, pad_h - pad_h // 2
                 left, right = pad_w // 2, pad_w - pad_w // 2
 
-                gt_image = cv2.copyMakeBorder(ds.pixel_array, top, bottom, left, right, cv2.BORDER_REFLECT101)
+                gt_image = cv2.copyMakeBorder(ds.pixel_array, top, bottom, left, right,
+                                              cv2.BORDER_CONSTANT, value=[np.min(ds.pixel_array)])
                 gt_images.append(gt_image)
 
                 # 退化
@@ -105,8 +108,13 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
                     # 降采样
                     lq_image = resize(lq_image, (w // scaling, h // scaling), rf, gamma_correction=True)
 
-                # 降低对比度，全身窗与局部窗不同
-                lq_image = ((lq_image - wl[1]) / wl[0] + 1) / 2
+                # 对比度退化，全身窗与局部窗不同
+                if wl_enabled:
+                    lq_image = ((lq_image - wl[1]) / wl[0] + 1) / 2
+
+                # 噪声
+                noise = np.random.normal(loc=0.0, scale=10.0 / 255.0, size=lq_image.shape).astype(np.float32)
+                lq_image = lq_image + noise
 
                 lq_image = (np.clip(lq_image, 0.0, 1.0) * 255.0).astype(np.uint8).squeeze()
                 lq_images.append(lq_image)
