@@ -1,4 +1,5 @@
 # https://github.com/neosr-project/neosr/wiki/Installation-Instructions#manual-installation
+# check dev
 # cd neosr
 # uv run --isolated test.py -opt ../super_resolution/test_8x.toml
 

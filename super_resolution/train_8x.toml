@@ -1,4 +1,5 @@
 # https://github.com/neosr-project/neosr/wiki/Installation-Instructions#manual-installation
+# check dev
 # cd neosr
 # uv run --isolated train.py -opt ../super_resolution/train_8x.toml
 

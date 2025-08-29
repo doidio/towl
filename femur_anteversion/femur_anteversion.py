@@ -1,9 +1,10 @@
 # CUDA driver & Toolkit & Microsoft Visual C++
+# pip install itk pyglet trimesh rtree scikit-learn
 # pip install torch --index-url https://download.pytorch.org/whl/cu128
 # pip install wheel diso
-# pip install git+https://github.com/newton-physics/newton.git@b40af7391bdc12369355d4b26f9a12014878e1d5
 # pip install -U --pre warp-lang --extra-index-url=https://pypi.nvidia.com/
-# pip install itk pyglet trimesh rtree scikit-learn newton-clips==0.1.7
+# pip uninstall newton-physics -y
+# pip install -U git+https://github.com/newton-physics/newton.git@ace430de890d344974609443d1bf58a620026968
 
 import argparse
 import json
@@ -13,21 +14,25 @@ from pathlib import Path
 
 import PIL.Image
 import newton.utils
-import newtonclips
 import numpy as np
+import tomlkit
 import trimesh
 import warp as wp
 from PIL import Image, ImageDraw
 from sklearn.decomposition import PCA
+from tomlkit.exceptions import TOMLKitError
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
-
-newtonclips.SAVE_DIR = '.clips'
 
 
 def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     cfg_path = Path(cfg_path)
-    cfg = json.loads(cfg_path.read_text('utf-8'))
+
+    _ = cfg_path.read_text('utf-8')
+    try:
+        cfg = tomlkit.loads(_)
+    except TOMLKitError:
+        cfg = json.loads(_)
 
     bone_threshold = cfg['骨阈值']
     prothesis_threshold = cfg['假体阈值']
@@ -47,7 +52,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     if np.any((direction := np.array(image.GetDirection())) != np.eye(3)):
         warnings.warn(f'Abnormal intrinsics {direction.tolist()}')
         cfg['术前']['异常内参'] = direction.tolist()
-        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
+        cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
         spacing *= np.diag(image.GetDirection())
 
     image = itk.array_from_image(image).transpose(2, 1, 0).copy()
@@ -145,14 +150,12 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         )
 
         model = builder.finalize()
-        solver = newton.solvers.SemiImplicitSolver(model)
+        solver = newton.solvers.SolverSemiImplicit(model)
         state_0, state_1 = model.state(), model.state()
         control = model.control()
 
-        if headless:
-            renderer = newtonclips.SimRendererOpenGL(model)
-        else:
-            renderer = newton.utils.SimRendererOpenGL(model)
+        viewer = newton.viewer.ViewerGL(headless=headless)
+        viewer.set_model(model)
 
         fps = 60
         frame_dt = 1.0 / fps
@@ -177,9 +180,9 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
             sim_time += frame_dt
 
-            renderer.begin_frame(sim_time)
-            renderer.render(state_0)
-            renderer.end_frame()
+            viewer.begin_frame(sim_time)
+            viewer.log_state(state_0)
+            viewer.end_frame()
 
             body_q = state_0.body_q.numpy()
             body_qd = state_0.body_qd.numpy()
@@ -200,7 +203,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
                 sim_xform[:3] *= 1e2
                 pre_region_to_std = wp.transform_inverse(wp.transform(*sim_xform))
                 cfg['术前区域变换到标准假体'] = np.array(pre_region_to_std).tolist()
-                cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
+                cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
                 break
 
             if contacts.rigid_contact_count.numpy()[0] > 0:  # 开始接触时施加力矩(内翻)迫使柄压紧近端前内壁
@@ -210,8 +213,6 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
                 if linear < 10e-2:  # 即将稳定时施加力矩(后倾)迫使柄压紧近端后方股骨距
                     force = [[0.0, -50.0, -50.0 * op_side, 0.0, 0.0, -50.0]]
-
-        renderer.save()
 
     assert pre_region_to_std is not None
 
@@ -248,7 +249,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         if np.any((direction := np.array(image.GetDirection())) != np.eye(3)):
             warnings.warn(f'Abnormal intrinsics {direction.tolist()}')
             cfg['术后']['异常内参'] = direction.tolist()
-            cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
+            cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
             spacing *= np.diag(image.GetDirection())
 
         spacings.append(spacing)
@@ -335,7 +336,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
             post_to_pre_region = wp.transform_from_matrix(wp.mat44(matrix))
             cfg['术后区域变换到术前区域'] = np.array(post_to_pre_region).tolist()
             cfg['术前与术后配准误差'] = mse
-            cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
+            cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
 
         assert post_to_pre_region is not None
 
@@ -363,7 +364,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         # 计算植入深度误差
         delta = float(np.min(std_prothesis_mesh.vertices[:, 2])) - float(np.min(post_prothesis_mesh.vertices[:, 2]))
         cfg['模拟与术后深度误差'] = delta
-        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
+        cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
 
         # 在标准假体坐标系(轴位)投影术后图像和模拟假体
         ray_spacing = 0.1
@@ -406,7 +407,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
                 axis *= -1
 
             cfg['模拟与术后前倾角误差'] = np.rad2deg(np.arctan2(axis[1], axis[0])) * -op_side
-            cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=4), 'utf-8')
+            cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
 
             rgb = Image.fromarray(np.flipud(np.rot90(rgb, k=op_side)))
             alpha = Image.fromarray(np.flipud(np.rot90(alpha, k=op_side)))
