@@ -33,6 +33,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         cfg = tomlkit.loads(_)
     except TOMLKitError:
         cfg = json.loads(_)
+        cfg_path = cfg_path.parent / (cfg_path.name.removesuffix('.json') + '.toml')
 
     bone_threshold = cfg['骨阈值']
     prothesis_threshold = cfg['假体阈值']
