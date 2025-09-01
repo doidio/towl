@@ -1,5 +1,5 @@
 # CUDA driver & Toolkit & Microsoft Visual C++
-# pip install itk pyglet trimesh rtree scikit-learn
+# pip install itk pyglet trimesh rtree scikit-learn imgui-bundle
 # pip install torch --index-url https://download.pytorch.org/whl/cu128
 # pip install wheel diso
 # pip install -U --pre warp-lang --extra-index-url=https://pypi.nvidia.com/
@@ -35,7 +35,7 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         cfg = json.loads(_)
         cfg_path = cfg_path.parent / (cfg_path.name.removesuffix('.json') + '.toml')
 
-    bone_threshold = cfg['骨阈值']
+    bone_threshold = [int(_) for _ in cfg['骨阈值']]
     prothesis_threshold = cfg['假体阈值']
     prothesis_path = cfg['假体']
     margin = np.array(cfg['边距'])
@@ -73,32 +73,44 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     region_height = region_size[2] * iso_spacing
     op_side = int(np.sign(canal_y[1]))
 
-    # 术前股骨重建，小粗隆以上匹配较低骨阈值
     from kernel import diff_dmc, region_sample, planar_cut
-    femur_region = wp.full(shape=(*region_size,), value=bg_value, dtype=wp.float32)
-    wp.launch(region_sample, femur_region.shape, [
-        wp.uint64(volume.id), wp.vec3(spacing),
-        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
-    ])
-    wp.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
-        wp.vec3(neck_center), wp.vec3(-canal_z), bone_threshold[0],
-    ])
-    wp.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
-        wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold[0],
-    ])
-    wp.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
-        wp.vec3(keypoints[2]), wp.vec3(canal_z), bone_threshold[0],
-    ])
 
-    femur_mesh_proximal = diff_dmc(femur_region, iso_spacing, region_origin, bone_threshold[0])
-    if femur_mesh_proximal.is_empty:
-        raise RuntimeError('Empty pre-op femur mesh')
-    femur_mesh_proximal = max(femur_mesh_proximal.split(), key=lambda c: c.area)
+    # 载入假体，竖直放置在股骨区域上方
+    std_prothesis_mesh = trimesh.load_mesh(f'fs/{prothesis_path}')
+    std_prothesis_mesh.vertices = std_prothesis_mesh.vertices[:, [0, 2, 1]] * [-1, 1, 1]
+    std_prothesis_mesh.vertices[:, 2] -= np.min(std_prothesis_mesh.vertices[:, 2])
+    std_prothesis_mesh.fix_normals()
 
-    # 术前股骨重建，小粗隆以下匹配较低骨阈值
+    # 术前股骨近端，小粗隆以上分组骨阈值
+    th_list = [float(_) for _ in cfg.get('近端骨阈值', [_ for _ in range(250, 550, 50)])]
+
+    femur_mesh_proximal = []
+    for th in th_list:
+        femur_region = wp.full(shape=(*region_size,), value=bg_value, dtype=wp.float32)
+        wp.launch(region_sample, femur_region.shape, [
+            wp.uint64(volume.id), wp.vec3(spacing),
+            femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+        ])
+        wp.launch(planar_cut, femur_region.shape, [
+            femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+            wp.vec3(neck_center), wp.vec3(-canal_z), th,
+        ])
+        wp.launch(planar_cut, femur_region.shape, [
+            femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+            wp.vec3(neck_center), wp.vec3(-neck_z), th,
+        ])
+        wp.launch(planar_cut, femur_region.shape, [
+            femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+            wp.vec3(keypoints[2]), wp.vec3(canal_z), th,
+        ])
+
+        mesh = diff_dmc(femur_region, iso_spacing, region_origin, th)
+        if mesh.is_empty:
+            raise RuntimeError(f'Empty pre-op femur mesh with threshold={th}')
+        mesh = max(mesh.split(), key=lambda c: c.area)
+        femur_mesh_proximal.append(mesh)
+
+    # 术前股骨远端，小粗隆以下匹配较高骨阈值
     femur_region = wp.full(shape=(*region_size,), value=bg_value, dtype=wp.float32)
     wp.launch(region_sample, femur_region.shape, [
         wp.uint64(volume.id), wp.vec3(spacing),
@@ -114,41 +126,50 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         raise RuntimeError('Empty pre-op femur mesh')
     femur_mesh_distal = max(femur_mesh_distal.split(), key=lambda c: c.area)
 
-    # 载入假体，竖直放置在股骨区域上方
-    std_prothesis_mesh = trimesh.load_mesh(f'fs/{prothesis_path}')
-    std_prothesis_mesh.vertices = std_prothesis_mesh.vertices[:, [0, 2, 1]] * [-1, 1, 1]
-    std_prothesis_mesh.vertices[:, 2] -= np.min(std_prothesis_mesh.vertices[:, 2])
-    std_prothesis_mesh.fix_normals()
-
     # 假体植入碰撞模拟
-    if (pre_region_to_std := cfg.get('术前区域变换到标准假体')) and not overwrite:
-        pre_region_to_std = wp.transform(*pre_region_to_std)
+    if (th_results := cfg.get('近端阈值')) and not overwrite:
+        th_xforms = {int(th): result['标准假体变换到术前区域'] for th, result in th_results.items()}
+        th_xforms = {th: [*[_ * 1e-2 for _ in xform[:3]], *xform[3:]] for th, xform in th_xforms.items()}
     else:
+        cfg['近端阈值'] = {f'{th}': {} for th in th_list}
+        th_xforms = {}
+        n = len(th_list)
+        hn = n // 2
+
+        z = float(np.max([np.max(_.vertices[:,2]) for _ in femur_mesh_proximal]))
+        init_body_q = [(0, 0, z * 1e-2, 0, 0, 0, 1) for _ in range(n)]  # 初始位姿
+
         builder = newton.ModelBuilder('Z')
 
-        vertices = femur_mesh_proximal.vertices * 1e-2  # mm -> cm
-        builder.add_shape_mesh(
-            mesh=newton.Mesh(vertices, femur_mesh_proximal.faces.flatten()),
-            body=-1,  # 固定刚体
-            cfg=builder.ShapeConfig(mu=0, ke=1e3),  # 零摩擦系数
-            key='femur_proximal',
-        )
+        for _ in range(n):
+            vertices = std_prothesis_mesh.vertices * 1e-2  # mm -> cm
+            builder.add_shape_mesh(
+                mesh=newton.Mesh(vertices, std_prothesis_mesh.faces.flatten()),
+                body=builder.add_body(),  # 自由刚体
+                xform=((0, _ - hn, 0), (0, 0, 0, 1)),
+                cfg=builder.ShapeConfig(mu=0.05, ke=1e3, kd=1e1),  # 零摩擦系数
+                key='prothesis',
+            )
 
-        vertices = femur_mesh_distal.vertices * 1e-2  # mm -> cm
-        builder.add_shape_mesh(
-            mesh=newton.Mesh(vertices, femur_mesh_distal.faces.flatten()),
-            body=-1,  # 固定刚体
-            cfg=builder.ShapeConfig(mu=0, ke=1e3),  # 零摩擦系数
-            key='femur_distal',
-        )
+        for _ in range(n):
+            vertices = femur_mesh_proximal[_].vertices * 1e-2  # mm -> cm
+            builder.add_shape_mesh(
+                mesh=newton.Mesh(vertices, femur_mesh_proximal[_].faces.flatten()),
+                body=-1,  # 固定刚体
+                xform=((0, _ - hn, 0), (0, 0, 0, 1)),
+                cfg=builder.ShapeConfig(mu=0.05, ke=1e3, kd=1e1),  # 零摩擦系数
+                key='femur_proximal',
+            )
 
-        vertices = std_prothesis_mesh.vertices * 1e-2  # mm -> cm
-        builder.add_shape_mesh(
-            mesh=newton.Mesh(vertices, std_prothesis_mesh.faces.flatten()),
-            body=builder.add_body(),  # 自由刚体
-            cfg=builder.ShapeConfig(mu=0, ke=1e3),  # 零摩擦系数
-            key='prothesis',
-        )
+        for _ in range(n):
+            vertices = femur_mesh_distal.vertices * 1e-2  # mm -> cm
+            builder.add_shape_mesh(
+                mesh=newton.Mesh(vertices, femur_mesh_distal.faces.flatten()),
+                body=-1,  # 固定刚体
+                xform=((0, _ - hn, 0), (0, 0, 0, 1)),
+                cfg=builder.ShapeConfig(mu=0.05, ke=1e3, kd=1e1),  # 零摩擦系数
+                key='femur_distal',
+            )
 
         model = builder.finalize()
         solver = newton.solvers.SolverSemiImplicit(model)
@@ -160,14 +181,20 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
         fps = 60
         frame_dt = 1.0 / fps
-        sim_dt = frame_dt / (substeps := 100)
         sim_time = 0.0
 
-        state_0.body_q.assign(((0, 0, region_height * 1e-2, 0, 0, 0, 1),))  # 初始位置升高
+        state_0.body_q.assign(init_body_q)  # 初始位姿
 
-        force = [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]]
+        substeps_force = (
+                (0, 10, [[0.0, 0.0, 0.0, 0.0, 0.0, 0.0]] * n),
+                (1, 10, [[0.0, -50.0, 0.0, 0.0, 0.0, -10.0]] * n),  # 施加力矩(内翻)迫使柄压紧近端前内壁
+                (2, 10, [[0.0, -50.0, -50.0 * op_side, 0.0, 0.0, -10.0]] * n),  # 施加力矩(后倾)迫使柄压紧近端后方股骨距
+        )
+
+        stage, substeps, force = substeps_force[0]
         for fid in range(5000):
-            with wp.utils.ScopedTimer('', print=False) as t:
+            with wp.ScopedTimer('', print=True):
+                sim_dt = frame_dt / substeps
                 for _ in range(substeps):
                     contacts = model.collide(state_0)
                     state_0.clear_forces()
@@ -176,7 +203,6 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
                     state_0.body_f.assign(force)
 
                     solver.step(state_0, state_1, control, contacts, sim_dt)
-
                     state_0, state_1 = state_1, state_0
 
             sim_time += frame_dt
@@ -187,35 +213,32 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
             body_q = state_0.body_q.numpy()
             body_qd = state_0.body_qd.numpy()
-            angular = np.rad2deg(np.max(np.linalg.norm(body_qd[:, :3], axis=1)))
-            linear = np.max(np.linalg.norm(body_qd[:, 3:], axis=1))
+            angular = np.rad2deg(np.min(np.linalg.norm(body_qd[:, :3], axis=1)))
+            linear = np.min(np.linalg.norm(body_qd[:, 3:], axis=1))
 
-            print(f'sim frame {fid} velocity {angular:.2f} deg/s {linear * 1e2:.2f} mm/s took {t.elapsed:.3f} ms')
+            print(f'sim frame {fid} stage {stage} velocity {angular:.2f} deg/s {linear * 1e2:.2f} mm/s')
 
             # 失败，假体速度崩溃或位置过低
-            if np.isnan(body_qd[0]).any() or np.min(body_q[:, 2]) < -region_height * 1e-2:
+            if np.isnan(body_qd).any() or np.min(body_q[:, 2]) < -region_height * 1e-2:
                 warnings.warn(f'sim failed {cfg_path.as_posix()}')
                 break
 
-            # 静止，角速度 < 1.5 deg/s，线速度 < 1.0 mm/s
-            elif angular < 1.5 and linear < 1.0e-2:
+            # 静止，角速度 < 10 deg/s，线速度 < 1.0 mm/s
+            if angular < 10 and linear < 1.0e-2:
                 print(f'sim completed {cfg_path.as_posix()}')
-                sim_xform = body_q[0].copy()
-                sim_xform[:3] *= 1e2
-                pre_region_to_std = wp.transform_inverse(wp.transform(*sim_xform))
-                cfg['术前区域变换到标准假体'] = np.array(pre_region_to_std).tolist()
-                cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
+                for _ in range(n):
+                    xform = body_q[_].copy()
+                    xform[:3] *= 1e2
+                    xform = np.array(xform).tolist()
+                    cfg['近端阈值'][f'{th_list[_]}']['标准假体变换到术前区域'] = xform
+                    cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
+                    th_xforms[th_list[_]] = tuple(float(_) for _ in xform)
                 break
 
-            if contacts.rigid_contact_count.numpy()[0] > 0:  # 开始接触时施加力矩(内翻)迫使柄压紧近端前内壁
-                force = [[0.0, -50.0, 0.0, 0.0, 0.0, -50.0]]
-                substeps = 500
-                sim_dt = frame_dt / substeps
-
-                if linear < 10e-2:  # 即将稳定时施加力矩(后倾)迫使柄压紧近端后方股骨距
-                    force = [[0.0, -50.0, -50.0 * op_side, 0.0, 0.0, -50.0]]
-
-    assert pre_region_to_std is not None
+            if contacts.rigid_contact_count.numpy()[0] > 0:  # 开始接触时
+                stage, substeps, force = substeps_force[1]
+                if linear < 1e-1:  # 即将稳定时
+                    stage, substeps, force = substeps_force[2]
 
     # 术前股骨重建，配准松质骨表面
     from kernel import diff_dmc, region_sample, planar_cut
@@ -341,136 +364,143 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
         assert post_to_pre_region is not None
 
-        post_to_pre_region_np = np.reshape(wp.transform_to_matrix(post_to_pre_region), (4, 4))
-        pre_region_to_std_np = np.reshape(wp.transform_to_matrix(pre_region_to_std), (4, 4))
+        for th, xform in th_xforms.items():
+            pre_region_to_std = wp.transform_inverse(wp.transform(*xform))
 
-        # 变换到标准假体坐标系留样检验
-        _ = image_path.parent / f'{cfg_path.stem}_术前假体.stl'
-        std_prothesis_mesh.export(_.as_posix())
+            post_to_pre_region_np = np.reshape(wp.transform_to_matrix(post_to_pre_region), (4, 4))
+            pre_region_to_std_np = np.reshape(wp.transform_to_matrix(pre_region_to_std), (4, 4))
 
-        _ = image_path.parent / f'{cfg_path.stem}_术后假体.stl'
-        post_prothesis_mesh.apply_transform(post_to_pre_region_np)
-        post_prothesis_mesh.apply_transform(pre_region_to_std_np)
-        post_prothesis_mesh.export(_.as_posix())
+            parent = image_path.parent / f'近端阈值_{th}'
+            parent.mkdir(parents=True, exist_ok=True)
 
-        _ = image_path.parent / f'{cfg_path.stem}_术前股骨.stl'
-        femur_meshes[0].apply_transform(pre_region_to_std_np)
-        femur_meshes[0].export(_.as_posix())
+            # 变换到标准假体坐标系留样检验
+            _ = parent / f'{cfg_path.stem}_术前假体.stl'
+            std_prothesis_mesh.export(_.as_posix())
 
-        _ = image_path.parent / f'{cfg_path.stem}_术后股骨.stl'
-        femur_meshes[1].apply_transform(post_to_pre_region_np)
-        femur_meshes[1].apply_transform(pre_region_to_std_np)
-        femur_meshes[1].export(_.as_posix())
+            # 不同近端阈值条件
+            _ = parent / f'{cfg_path.stem}_术后假体.stl'
+            post_prothesis_mesh.apply_transform(post_to_pre_region_np)
+            post_prothesis_mesh.apply_transform(pre_region_to_std_np)
+            post_prothesis_mesh.export(_.as_posix())
 
-        # 计算植入深度误差
-        delta = float(np.min(std_prothesis_mesh.vertices[:, 2])) - float(np.min(post_prothesis_mesh.vertices[:, 2]))
-        cfg['模拟与术后深度误差'] = delta
-        cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
+            _ = parent / f'{cfg_path.stem}_术前股骨.stl'
+            femur_meshes[0].apply_transform(pre_region_to_std_np)
+            femur_meshes[0].export(_.as_posix())
 
-        # 在标准假体坐标系(轴位)投影术后图像和模拟假体
-        ray_spacing = 0.1
+            _ = parent / f'{cfg_path.stem}_术后股骨.stl'
+            femur_meshes[1].apply_transform(post_to_pre_region_np)
+            femur_meshes[1].apply_transform(pre_region_to_std_np)
+            femur_meshes[1].export(_.as_posix())
 
-        box_femur = [_(femur_meshes[1].vertices, 0) for _ in (np.min, np.max)]
-        box_metal = [_(post_prothesis_mesh.vertices, 0) for _ in (np.min, np.max)]
-        box = [_([*box_femur, *box_metal], 0) for _ in (np.min, np.max)]
-        box[0] -= 10
-        box[1] += 10
-        x, y, z = np.transpose(box)
-
-        size = np.ceil([(x[1] - x[0]) / ray_spacing, (y[1] - y[0]) / ray_spacing])
-        origin = np.array([x[0], y[0], z[0]])
-
-        mesh = wp.Mesh(
-            wp.array(std_prothesis_mesh.vertices, wp.vec3),
-            wp.array(std_prothesis_mesh.faces.flatten(), wp.int32),
-        )
-
-        std_to_post_region = wp.transform_inverse(post_to_pre_region) * wp.transform_inverse(pre_region_to_std)
-
-        from kernel import region_raymarching
-        img2d = wp.zeros((*size,), wp.vec4ub)
-        wp.launch(region_raymarching, img2d.shape, [
-            img2d, wp.vec3(origin), wp.vec3(ray_spacing),
-            wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1), z[1] - z[0], box_femur[1][2] - z[0],
-            wp.uint64(volume.id), wp.vec3(spacing), region_xform * std_to_post_region,
-            mesh.id, 100, prothesis_threshold, -100, 900,
-        ])
-        img2d = img2d.numpy()
-        rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
-
-        # 绘制主轴线，计算模拟前倾角误差
-        if len(points := np.argwhere(alpha == 255)):
-            pca = PCA(n_components=2)
-            pca.fit(points)
-
-            axis = np.array(pca.components_[0])  # 第一主成分方向
-            if axis[0] < 0:
-                axis *= -1
-
-            cfg['模拟与术后前倾角误差'] = np.rad2deg(np.arctan2(axis[1], axis[0])) * -op_side
+            # 计算植入深度误差
+            delta = float(np.min(std_prothesis_mesh.vertices[:, 2])) - float(np.min(post_prothesis_mesh.vertices[:, 2]))
+            cfg['近端阈值'][f'{th}']['模拟与术后深度误差'] = delta
             cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
 
-            rgb = Image.fromarray(np.flipud(np.rot90(rgb, k=op_side)))
-            alpha = Image.fromarray(np.flipud(np.rot90(alpha, k=op_side)))
-            if op_side > 0:
-                # draw_line(rgb, pca.mean_, axis, size[0] * 0.5, 'white', 8)
-                draw_line(alpha, pca.mean_, axis, size[0] * 0.5, 127, 8)
+            # 在标准假体坐标系(轴位)投影术后图像和模拟假体
+            ray_spacing = 0.1
+
+            box_femur = [_(femur_meshes[1].vertices, 0) for _ in (np.min, np.max)]
+            box_metal = [_(post_prothesis_mesh.vertices, 0) for _ in (np.min, np.max)]
+            box = [_([*box_femur, *box_metal], 0) for _ in (np.min, np.max)]
+            box[0] -= 10
+            box[1] += 10
+            x, y, z = np.transpose(box)
+
+            size = np.ceil([(x[1] - x[0]) / ray_spacing, (y[1] - y[0]) / ray_spacing])
+            origin = np.array([x[0], y[0], z[0]])
+
+            mesh = wp.Mesh(
+                wp.array(std_prothesis_mesh.vertices, wp.vec3),
+                wp.array(std_prothesis_mesh.faces.flatten(), wp.int32),
+            )
+
+            std_to_post_region = wp.transform_inverse(post_to_pre_region) * wp.transform_inverse(pre_region_to_std)
+
+            from kernel import region_raymarching
+            img2d = wp.zeros((*size,), wp.vec4ub)
+            wp.launch(region_raymarching, img2d.shape, [
+                img2d, wp.vec3(origin), wp.vec3(ray_spacing),
+                wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1), z[1] - z[0], box_femur[1][2] - z[0],
+                wp.uint64(volume.id), wp.vec3(spacing), region_xform * std_to_post_region,
+                mesh.id, 100, prothesis_threshold, -100, 900,
+            ])
+            img2d = img2d.numpy()
+            rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
+
+            # 绘制主轴线，计算模拟前倾角误差
+            if len(points := np.argwhere(alpha == 255)):
+                pca = PCA(n_components=2)
+                pca.fit(points)
+
+                axis = np.array(pca.components_[0])  # 第一主成分方向
+                if axis[0] < 0:
+                    axis *= -1
+
+                cfg['近端阈值'][f'{th}']['模拟与术后前倾角误差'] = np.rad2deg(np.arctan2(axis[1], axis[0])) * -op_side
+                cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
+
+                rgb = Image.fromarray(np.flipud(np.rot90(rgb, k=op_side)))
+                alpha = Image.fromarray(np.flipud(np.rot90(alpha, k=op_side)))
+                if op_side > 0:
+                    # draw_line(rgb, pca.mean_, axis, size[0] * 0.5, 'white', 8)
+                    draw_line(alpha, pca.mean_, axis, size[0] * 0.5, 127, 8)
+                else:
+                    # draw_line(rgb, size - pca.mean_, -axis, size[0] * 0.5, 'white', 8)
+                    draw_line(alpha, size - pca.mean_, -axis, size[0] * 0.5, 127, 8)
             else:
-                # draw_line(rgb, size - pca.mean_, -axis, size[0] * 0.5, 'white', 8)
-                draw_line(alpha, size - pca.mean_, -axis, size[0] * 0.5, 127, 8)
-        else:
-            warnings.warn('No prosthesis cross section found')
-            rgb = Image.fromarray(np.flipud(np.rot90(rgb, k=op_side)))
-            alpha = Image.fromarray(np.flipud(np.rot90(alpha, k=op_side)))
+                warnings.warn('No prosthesis cross section found')
+                rgb = Image.fromarray(np.flipud(np.rot90(rgb, k=op_side)))
+                alpha = Image.fromarray(np.flipud(np.rot90(alpha, k=op_side)))
 
-        _ = image_path.parent / f'{cfg_path.stem}_术后轴位.jpg'
-        rgb.save(_.as_posix())
-        _ = image_path.parent / f'{cfg_path.stem}_术后轴位_截面.jpg'
-        alpha.save(_.as_posix())
+            _ = parent / f'{cfg_path.stem}_术后轴位.jpg'
+            rgb.save(_.as_posix())
+            _ = parent / f'{cfg_path.stem}_术后轴位_截面.jpg'
+            alpha.save(_.as_posix())
 
-        # 在标准假体坐标系(正位)投影术后图像和模拟假体
-        size = np.ceil([(x[1] - x[0]) / ray_spacing, (z[1] - z[0]) / ray_spacing])
-        origin = np.array([x[0], y[0], z[0]])
+            # 在标准假体坐标系(正位)投影术后图像和模拟假体
+            size = np.ceil([(x[1] - x[0]) / ray_spacing, (z[1] - z[0]) / ray_spacing])
+            origin = np.array([x[0], y[0], z[0]])
 
-        from kernel import region_raymarching
-        img2d = wp.zeros((*size,), wp.vec4ub)
-        wp.launch(region_raymarching, img2d.shape, [
-            img2d, wp.vec3(origin), wp.vec3(ray_spacing),
-            wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0), y[1] - y[0], 0.0,
-            wp.uint64(volume.id), wp.vec3(spacing), region_xform * std_to_post_region,
-            mesh.id, 100, prothesis_threshold, -100, 900,
-        ])
-        img2d = img2d.numpy()
-        rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
+            from kernel import region_raymarching
+            img2d = wp.zeros((*size,), wp.vec4ub)
+            wp.launch(region_raymarching, img2d.shape, [
+                img2d, wp.vec3(origin), wp.vec3(ray_spacing),
+                wp.vec3(1, 0, 0), wp.vec3(0, 0, 1), wp.vec3(0, 1, 0), y[1] - y[0], 0.0,
+                wp.uint64(volume.id), wp.vec3(spacing), region_xform * std_to_post_region,
+                mesh.id, 100, prothesis_threshold, -100, 900,
+            ])
+            img2d = img2d.numpy()
+            rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
 
-        rgb = np.rot90(rgb, k=op_side)
-        if op_side < 0:
-            rgb = np.flipud(rgb)
-        rgb = Image.fromarray(rgb)
-        _ = image_path.parent / f'{cfg_path.stem}_术后正位.jpg'
-        rgb.save(_.as_posix())
+            rgb = np.rot90(rgb, k=op_side)
+            if op_side < 0:
+                rgb = np.flipud(rgb)
+            rgb = Image.fromarray(rgb)
+            _ = parent / f'{cfg_path.stem}_术后正位.jpg'
+            rgb.save(_.as_posix())
 
-        # 在标准假体坐标系(侧位)投影术后图像和模拟假体
-        size = np.ceil([(x[1] - x[0]) / ray_spacing, (z[1] - z[0]) / ray_spacing])
-        origin = np.array([x[0], y[0], z[0]])
+            # 在标准假体坐标系(侧位)投影术后图像和模拟假体
+            size = np.ceil([(x[1] - x[0]) / ray_spacing, (z[1] - z[0]) / ray_spacing])
+            origin = np.array([x[0], y[0], z[0]])
 
-        from kernel import region_raymarching
-        img2d = wp.zeros((*size,), wp.vec4ub)
-        wp.launch(region_raymarching, img2d.shape, [
-            img2d, wp.vec3(origin), wp.vec3(ray_spacing),
-            wp.vec3(0, 1, 0), wp.vec3(0, 0, 1), wp.vec3(1, 0, 0), x[1] - x[0], 0.0,
-            wp.uint64(volume.id), wp.vec3(spacing), region_xform * std_to_post_region,
-            mesh.id, 100, prothesis_threshold, -100, 900,
-        ])
-        img2d = img2d.numpy()
-        rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
+            from kernel import region_raymarching
+            img2d = wp.zeros((*size,), wp.vec4ub)
+            wp.launch(region_raymarching, img2d.shape, [
+                img2d, wp.vec3(origin), wp.vec3(ray_spacing),
+                wp.vec3(0, 1, 0), wp.vec3(0, 0, 1), wp.vec3(1, 0, 0), x[1] - x[0], 0.0,
+                wp.uint64(volume.id), wp.vec3(spacing), region_xform * std_to_post_region,
+                mesh.id, 100, prothesis_threshold, -100, 900,
+            ])
+            img2d = img2d.numpy()
+            rgb, alpha = img2d[:, :, :3], img2d[:, :, 3]
 
-        rgb = np.rot90(rgb, k=op_side)
-        if op_side < 0:
-            rgb = np.flipud(rgb)
-        rgb = Image.fromarray(rgb)
-        _ = image_path.parent / f'{cfg_path.stem}_术后侧位.jpg'
-        rgb.save(_.as_posix())
+            rgb = np.rot90(rgb, k=op_side)
+            if op_side < 0:
+                rgb = np.flipud(rgb)
+            rgb = Image.fromarray(rgb)
+            _ = parent / f'{cfg_path.stem}_术后侧位.jpg'
+            rgb.save(_.as_posix())
     else:
         print('Ignore post-op validation')
 
