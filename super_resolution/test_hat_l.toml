@@ -1,9 +1,9 @@
 # https://github.com/neosr-project/neosr/wiki/Installation-Instructions#manual-installation
 # check dev
 # cd neosr
-# uv run --isolated test.py -opt ../super_resolution/test_8x.toml
+# uv run --isolated test.py -opt ../super_resolution/test_hat_l.toml
 
-name = "test_8x_Conf_Good"
+name = "test_hat_l_Conf_Good"
 model_type = "image"
 scale = 8
 #use_amp = true
@@ -19,8 +19,8 @@ tile = -1
 
 [network_g]
 #type = "hat_s"
-type = "hat_m"
-#type = "hat_l"
+#type = "hat_m"
+type = "hat_l"
 
 [path]
-pretrain_network_g = 'D:/py/towl/neosr/experiments/train_8x/models/net_g_104000.pth'
+pretrain_network_g = 'D:/py/towl/neosr/experiments/train_hat_l/models/net_g_353000.pth'

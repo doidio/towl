@@ -36,7 +36,7 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
             for file in zf.namelist():
                 with zf.open(file) as f:
                     try:
-                        assert (it := pydicom.dcmread(f)).pixel_array
+                        assert (it := pydicom.dcmread(f)).pixel_array is not None
                     except (InvalidDicomError, ValueError):
                         continue
 
@@ -60,7 +60,7 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
             pad_w = (base - w % base) % base
 
             image = cv2.copyMakeBorder(ds.pixel_array, 0, pad_h, 0, pad_w,
-                                       cv2.BORDER_CONSTANT, value=[np.min(ds.pixel_array)])
+                                       cv2.BORDER_CONSTANT, value=[float(np.min(ds.pixel_array))])
 
             _ = test_dir / 'TotalBody' / f'{Path(zip_file).stem}_TotalBody_{ds.InstanceNumber}.png'
             _.parent.mkdir(parents=True, exist_ok=True)
@@ -77,7 +77,7 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
                 continue
 
             wl_enabled = random() < 0.5
-            wl = random() * 0.5 + 0.5, random() * 0.5 + 0.25
+            wl = random() * 0.3 + 0.4, random() * 0.2 + 0.4
             rf = choice([ResizeFilter.Box, ResizeFilter.Linear, ResizeFilter.Lagrange, ResizeFilter.Gauss])
 
             gt_images, lq_images = [], []
@@ -93,7 +93,7 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
                 left, right = pad_w // 2, pad_w - pad_w // 2
 
                 gt_image = cv2.copyMakeBorder(ds.pixel_array, top, bottom, left, right,
-                                              cv2.BORDER_CONSTANT, value=[np.min(ds.pixel_array)])
+                                              cv2.BORDER_CONSTANT, value=[float(np.min(ds.pixel_array))])
                 gt_images.append(gt_image)
 
                 # 退化
@@ -113,7 +113,7 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
                     lq_image = ((lq_image - wl[1]) / wl[0] + 1) / 2
 
                 # 噪声
-                noise = np.random.normal(loc=0.0, scale=10.0 / 255.0, size=lq_image.shape).astype(np.float32)
+                noise = np.random.normal(loc=0.0, scale=2.0 / 255.0, size=lq_image.shape).astype(np.float32)
                 lq_image = lq_image + noise
 
                 lq_image = (np.clip(lq_image, 0.0, 1.0) * 255.0).astype(np.uint8).squeeze()

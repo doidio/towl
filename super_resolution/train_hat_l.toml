@@ -1,9 +1,9 @@
 # https://github.com/neosr-project/neosr/wiki/Installation-Instructions#manual-installation
 # check dev
 # cd neosr
-# uv run --isolated train.py -opt ../super_resolution/train_8x.toml
+# uv run --isolated train.py -opt ../super_resolution/train_hat_l.toml
 
-name = "train_8x"
+name = "train_hat_l"
 model_type = "image"
 scale = 8
 use_amp = true
@@ -48,9 +48,9 @@ type = "calculate_topiq"
 #pretrain_network_d = 'experiments\pretrain_d.pth'
 
 [network_g]
-type = "hat_m"
 #type = "hat_s"
-#type = "hat_l"
+#type = "hat_m"
+type = "hat_l"
 
 [network_d]
 type = "metagan"
