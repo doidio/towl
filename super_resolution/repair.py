@@ -40,13 +40,14 @@ if __name__ == '__main__':
 
     result_dir = Path(args.dataset_dir) / 'test' / '8x_Result'
 
-    Femur_results = {_: _.stem.split('_') for _ in result_dir.rglob('*_Femur_*.png')}
-    Femur_results = {'_'.join(_[:-7]): (_[-7], _[-6], _[-5], __) for __, _ in Femur_results.items()}
+    # Femur_results = {_: _.stem.split('_') for _ in result_dir.rglob('*_Femur_*.png')}
+    # Femur_results = {'_'.join(_[:-8]): (_[-8], _[-7], _[-6], __) for __, _ in Femur_results.items()}
 
     OrthoKnee_results = {_: _.stem.split('_') for _ in result_dir.rglob('*_OrthoKnee_*.png')}
-    OrthoKnee_results = {'_'.join(_[:-7]): (_[-7], _[-6], _[-5], __) for __, _ in OrthoKnee_results.items()}
+    OrthoKnee_results = {'_'.join(_[:-8]): (_[-8], _[-7], _[-6], __) for __, _ in OrthoKnee_results.items()}
 
-    results = {_: [Femur_results[_], OrthoKnee_results[_]] for _ in set(Femur_results) & set(OrthoKnee_results)}
+    # results = {_: [Femur_results[_], OrthoKnee_results[_]] for _ in set(Femur_results) & set(OrthoKnee_results)}
+    results = {_: [OrthoKnee_results[_]] for _ in set(OrthoKnee_results)}
 
     with ProcessPoolExecutor(max_workers=args.max_workers) as executor:
         futures = {executor.submit(
