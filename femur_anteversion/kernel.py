@@ -3,8 +3,19 @@ import trimesh
 import warp as wp
 
 
-def diff_dmc(volume: wp.array(dtype=wp.float32, ndim=3), spacing: float | np.ndarray,
-             origin: np.ndarray, threshold: float):
+def smooth(volume: wp.array(dtype=wp.float32, ndim=3), sigma=1.0):
+    import itk
+    _ = itk.image_from_array(volume.numpy())
+    gaussian = itk.RecursiveGaussianImageFilter[_, _].New()  # noqa
+    gaussian.SetInput(_)
+    gaussian.SetSigma(sigma)
+    gaussian.Update()
+    _ = gaussian.GetOutput()
+    return wp.array(itk.array_from_image(_))
+
+
+def diff_dmc(volume: wp.array(dtype=wp.float32, ndim=3), origin: np.ndarray, spacing: float | np.ndarray,
+             threshold: float, ):
     import torch
     from diso import DiffDMC
     vertices, indices = DiffDMC(dtype=torch.float32)(-wp.to_torch(volume), None, isovalue=-threshold)
@@ -124,3 +135,49 @@ def region_raymarching(
         a = 0.0
 
     array[i, j] = array.dtype(wp.uint8(rgb[0]), wp.uint8(rgb[1]), wp.uint8(rgb[2]), wp.uint8(a))
+
+
+def winding_volume(mesh: trimesh.Trimesh, spacing: float, padding: float, winding: float = 0.5):
+    bounds = np.array([np.min(mesh.vertices, axis=0), np.max(mesh.vertices, axis=0)])
+    bounds[0] -= padding
+    bounds[1] += padding
+    length = bounds[1] - bounds[0]
+    size = (length / spacing).astype(int)
+    size = np.max([size, [1, 1, 1]], axis=0)
+    origin = bounds[0]
+    max_dist = np.linalg.norm(bounds[1] - bounds[0])
+
+    mesh = wp.Mesh(wp.array(mesh.vertices, wp.vec3), wp.array(mesh.faces.flatten(), wp.int32), None, True)
+    volume = wp.empty(shape=(*size,), dtype=wp.float32)
+
+    wp.launch(mesh_winding_volume, volume.shape, [
+        mesh.id, volume, wp.vec3(spacing),
+        wp.vec3(origin), wp.vec3(1, 0, 0), wp.vec3(0, 1, 0), wp.vec3(0, 0, 1), max_dist, winding,
+    ])
+
+    return volume, origin
+
+
+@wp.kernel
+def mesh_winding_volume(
+        mesh: wp.uint64, array: wp.array(dtype=wp.float32, ndim=3),
+        spacing: wp.vec3, origin: wp.vec3, x_axis: wp.vec3, y_axis: wp.vec3, z_axis: wp.vec3,
+        max_dist: wp.float32, threshold: wp.float32,
+):
+    """计算网格的卷绕密度，适用于不封闭网格"""
+    i, j, k = wp.tid()
+
+    p = origin
+    p += float(i) * wp.cw_mul(spacing, x_axis)
+    p += float(j) * wp.cw_mul(spacing, y_axis)
+    p += float(k) * wp.cw_mul(spacing, z_axis)
+
+    q = wp.mesh_query_point_sign_winding_number(
+        mesh, p, max_dist, wp.float32(2.0), threshold,
+    )
+
+    closest = wp.mesh_eval_position(mesh, q.face, q.u, q.v)
+
+    d = -q.sign * wp.length(p - closest)
+
+    array[i, j, k] = d
