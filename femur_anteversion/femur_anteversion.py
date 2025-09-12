@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw
 from sklearn.decomposition import PCA
 from tomlkit.exceptions import TOMLKitError
 
-from kernel import diff_dmc, region_sample, planar_cut, region_raymarching
+from kernel import diff_dmc, region_sample, planar_cut, region_raymarching, winding_volume
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
@@ -38,7 +38,6 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
     bone_threshold = [float(_) for _ in cfg['骨阈值']]
     prothesis_threshold = cfg['假体阈值']
-    prothesis_path = cfg['假体']
     margin = np.array(cfg['边距'])
     iso_spacing = 1.0
 
@@ -74,50 +73,100 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
     region_height = region_size[2] * iso_spacing
     op_side = int(np.sign(canal_y[1]))
 
-    # 载入假体，竖直放置在股骨区域上方
-    std_prothesis_mesh = trimesh.load_mesh(f'fs/{prothesis_path}')
-    std_prothesis_mesh.vertices = std_prothesis_mesh.vertices[:, [0, 2, 1]] * [-1, 1, 1]
-    std_prothesis_mesh.vertices[:, 2] -= np.min(std_prothesis_mesh.vertices[:, 2])
-    std_prothesis_mesh.fix_normals()
+    # 载入假体目录
+    cfg['术前模拟'] = cfg.get('术前模拟', {})
+    prothesis_directory = cfg_path.parent / cfg['假体']
+    prothesis_file = None
+    if prothesis_directory.is_file():
+        prothesis_file = prothesis_directory
+        prothesis_directory = prothesis_directory.parent
+    assert prothesis_directory.is_dir()
 
     # 假体植入碰撞模拟
-    cfg['术前模拟'] = cfg.get('术前模拟', {})
     if (pre_region_to_std := cfg['术前模拟'].get('术前区域变换到标准假体')) and not overwrite:
         pre_region_to_std = wp.transform(*pre_region_to_std)
+
+        prothesis_file = prothesis_directory / cfg['术前模拟'].get('假体文件')
+        mesh = trimesh.load_mesh(prothesis_file)
+        mesh.vertices = mesh.vertices[:, [0, 2, 1]] * [-1, 1, 1]
+        mesh.vertices[:, 2] -= np.min(mesh.vertices[:, 2])
+        mesh.fix_normals()
+        std_prothesis_mesh = mesh
     else:
+        if _ := cfg['术前模拟'].get('假体文件'):
+            prothesis_file = prothesis_directory / _
+
+        prothesis_i = None
+        prothesis_files = []
+        prothesis_meshes = []
+        for file in prothesis_directory.iterdir():
+            try:
+                mesh = trimesh.load_mesh(file)
+            except (ValueError, NotImplementedError, Exception):
+                continue
+
+            # 矫正坐标系
+            mesh.vertices = mesh.vertices[:, [0, 2, 1]] * [-1, 1, 1]
+            mesh.vertices[:, 2] -= np.min(mesh.vertices[:, 2])
+            mesh.fix_normals()
+
+            # 忽略细节，确保封闭水密
+            _ = winding_volume(mesh, iso_spacing, iso_spacing)
+            mesh = diff_dmc(_[0], _[1], iso_spacing, 0.0)
+            mesh = max(mesh.split(), key=lambda c: c.area)
+            mesh.vertices *= 1e-2
+
+            if file == prothesis_file:
+                prothesis_i = len(prothesis_files)
+
+            prothesis_files.append(file)
+            prothesis_meshes.append(mesh)
+
+        if prothesis_i is None:
+            prothesis_i = (len(prothesis_files) - 1) // 2
+
         region = wp.full(shape=(*region_size,), value=bg_value, dtype=wp.float32)
         wp.launch(region_sample, region.shape, [
             wp.uint64(volume.id), wp.vec3(spacing),
             region, wp.vec3(region_origin), iso_spacing, region_xform,
         ])
         wp.launch(planar_cut, region.shape, [
-            region, wp.vec3(region_origin), iso_spacing, region_xform,
+            region, region, wp.vec3(region_origin), iso_spacing, region_xform,
             wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold[0],
         ])
 
-        region_mesh = diff_dmc(region, region_origin, iso_spacing, bone_threshold[0])
-        region_mesh.vertices *= 1e-2
+        region_meshes = []
+        for axis in (canal_z, -canal_z):
+            part = wp.empty_like(region)
+            wp.launch(planar_cut, region.shape, [
+                region, part, wp.vec3(region_origin), iso_spacing, region_xform,
+                wp.vec3(keypoints[1]), wp.vec3(axis), bone_threshold[0],
+            ])
+            mesh = diff_dmc(part, region_origin, iso_spacing, bone_threshold[0])
+            mesh = max(mesh.split(), key=lambda c: c.area)
+            mesh.vertices *= 1e-2
+            region_meshes.append(mesh)
+        region = part
 
-        wp.launch(planar_cut, region.shape, [
-            region, wp.vec3(region_origin), iso_spacing, region_xform,
-            wp.vec3(keypoints[2] + canal_z * 0), wp.vec3(-canal_z), bone_threshold[0],
-        ])
-
-        density = cfg['术前模拟'].get('下沉指数', 250)
+        reaming = cfg['术前模拟'].get('扩髓指数', [250, 0, 500])
 
         from simulate import simulate_volume
-        dynamic_q, density = simulate_volume(
-            std_prothesis_mesh, density, region_mesh,
+        rt = simulate_volume(
+            prothesis_meshes, prothesis_files, prothesis_i, reaming, list(reversed(region_meshes)),
             region, iso_spacing, region_origin, bone_threshold,
-            -region_height, op_side,
-            headless,
+            -region_height, op_side, cfg_path.name, headless,
         )
-        assert dynamic_q is not None
+        assert rt is not None
+        prothesis_q, prothesis_file, std_prothesis_mesh, reaming, contacts = rt
+        std_prothesis_mesh.vertices *= 1e2
 
         print(f'sim completed {cfg_path.as_posix()}')
-        pre_region_to_std = wp.transform_inverse(wp.transform(*dynamic_q))
+        pre_region_to_std = wp.transform_inverse(wp.transform(*prothesis_q))
+        cfg['术前模拟']['假体文件'] = prothesis_file.name
+        cfg['术前模拟']['扩髓指数'] = reaming
+        cfg['术前模拟']['扩髓移除骨量'] = contacts[0]
+        cfg['术前模拟']['假体覆盖骨量'] = contacts[1]
         cfg['术前模拟']['术前区域变换到标准假体'] = np.array(pre_region_to_std).tolist()
-        cfg['术前模拟']['下沉指数'] = density
         cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
 
     assert pre_region_to_std is not None
@@ -129,15 +178,15 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
         femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
     ])
     wp.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
-        wp.vec3(neck_center), wp.vec3(-canal_z), bone_threshold[0],
+        femur_region, femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+        wp.vec3(neck_center), wp.vec3(-canal_z), bone_threshold[1],
     ])
     wp.launch(planar_cut, femur_region.shape, [
-        femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
-        wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold[0],
+        femur_region, femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+        wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold[1],
     ])
 
-    femur_mesh = diff_dmc(femur_region, region_origin, iso_spacing, bone_threshold[0])
+    femur_mesh = diff_dmc(femur_region, region_origin, iso_spacing, bone_threshold[1])
     if femur_mesh.is_empty:
         raise RuntimeError('Empty pre-op femur mesh')
     femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
@@ -192,15 +241,15 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
         # 截骨后重建股骨
         wp.launch(planar_cut, femur_region.shape, [
-            femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
-            wp.vec3(neck_center), wp.vec3(-canal_z), bone_threshold[0],
+            femur_region, femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+            wp.vec3(neck_center), wp.vec3(-canal_z), bone_threshold[1],
         ])
         wp.launch(planar_cut, femur_region.shape, [
-            femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
-            wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold[0],
+            femur_region, femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+            wp.vec3(neck_center), wp.vec3(-neck_z), bone_threshold[1],
         ])
 
-        femur_mesh = diff_dmc(femur_region, region_origin, iso_spacing, bone_threshold[0])
+        femur_mesh = diff_dmc(femur_region, region_origin, iso_spacing, bone_threshold[1])
         if femur_mesh.is_empty:
             raise RuntimeError('Empty post-op femur mesh')
         femur_mesh = max(femur_mesh.split(), key=lambda c: c.area)
@@ -208,11 +257,11 @@ def main(cfg_path: str, headless: bool = False, overwrite: bool = False):
 
         # 术后截取股骨远端无伪影部分
         wp.launch(planar_cut, femur_region.shape, [
-            femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
-            wp.vec3(keypoints[3]), wp.vec3(-canal_z), bone_threshold[0],
+            femur_region, femur_region, wp.vec3(region_origin), iso_spacing, region_xform,
+            wp.vec3(keypoints[3]), wp.vec3(-canal_z), bone_threshold[1],
         ])
 
-        femur_distal_mesh = diff_dmc(femur_region, region_origin, iso_spacing, bone_threshold[0])
+        femur_distal_mesh = diff_dmc(femur_region, region_origin, iso_spacing, bone_threshold[1])
         if femur_distal_mesh.is_empty:
             raise RuntimeError('Empty post-op femur mesh')
         femur_distal_mesh = max(femur_distal_mesh.split(), key=lambda c: c.area)
@@ -395,13 +444,14 @@ def subregion(neck_lateral, neck_medial, canal_entry, canal_deep, ic_notch, marg
     _ = wp.quat_from_matrix(wp.mat33(np.array([canal_x, canal_y, canal_z]).T))
     xform = wp.transform(canal_deep - np.dot(canal_deep - ic_notch, canal_z) * canal_z, _)
 
-    _ = [np.array(wp.transform_point(xform, wp.vec3(_))) for _ in (
+    pts = [np.array(wp.transform_point(xform, wp.vec3(_))) for _ in (
         neck_lateral, neck_medial, canal_entry, canal_deep, ic_notch,
     )]
     box = (
-        np.min(_, axis=0) - margin,
-        np.max(_, axis=0) + margin,
+        np.min(pts, axis=0) - margin,
+        np.max(pts, axis=0) + margin,
     )
+
     size = np.ceil((box[1] - box[0]) / iso_spacing)
     length = size * iso_spacing
     origin = np.array([-0.5 * length[0], -0.5 * length[1], 0.0])

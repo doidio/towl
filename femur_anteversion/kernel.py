@@ -20,7 +20,7 @@ def diff_dmc(volume: wp.array(dtype=wp.float32, ndim=3), origin: np.ndarray, spa
     from diso import DiffDMC
     vertices, indices = DiffDMC(dtype=torch.float32)(-wp.to_torch(volume), None, isovalue=-threshold)
     vertices, indices = vertices.cpu().numpy(), indices.cpu().numpy()
-    vertices = vertices * spacing * np.array(volume.shape) + origin
+    vertices = vertices * spacing * (np.array(volume.shape) - [1, 1, 1]) + origin
     return trimesh.Trimesh(vertices, indices)
 
 
@@ -44,7 +44,7 @@ def region_sample(
 
 @wp.kernel
 def planar_cut(
-        array: wp.array(ndim=3), origin: wp.vec3, spacing: float,
+        array: wp.array3d(), array_out: wp.array3d(), origin: wp.vec3, spacing: float,
         xform: wp.transform, center: wp.vec3, normal: wp.vec3, bone_threshold: float,
 ):
     i, j, k = wp.tid()
@@ -61,7 +61,7 @@ def planar_cut(
         elif d < spacing * 1.5 and pixel > bone_threshold:
             pixel = d + bone_threshold
 
-    array[i, j, k] = array.dtype(pixel)
+    array_out[i, j, k] = array.dtype(pixel)
 
 
 @wp.kernel
