@@ -186,8 +186,8 @@ def simulate_volume(
                 depth_max = _
 
             # 限速，避免过大回弹
-            angular = np.rad2deg(body_qd[body_i, :3])
-            linear = np.array(body_qd[body_i, 3:]) * 1e2
+            angular = np.rad2deg(body_qd[body_i, 3:])
+            linear = np.array(body_qd[body_i, :3]) * 1e2
             angular = np.linalg.norm(angular)
             linear = np.linalg.norm(linear)
 
@@ -197,8 +197,8 @@ def simulate_volume(
             # 假体预载力
             body_f = np.array([(0.0,) * 6] * body_n)
             if contacts[1] > 0 and not deeper:  # 到底后施加末端力矩
-                body_f[body_i] = [reaming[0] * op_side, reaming[1], 0, 0, 0, 0]
-            body_f[body_i, 5] -= reaming[2]  # 重力
+                body_f[body_i] = [0, 0, 0, reaming[0] * op_side, reaming[1], 0]
+            body_f[body_i, 2] -= reaming[2]  # 重力
 
             body_f = wp.array([wp.spatial_vector(*_) for _ in body_f], dtype=wp.spatial_vector)
 
@@ -299,4 +299,4 @@ def voxel_force(
     # 力矩 = 力 × 质心
     torque = wp.cross(p - body_com, force)
 
-    body_f[body_i] += wp.spatial_vector(torque, force)
+    body_f[body_i] += wp.spatial_vector(force, torque)

@@ -4,7 +4,7 @@
 # pip install wheel diso
 # pip install -U --pre warp-lang --extra-index-url=https://pypi.nvidia.com/
 # pip uninstall newton-physics -y
-# pip install -U git+https://github.com/newton-physics/newton.git@ace430de890d344974609443d1bf58a620026968
+# pip install -U git+https://github.com/newton-physics/newton.git@669325b7460b68cc260fce413d1d2e99625fc373
 
 import argparse
 import json
