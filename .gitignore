@@ -174,3 +174,4 @@ fs/
 */.gradio/
 .gradio/
 .clips/
+.fs/
