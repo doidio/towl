@@ -1,0 +1,25 @@
+[project]
+name = "cardiology"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "itk>=5.4.4.post1",
+    "itksnap-dls>=0.0.7",
+    "numpy>=2.3.3",
+    "pillow>=11.3.0",
+    "pydicom>=3.0.1",
+    "streamlit>=1.50.0",
+    "torch>=2.8.0",
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+torchvision = [{ index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
+torchaudio = [{ index = "pytorch-cu129", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]

@@ -1,0 +1,7 @@
+[theme.sidebar]
+
+# Primary accent color.
+primaryColor = "#FFFFFF"
+
+# Background color of the app.
+backgroundColor = "#193D9E"
