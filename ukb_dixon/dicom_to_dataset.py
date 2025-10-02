@@ -75,7 +75,6 @@ if __name__ == '__main__':
                     _.result()
                 except Exception as e:
                     warnings.warn(str(e))
-                    raise e
 
         except KeyboardInterrupt:
             print('Keyboard interrupted terminating...')
