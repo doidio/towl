@@ -10,8 +10,11 @@ from pathlib import Path
 import itk
 import numpy as np
 import pydicom
+import warp as wp
 from pydicom.errors import InvalidDicomError
 from tqdm import tqdm
+
+from kernel import region_sample
 
 
 def main(zip_file: str, dataset_dir: str, is_val: bool):
@@ -49,6 +52,46 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
                     _.parent.mkdir(parents=True, exist_ok=True)
                     itk.imwrite(image, _.as_posix())
 
+                volumes, spacings, box = [], [], None
+                for image in images:
+                    size = np.array([*itk.size(image)])
+                    spacing = np.array([*itk.spacing(image)])
+                    origin = np.array([*itk.origin(image)])
+                    end = origin + size * spacing
+
+                    spacings.append(float(spacing[0]))
+                    spacings.append(float(spacing[1]))
+
+                    if box is None:
+                        box = [origin, end]
+                    else:
+                        box = [np.min([origin, box[0]], 0), np.max([end, box[1]], 0)]
+
+                    _ = 2  # 首尾截断层数
+                    image = itk.array_from_image(image).transpose(2, 1, 0).copy()
+                    volume = wp.Volume.load_from_numpy(image, bg_value=0.0)
+                    volumes.append((volume, spacing, origin))
+
+                re_spacing = float(np.mean(spacings))
+                re_spacing = np.array([re_spacing, re_spacing, (re_spacing + 0.25) // 0.5 * 0.5])
+                size = np.ceil((box[1] - box[0]) / re_spacing)
+                region = wp.full(shape=(*size,), value=0, dtype=wp.float32)
+
+                for volume, spacing, origin in volumes:
+                    wp.launch(region_sample, region.shape, [
+                        wp.uint64(volume.id), wp.vec3(spacing), wp.vec3(origin),
+                        region, wp.vec3(re_spacing), wp.vec3(box[0]),
+                    ])
+
+                region = region.numpy().astype(np.uint16)
+                image = itk.image_from_array(region.transpose(2, 1, 0).copy())
+                image.SetOrigin(box[0])
+                image.SetSpacing(re_spacing)
+
+                _ = images_dir / f'{Path(zip_file).stem}_{suffix}.nii.gz'
+                _.parent.mkdir(parents=True, exist_ok=True)
+                itk.imwrite(image, _.as_posix())
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -75,6 +118,7 @@ if __name__ == '__main__':
                     _.result()
                 except Exception as e:
                     warnings.warn(str(e))
+                    raise e
 
         except KeyboardInterrupt:
             print('Keyboard interrupted terminating...')
