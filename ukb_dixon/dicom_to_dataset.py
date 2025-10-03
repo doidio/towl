@@ -67,10 +67,14 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
                     else:
                         box = [np.min([origin, box[0]], 0), np.max([end, box[1]], 0)]
 
-                    _ = 2  # 首尾截断层数
                     image = itk.array_from_image(image).transpose(2, 1, 0).copy()
-                    volume = wp.Volume.load_from_numpy(image, bg_value=0.0)
-                    volumes.append((volume, spacing, origin))
+
+                    if (_ := 2) > 0:  # 首尾截断层数
+                        volume = wp.Volume.load_from_numpy(image[:, :, _:-_], bg_value=0.0)
+                        volumes.append((volume, spacing, origin + spacing * [0, 0, _]))
+                    else:
+                        volume = wp.Volume.load_from_numpy(image, bg_value=0.0)
+                        volumes.append((volume, spacing, origin))
 
                 re_spacing = float(np.mean(spacings))
                 re_spacing = np.array([re_spacing, re_spacing, (re_spacing + 0.25) // 0.5 * 0.5])
