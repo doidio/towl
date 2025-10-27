@@ -49,95 +49,88 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
                         continue
 
                     if it.ProtocolName in protocols:
-                        yield it
+                        yield it, it.ProtocolName
 
         # test
-        for ds in find(('Total Body',)):
-            base = 16
+        max_number = None
+        for ds, protocol in find(('Total Body',)):
+            if max_number is None:
+                max_number = int(ds.InstanceNumber), ds
+            elif max_number[0] < int(ds.InstanceNumber):
+                max_number = int(ds.InstanceNumber), ds
+
+        ds = max_number[1]  # 经验规律：不透明全身图InstanceNumber + 1 = 透明全身图InstanceNumber
+
+        base = 16
+        h, w = ds.pixel_array.shape[:2]
+
+        pad_h = (base - h % base) % base
+        pad_w = (base - w % base) % base
+
+        image = cv2.copyMakeBorder(ds.pixel_array, 0, pad_h, 0, pad_w,
+                                   cv2.BORDER_CONSTANT, value=[float(np.min(ds.pixel_array))])
+
+        protocol = protocol.replace(' ', '')
+        _ = test_dir / protocol / f'{Path(zip_file).stem}_{protocol}_{ds.InstanceNumber}.png'
+        _.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(image, mode='L').convert('RGB').save(_)
+
+        # train & val
+        for ds, protocol in find((
+                'AP Spine', 'LVA',
+                'Left Femur', 'Right Femur',
+                'Left Ortho Knee', 'Right Ortho Knee',
+        )):
+            wl_enabled = random() < 0.5
+            wl = random() * 0.3 + 0.4, random() * 0.2 + 0.4
+            rf = choice([ResizeFilter.Box, ResizeFilter.Linear, ResizeFilter.Lagrange, ResizeFilter.Gauss])
+
+            # GT图8倍降采样之后的LQ图，是16的整数倍，避免tile推理
+            base = 8 * 16  # TODO: 8 * 16
             h, w = ds.pixel_array.shape[:2]
 
             pad_h = (base - h % base) % base
             pad_w = (base - w % base) % base
 
-            image = cv2.copyMakeBorder(ds.pixel_array, 0, pad_h, 0, pad_w,
-                                       cv2.BORDER_CONSTANT, value=[float(np.min(ds.pixel_array))])
+            top, bottom = pad_h // 2, pad_h - pad_h // 2
+            left, right = pad_w // 2, pad_w - pad_w // 2
 
-            _ = test_dir / 'TotalBody' / f'{Path(zip_file).stem}_TotalBody_{ds.InstanceNumber}.png'
-            _.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(image, mode='L').convert('RGB').save(_)
+            gt_image = cv2.copyMakeBorder(ds.pixel_array, top, bottom, left, right,
+                                          cv2.BORDER_CONSTANT, value=[float(np.min(ds.pixel_array))])
 
-        # train & val
-        for roi in ('Femur', 'Ortho Knee'):
-            roi_ds = []
-            for i in ('Right', 'Left'):
-                if len(ds := list(find(' '.join([i, roi])))) > 0:
-                    roi_ds.append(ds[0])
+            # 退化
+            lq_image = gt_image.astype(np.float32) / 255.0
+            h, w = lq_image.shape[:2]
 
-            if len(roi_ds) != 2:
-                continue
+            ksize = 7
+            for scaling in (2, 4, 8,):
+                # 模糊
+                lq_image = cv2.GaussianBlur(lq_image, (ksize, ksize), 0)
 
-            wl_enabled = random() < 0.5
-            wl = random() * 0.3 + 0.4, random() * 0.2 + 0.4
-            rf = choice([ResizeFilter.Box, ResizeFilter.Linear, ResizeFilter.Lagrange, ResizeFilter.Gauss])
+                # 降采样
+                lq_image = resize(lq_image, (w // scaling, h // scaling), rf, gamma_correction=True)
 
-            gt_images, lq_images = [], []
-            for ds in roi_ds:
-                # GT图8倍降采样之后的LQ图，是16的整数倍，避免tile推理
-                base = 16 * 16  # TODO: 8 * 16
-                h, w = ds.pixel_array.shape[:2]
+            # 对比度退化，全身窗与局部窗不同
+            if wl_enabled:
+                lq_image = ((lq_image - wl[1]) / wl[0] + 1) / 2
 
-                pad_h = (base - h % base) % base
-                pad_w = (base - w % base) % base
+            # 噪声
+            noise = np.random.normal(loc=0.0, scale=2.0 / 255.0, size=lq_image.shape).astype(np.float32)
+            lq_image = lq_image + noise
 
-                top, bottom = pad_h // 2, pad_h - pad_h // 2
-                left, right = pad_w // 2, pad_w - pad_w // 2
+            lq_image = (np.clip(lq_image, 0.0, 1.0) * 255.0).astype(np.uint8).squeeze()
 
-                gt_image = cv2.copyMakeBorder(ds.pixel_array, top, bottom, left, right,
-                                              cv2.BORDER_CONSTANT, value=[float(np.min(ds.pixel_array))])
-                gt_images.append(gt_image)
-
-                # 退化
-                lq_image = gt_image.astype(np.float32) / 255.0
-                h, w = lq_image.shape[:2]
-
-                ksize = 7
-                for scaling in (2, 4, 8,):
-                    # 模糊
-                    lq_image = cv2.GaussianBlur(lq_image, (ksize, ksize), 0)
-
-                    # 降采样
-                    lq_image = resize(lq_image, (w // scaling, h // scaling), rf, gamma_correction=True)
-
-                # 对比度退化，全身窗与局部窗不同
-                if wl_enabled:
-                    lq_image = ((lq_image - wl[1]) / wl[0] + 1) / 2
-
-                # 噪声
-                noise = np.random.normal(loc=0.0, scale=2.0 / 255.0, size=lq_image.shape).astype(np.float32)
-                lq_image = lq_image + noise
-
-                lq_image = (np.clip(lq_image, 0.0, 1.0) * 255.0).astype(np.uint8).squeeze()
-                lq_images.append(lq_image)
-
-            # 拼接
-            def stack(arr: list):
-                shape = max(arr[0].shape[0], arr[1].shape[0]), arr[0].shape[1] + arr[1].shape[1]
-                stacked = np.zeros(shape, dtype=arr[0].dtype)
-                stacked[:arr[0].shape[0], :arr[0].shape[1]] = arr[0]
-                stacked[:arr[1].shape[0], arr[0].shape[1]:arr[0].shape[1] + arr[1].shape[1]] = arr[1]
-                return stacked
-
-            roi = roi.replace(' ', '')
+            protocol = protocol.replace(' ', '')
 
             # 保存LQ
-            _ = lq_dir / '8x' / f'{Path(zip_file).stem}_{roi}.png'
+            _ = lq_dir / '8x' / f'{Path(zip_file).stem}_{protocol}.png'
             _.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(stack(lq_images), mode='L').convert('RGB').save(_)
+            Image.fromarray(lq_image, mode='L').convert('RGB').save(_)
 
             # 保存GT
-            _ = gt_dir / f'{Path(zip_file).stem}_{roi}.png'
+            _ = gt_dir / f'{Path(zip_file).stem}_{protocol}.png'
             _.parent.mkdir(parents=True, exist_ok=True)
-            Image.fromarray(stack(gt_images), mode='L').convert('RGB').save(_)
+            Image.fromarray(gt_image, mode='L').convert('RGB').save(_)
 
 
 if __name__ == '__main__':

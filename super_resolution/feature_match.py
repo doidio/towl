@@ -112,22 +112,20 @@ def main(dataset_dir: str, TotalBody_file: str, roi_files: dict, matcher: kornia
             conf_sums = conf_sums.squeeze()
 
             best_h = int(conf_sums.argmax())
-            best_conf_sums = conf_sums[best_h]
 
             best_h *= step
             best_kp0, best_kp1, best_conf = kps[best_h]
 
-            lv = int(best_conf_sums // 10 * 10) + 5  # 按置信度分组全身图
             roi_image = image_0[best_h:best_h + crop_h]
             canvas = draw_matches(roi_image, image_1, best_kp0, best_kp1, best_conf)
 
             stem = f'{prefix}_TotalBody_{TotalBody_i}_{roi}_{best_h}_{crop_h}'
 
-            _ = test_dir / '8x_Match' / f'Conf_{lv}' / f'{stem}.png'
+            _ = test_dir / '8x_Match' / f'{stem}.png'
             _.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(canvas).save(_)
 
-            _ = test_dir / '8x' / f'Conf_{lv}' / f'{stem}.png'
+            _ = test_dir / '8x' / f'{stem}.png'
             _.parent.mkdir(parents=True, exist_ok=True)
             Image.fromarray(roi_image).save(_)
 
