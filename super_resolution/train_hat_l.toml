@@ -1,7 +1,7 @@
 # https://github.com/neosr-project/neosr/wiki/Installation-Instructions#manual-installation
 # check dev
 # cd neosr
-# uv run --isolated train.py -opt ../super_resolution/train_hat_l.toml
+# uv run --isolated train.py -opt ../super_resolution/train_hat_l.toml --auto_resume
 
 name = "train_hat_l"
 model_type = "image"
@@ -16,8 +16,8 @@ fast_matmul = true
 type = "paired"
 dataroot_gt = 'D:/py/towl/fs/UKBiobankDataset/train/gt'
 dataroot_lq = 'D:/py/towl/fs/UKBiobankDataset/train/lq/8x'
-patch_size = 32
-batch_size = 20
+patch_size = 16
+batch_size = 64
 #accumulate = 1
 augmentation = [ "none", "mixup", "resizemix" ]
 aug_prob = [ 0.8, 0.1, 0.1 ]

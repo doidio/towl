@@ -3,6 +3,7 @@
 
 import argparse
 import colorsys
+import warnings
 from concurrent.futures import as_completed, ThreadPoolExecutor
 from pathlib import Path
 from random import randint
@@ -68,6 +69,14 @@ def draw_matches(im0, im1, kp0, kp1, conf):
     return canvas
 
 
+def stack(arr: list):
+    shape = max(arr[0].shape[0], arr[1].shape[0]), arr[0].shape[1] + arr[1].shape[1], 3
+    stacked = np.zeros(shape, dtype=arr[0].dtype)
+    stacked[:arr[0].shape[0], :arr[0].shape[1]] = arr[0]
+    stacked[:arr[1].shape[0], arr[0].shape[1]:arr[0].shape[1] + arr[1].shape[1]] = arr[1]
+    return stacked
+
+
 def main(dataset_dir: str, TotalBody_file: str, roi_files: dict, matcher: kornia.feature.LoFTR):
     TotalBody_file = Path(TotalBody_file)
     if (touch := TotalBody_file.parent.parent / 'TotalBody_Matched' / TotalBody_file.name).exists():
@@ -83,11 +92,20 @@ def main(dataset_dir: str, TotalBody_file: str, roi_files: dict, matcher: kornia
     image_0 = np.array(Image.open(TotalBody_file))
 
     # 局部图
-    roi_files = {roi: roi_files.get(f'{prefix}_{roi}') for roi in ('Femur', 'OrthoKnee')}
+    roi_files = {roi: (
+        roi_files.get(f'{prefix}_Right{roi}'),
+        roi_files.get(f'{prefix}_Left{roi}'),
+        prefix,
+    ) for roi in ('Femur', 'OrthoKnee')}
 
     if None not in roi_files.values():
         for roi in roi_files:
-            image_1 = np.array(Image.open(roi_files[roi]))
+            image_1 = [roi_files[roi][_] for _ in range(2)]
+            if None in image_1:
+                warnings.warn(f'Incomplete Left or Right {roi} {roi_files[roi][2]}')
+                return
+
+            image_1 = stack([np.array(Image.open(roi_files[roi][_])) for _ in range(2)])
 
             # 特征匹配
             crop_h = image_1.shape[0]
