@@ -1,0 +1,19 @@
+
+[webdav.images]
+#webdav_hostname = "http://cloud.midivi.cn:16019"
+webdav_hostname = "http://192.168.192.227:9090"
+webdav_login    = "webdav"
+webdav_password = "9hos"
+disable_check = true
+
+[webdav.labels]
+#webdav_hostname = "http://cloud.midivi.cn:16020"
+webdav_hostname = "http://192.168.192.227:9091"
+webdav_login    = "webdav"
+webdav_password = "9hos"
+disable_check = true
+
+[task.total_mr]
+
+[task.tissue_types_mr]
+license_number = "aca_LWDSJ75NSZI1DU"
