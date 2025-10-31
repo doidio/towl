@@ -41,7 +41,9 @@ def main(cfg_path: str):
                 print(f'[清理] {_}')
                 return
 
-    while len(rw_list := rw.list('.done')) < len(ro_list := ro.list()):
+    while True:
+        ro_list = ro.list()
+        rw_list = rw.list('.done')
         print(f'[完成] {len(rw_list)}/{len(ro_list)} {100 * len(rw_list) / len(ro_list):.3f}%')
 
         for f in ro.list():
