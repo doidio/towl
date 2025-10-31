@@ -20,6 +20,10 @@ curl google.com
 # 开始任务
 cd towl/totalseg
 uv sync
+uv run python run_webdav.py --config configN.
+
+# 或
+cd towl/totalseg
 uv run python run_webdav.py --config configN.toml
 
 # 离开后台

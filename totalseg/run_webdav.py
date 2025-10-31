@@ -56,7 +56,7 @@ def main(cfg_path: str, clean: bool):
         if requests.head(f'{rw.webdav.hostname}/{done}', auth=(rw.webdav.login, rw.webdav.password)).ok:
             continue
 
-        print(f'[新建] {f}')
+        print(f'[新建] {f} {cfg_path.name}')
 
         # 文件锁
         cfg['undone'] = f
