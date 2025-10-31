@@ -39,7 +39,7 @@ def main(cfg_path: str):
     cfg = tomlkit.loads(_)
 
     c = 2
-    pl = pv.Plotter(title='血管吻合术模拟', shape=(1, c), border_width=0, window_size=(800 * c, 800))
+    pl = pv.Plotter(title='血管吻合血流动力学模拟', shape=(1, c), border_width=0, window_size=(800 * c, 800))
 
     camera = pl.camera
     for _ in range(c):

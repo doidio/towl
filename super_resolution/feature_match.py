@@ -102,7 +102,7 @@ def main(dataset_dir: str, TotalBody_file: str, roi_files: dict, matcher: kornia
         for roi in roi_files:
             image_1 = [roi_files[roi][_] for _ in range(2)]
             if None in image_1:
-                warnings.warn(f'Incomplete Left or Right {roi} {roi_files[roi][2]}')
+                # warnings.warn(f'Incomplete Left or Right {roi} {roi_files[roi][2]}')
                 return
 
             image_1 = stack([np.array(Image.open(roi_files[roi][_])) for _ in range(2)])
