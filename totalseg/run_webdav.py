@@ -32,6 +32,8 @@ def main(cfg_path: str, fs_path: str):
     cfg_path = Path(cfg_path)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
 
+    rw = Client(cfg['webdav']['labels'])
+
     fs_path = Path(fs_path)
     fs = tomlkit.loads(fs_path.read_text('utf-8'))
 
@@ -45,6 +47,8 @@ def main(cfg_path: str, fs_path: str):
             tdir = Path(tdir)
             image = tdir / f
 
+            seconds = time.perf_counter()
+
             for task in cfg['task']:
                 fs['done'][task] = fs['done'].get(task, [])
 
@@ -54,7 +58,6 @@ def main(cfg_path: str, fs_path: str):
                 print(f'[进度] {i}/{len(todo)} {100 * i / len(todo):.3f}% {cfg_path.name} {fs_path.name}')
                 print(f'[任务] {f} {task}')
 
-                seconds = time.perf_counter()
                 label = tdir / f'{task}.nii.gz'
 
                 # 下载
@@ -99,11 +102,17 @@ def main(cfg_path: str, fs_path: str):
                 fs['done'][task].append(f)
                 fs_path.write_text(tomlkit.dumps(fs), 'utf-8')
 
-                seconds = time.perf_counter() - seconds
-                print(f'[用时] {seconds:.0f} 秒\n')
-
                 label.unlink(True)
             image.unlink(True)
+
+            seconds = time.perf_counter() - seconds
+            if seconds > 1:
+                rw.mkdir('.progress')
+                for _ in rw.list('.progress'):
+                    if str(_).startswith(fs_path.name):
+                        rw.clean(f'.progress/{_}')
+                rw.upload_to(b'', f'.progress/{fs_path.name}_{i}_{len(todo)}_{100 * i / len(todo):.3f}%_{seconds:.0f}s')
+                print(f'[用时] {seconds:.0f} 秒\n')
 
 
 def download(cfg_path: str, remote: str, local: str):
