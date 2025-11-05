@@ -4,7 +4,7 @@
 # pip install wheel diso
 # pip install -U --pre warp-lang --extra-index-url=https://pypi.nvidia.com/
 # pip uninstall newton newton-physics -y
-# pip install -U git+https://github.com/newton-physics/newton.git@6fd18de07275a55d0d0fd9c49ae6f401b67545b9
+# pip install -U git+https://github.com/newton-physics/newton.git@6950f379de428b368141916f17ee5d6d432e6d98
 
 import argparse
 import json
@@ -168,8 +168,26 @@ def main(cfg_path: str):
 
     cfg['肾动脉']['侧切长度'] = l_sum
 
+    # 拉直血管中心线，参数化弯折
+    centers = []
+    c0 = [*active_centerline['髂内动脉'], *active_centerline['肾动脉']]
+    c1 = wp.vec3()
+    c1[2] = -1.0
+    for i in range(len(c0)):
+        if len(centers):
+            if i < len(active_centerline['髂内动脉']):
+                c1 = wp.quat_rotate(wp.quat_rpy(0.0, wp.radians(1.5), 0.0), c1)
+            elif i < len(active_centerline['髂内动脉']) + l_sum:
+                c1 = wp.quat_rotate(wp.quat_rpy(0.0, wp.radians(-1.0), 0.0), c1)
+            else:
+                c1 = wp.quat_rotate(wp.quat_rpy(0.0, wp.radians(0.5), 0.0), c1)
+            _ = np.array(c1 / wp.length(c1))
+            centers.append(centers[-1] + _ * np.linalg.norm(c0[i] - c0[i - 1]))
+        else:
+            centers.append(np.zeros(3))
+
     # 重采样血管中心线距离场，重建血管内壁面网格
-    centers = np.vstack([active_centerline['髂内动脉'], active_centerline['肾动脉']])
+    centers = np.array(centers)
     radius = np.hstack([active_radius['髂内动脉'], active_radius['肾动脉']])
 
     b = [np.min(centers, 0), np.max(centers, 0)]
