@@ -2,36 +2,46 @@ import argparse
 import warnings
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from io import BytesIO
 from pathlib import Path
 
-import boto3
+import minio
 import pydicom
 import tomlkit
 from pydicom.errors import InvalidDicomError
 from tqdm import tqdm
 
 
+class FatalError(Exception):
+    pass
+
+
 def main(zip_file: str, cfg_path: str):
     cfg_path = Path(cfg_path)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
 
-    s3 = boto3.client('s3', **cfg['s3']['client'])
-    bucket = cfg['s3']['bucket']
+    s3 = minio.Minio(**cfg['minio']['client'], secure=False)
+    bucket = cfg['minio']['bucket']
 
-    if bucket not in {_['Name'] for _ in s3.list_buckets()['Buckets']}:
-        print(s3.list_buckets()['Buckets'])
+    if bucket not in {_.name for _ in s3.list_buckets()}:
+        print(s3.list_buckets())
+        s3.make_bucket(bucket)
 
-    with zipfile.ZipFile(zip_file) as zf:
-        for file in zf.namelist():
-            with zf.open(file) as f:
-                try:
-                    it = pydicom.dcmread(f)
-                except (InvalidDicomError, ValueError):
-                    continue
+    with zipfile.ZipFile(zip_file, 'r') as zf:
+        for file in zf.filelist:
+            data = zf.read(file)
 
-                key = f'{it.StudyInstanceUID}/{it.SeriesInstanceUID}/{it.SOPInstanceUID}'
-                f.seek(0)
-                s3.upload_fileobj(f, bucket, key)
+            try:
+                it = pydicom.dcmread(BytesIO(data))
+            except (InvalidDicomError, ValueError):
+                continue
+
+            key = f'{it.StudyInstanceUID}/{it.SeriesInstanceUID}/{it.SOPInstanceUID}'
+
+            try:
+                s3.put_object(bucket, key, BytesIO(data), len(data))
+            except Exception as _:
+                raise FatalError(_)
 
 
 if __name__ == '__main__':
@@ -50,11 +60,13 @@ if __name__ == '__main__':
         ): (_.as_posix(), args.config,) for _ in zip_files}
 
         try:
-            for _ in tqdm(as_completed(futures), total=len(futures)):
+            for fu in tqdm(as_completed(futures), total=len(futures)):
                 try:
-                    _.result()
-                except Exception as e:
-                    warnings.warn(f'{e} {futures[_]}')
+                    fu.result()
+                except FatalError as _:
+                    raise _
+                except Exception as _:
+                    warnings.warn(f'{_} {futures[fu]}')
 
         except KeyboardInterrupt:
             print('Keyboard interrupted terminating...')
