@@ -20,7 +20,7 @@ def main(zip_file: str, cfg_path: str):
     cfg_path = Path(cfg_path)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
 
-    s3 = minio.Minio(**cfg['minio']['client'], secure=False)
+    s3 = minio.Minio(**cfg['minio']['client'])
     bucket = cfg['minio']['bucket']
 
     if bucket not in {_.name for _ in s3.list_buckets()}:
