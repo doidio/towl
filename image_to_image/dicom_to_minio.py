@@ -5,11 +5,7 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 from io import BytesIO
 from pathlib import Path
 
-import minio
-import pydicom
 import tomlkit
-from minio import Minio
-from pydicom.errors import InvalidDicomError
 from tqdm import tqdm
 
 
@@ -21,6 +17,7 @@ def main(zip_file: str, cfg_path: str):
     cfg_path = Path(cfg_path)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
 
+    from minio import Minio
     client = Minio(**cfg['minio']['client'])
     bucket = cfg['minio']['bucket']
 
@@ -31,6 +28,8 @@ def main(zip_file: str, cfg_path: str):
         for file in zf.filelist:
             data = zf.read(file)
 
+            import pydicom
+            from pydicom.errors import InvalidDicomError
             try:
                 it = pydicom.dcmread(BytesIO(data))
             except (InvalidDicomError, ValueError):
@@ -41,7 +40,7 @@ def main(zip_file: str, cfg_path: str):
             try:
                 client.put_object(bucket, key, BytesIO(data), len(data))
             except Exception as _:
-                raise FatalError(_)
+                raise FatalError(str(_)) from None
 
 
 if __name__ == '__main__':
