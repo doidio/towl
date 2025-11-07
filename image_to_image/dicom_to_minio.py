@@ -1,3 +1,12 @@
+# https://github.com/minio/minio?tab=readme-ov-file#install-from-source
+# minio server /Volumes/3726/minio/sh9_tha
+# mc alias set local http://localhost:9000 minioadmin minioadmin
+# mc mb local/tha --ignore-existing
+
+# compression (optional)
+# mc admin config set local compression enable=true extensions=".dcm" mime_types="application/dicom"
+# mc admin service restart local
+
 import argparse
 import warnings
 import zipfile
@@ -14,6 +23,11 @@ class FatalError(Exception):
 
 
 def main(zip_file: str, cfg_path: str):
+    zip_file = Path(zip_file)
+    done = zip_file.parent / f'{zip_file.name}.done'
+    if done.exists():
+        return
+
     cfg_path = Path(cfg_path)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
 
@@ -35,12 +49,14 @@ def main(zip_file: str, cfg_path: str):
             except (InvalidDicomError, ValueError):
                 continue
 
-            key = f'{it.StudyInstanceUID}/{it.SeriesInstanceUID}/{it.SOPInstanceUID}'
+            key = f'{it.StudyInstanceUID}/{it.SeriesInstanceUID}/{it.SOPInstanceUID}.dcm'
 
             try:
                 client.put_object(bucket, key, BytesIO(data), len(data))
             except Exception as _:
                 raise FatalError(str(_)) from None
+
+    done.touch()
 
 
 if __name__ == '__main__':
