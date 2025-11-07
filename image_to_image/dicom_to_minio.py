@@ -8,6 +8,7 @@ from pathlib import Path
 import minio
 import pydicom
 import tomlkit
+from minio import Minio
 from pydicom.errors import InvalidDicomError
 from tqdm import tqdm
 
@@ -20,12 +21,11 @@ def main(zip_file: str, cfg_path: str):
     cfg_path = Path(cfg_path)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
 
-    s3 = minio.Minio(**cfg['minio']['client'])
+    client = Minio(**cfg['minio']['client'])
     bucket = cfg['minio']['bucket']
 
-    if bucket not in {_.name for _ in s3.list_buckets()}:
-        print(s3.list_buckets())
-        s3.make_bucket(bucket)
+    if bucket not in {_.name for _ in client.list_buckets()}:
+        client.make_bucket(bucket)
 
     with zipfile.ZipFile(zip_file, 'r') as zf:
         for file in zf.filelist:
@@ -39,7 +39,7 @@ def main(zip_file: str, cfg_path: str):
             key = f'{it.StudyInstanceUID}/{it.SeriesInstanceUID}/{it.SOPInstanceUID}'
 
             try:
-                s3.put_object(bucket, key, BytesIO(data), len(data))
+                client.put_object(bucket, key, BytesIO(data), len(data))
             except Exception as _:
                 raise FatalError(_)
 
