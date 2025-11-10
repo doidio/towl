@@ -8,13 +8,18 @@
 # mc admin service restart local
 
 import argparse
+import shutil
+import tempfile
 import warnings
 import zipfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from io import BytesIO
 from pathlib import Path
 
+import itk
+import numpy as np
+import pydicom
 import tomlkit
+from minio import Minio
 from tqdm import tqdm
 
 
@@ -31,30 +36,74 @@ def main(zip_file: str, cfg_path: str):
     cfg_path = Path(cfg_path)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
 
-    from minio import Minio
     client = Minio(**cfg['minio']['client'])
     bucket = cfg['minio']['bucket']
 
-    if bucket not in {_.name for _ in client.list_buckets()}:
-        client.make_bucket(bucket)
+    tmpdir: str | None = cfg.get('local', {}).get('tmpdir')
+    Path(tmpdir).mkdir(parents=True, exist_ok=True)
 
-    with zipfile.ZipFile(zip_file, 'r') as zf:
-        for file in zf.filelist:
-            data = zf.read(file)
+    with tempfile.TemporaryDirectory(dir=tmpdir) as tdir:
+        tdir = Path(tdir)
 
-            import pydicom
-            from pydicom.errors import InvalidDicomError
-            try:
-                it = pydicom.dcmread(BytesIO(data))
-            except (InvalidDicomError, ValueError):
+        with zipfile.ZipFile(zip_file, 'r') as zf:
+            for member in zf.infolist():
+                if member.is_dir():
+                    continue
+
+                with zf.open(member) as stream:
+                    from pydicom.errors import InvalidDicomError
+                    try:
+                        it = pydicom.dcmread(stream)
+                    except (InvalidDicomError, ValueError):
+                        continue
+
+                # 校验模态
+                if it.get('Modality') != 'CT':
+                    continue
+
+                f = tdir / it.StudyInstanceUID / it.SeriesInstanceUID / f'{it.SOPInstanceUID}.dcm'
+                f.parent.mkdir(parents=True, exist_ok=True)
+
+                with zf.open(member) as src, f.open('wb') as dst:
+                    shutil.copyfileobj(src, dst)
+
+        for study in tdir.iterdir():
+            if not study.is_dir():
                 continue
 
-            key = f'{it.StudyInstanceUID}/{it.SeriesInstanceUID}/{it.SOPInstanceUID}.dcm'
+            for series in study.iterdir():
+                if not series.is_dir():
+                    continue
 
-            try:
-                client.put_object(bucket, key, BytesIO(data), len(data))
-            except Exception as _:
-                raise FatalError(str(_)) from None
+                # 校验层数
+                slices = list(series.iterdir())
+                if not len(slices) > 9:
+                    continue
+
+                # 读取图像体积
+                try:
+                    f = tdir / f'{series.name}.nii.gz'
+                    image = itk.imread(series)
+                except (RuntimeError, Exception):
+                    continue
+
+                # 校验分辨率和层厚
+                spacing = np.array(itk.spacing(image))
+                if not np.all((0 < np.array(spacing)) & (np.array(spacing) < 3.5)):
+                    continue
+
+                # 写入临时文件
+                itk.imwrite(image, f, compression=True)
+
+                # 上传归档
+                try:
+                    _ = f'{it.PatientID}/{it.SeriesInstanceUID}.nii.gz'
+                    client.fput_object(bucket, _, f.as_posix())
+
+                    _ = f'{it.PatientID}/{it.SeriesInstanceUID}.dcm'
+                    client.fput_object(bucket, _, slices[0].as_posix())
+                except Exception as _:
+                    raise FatalError(str(_)) from None
 
     done.touch()
 

@@ -9,7 +9,7 @@ from chainner_ext import resize, ResizeFilter
 from tqdm import tqdm
 
 
-def main(dataset_dir: str, prefix: str, knee_tuples: tuple):
+def main(dataset_dir: str, prefix: str, hip_tuples: tuple, knee_tuples: tuple):
     dataset_dir = Path(dataset_dir).absolute()
     total_body_file = dataset_dir / 'test' / 'TotalBody' / f'{prefix}.png'
 
@@ -21,12 +21,11 @@ def main(dataset_dir: str, prefix: str, knee_tuples: tuple):
     image_0 = resize(image_0, wh, ResizeFilter.Lanczos, False)
     image_0 = (np.clip(image_0, 0.0, 1.0) * 255.0).astype(np.uint8).squeeze()
 
-    # TODO: repair hip
-
-    # repair knee
-    roi, h, crop_h, file = knee_tuples[0], int(knee_tuples[1]), int(knee_tuples[2]), knee_tuples[3]
-    image_1 = np.array(Image.open(file))
-    image_0[(div_h := h * scaling):(h + crop_h) * scaling] = image_1
+    # repair
+    for tup in (hip_tuples, knee_tuples):
+        roi, h, crop_h, file = tup[0], int(tup[1]), int(tup[2]), tup[3]
+        image_1 = np.array(Image.open(file))
+        image_0[(div_h := h * scaling):(h + crop_h) * scaling] = image_1
 
     # save
     _ = dataset_dir / 'test' / 'TotalBody_Repaired' / f'{prefix}.png'
@@ -50,18 +49,17 @@ if __name__ == '__main__':
 
     result_dir = Path(args.dataset_dir) / 'test' / '8x_Result'
 
-    # Femur_results = {_: _.stem.split('_') for _ in result_dir.rglob('*_Femur_*.png')}
-    # Femur_results = {'_'.join(_[:-8]): (_[-8], _[-7], _[-6], __) for __, _ in Femur_results.items()}
+    Femur_results = {_: _.stem.split('_') for _ in result_dir.rglob('*_Femur_*.png')}
+    Femur_results = {'_'.join(_[:-6]): (_[-6], _[-5], _[-4], __) for __, _ in Femur_results.items()}
 
-    OrthoKnee_results = {_: _.stem.split('_') for _ in result_dir.rglob('*_OrthoKnee_*.png')}
-    OrthoKnee_results = {'_'.join(_[:-8]): (_[-8], _[-7], _[-6], __) for __, _ in OrthoKnee_results.items()}
+    Knee_results = {_: _.stem.split('_') for _ in result_dir.rglob('*_OrthoKnee_*.png')}
+    Knee_results = {'_'.join(_[:-6]): (_[-6], _[-5], _[-4], __) for __, _ in Knee_results.items()}
 
-    # results = {_: [Femur_results[_], OrthoKnee_results[_]] for _ in set(Femur_results) & set(OrthoKnee_results)}
-    results = {_: (OrthoKnee_results[_],) for _ in set(OrthoKnee_results)}
+    results = {_: (Femur_results[_], Knee_results[_],) for _ in set(Femur_results) & set(Knee_results)}
 
     with ProcessPoolExecutor(max_workers=args.max_workers) as executor:
         futures = {executor.submit(
-            main, args.dataset_dir, _, __[0],
+            main, args.dataset_dir, _, __[0], __[1],
         ) for _, __ in results.items()}
 
         try:
