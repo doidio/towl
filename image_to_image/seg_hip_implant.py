@@ -24,7 +24,6 @@ def main(cfg_path: str, object_name: str):
 
         client.fget_object('nii', object_name, image.as_posix())
         totalsegmentator(image, label, True, task='hip_implant', quiet=True)
-        client.fput_object('hip-implant', object_name, label.as_posix())
 
         import itk
         _ = itk.imread(label)
@@ -32,6 +31,7 @@ def main(cfg_path: str, object_name: str):
 
         if np.sum(_) > 0:
             with_implant = True
+            client.fput_object('hip-implant', object_name, label.as_posix())
 
     if with_implant:
         return object_name.split('/')[0]
