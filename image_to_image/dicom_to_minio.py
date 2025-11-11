@@ -37,7 +37,6 @@ def main(zip_file: str, cfg_path: str):
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
 
     client = Minio(**cfg['minio']['client'])
-    bucket = cfg['minio']['bucket']
 
     tmpdir: str | None = cfg.get('local', {}).get('tmpdir')
     Path(tmpdir).mkdir(parents=True, exist_ok=True)
@@ -97,11 +96,13 @@ def main(zip_file: str, cfg_path: str):
 
                 # 上传归档
                 try:
+                    it = pydicom.dcmread(slices[0])
+
                     _ = f'{it.PatientID}/{it.SeriesInstanceUID}.nii.gz'
-                    client.fput_object(bucket, _, f.as_posix())
+                    client.fput_object('nii', _, f.as_posix())
 
                     _ = f'{it.PatientID}/{it.SeriesInstanceUID}.dcm'
-                    client.fput_object(bucket, _, slices[0].as_posix())
+                    client.fput_object('dcm', _, slices[0].as_posix())
                 except Exception as _:
                     raise FatalError(str(_)) from None
 
