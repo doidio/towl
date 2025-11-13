@@ -1,0 +1,175 @@
+# uv run streamlit run detect_hip.py --server.port 8501 -- --config config.toml
+
+import argparse
+import locale
+import tempfile
+from datetime import datetime
+from pathlib import Path
+
+import itk
+import numpy as np
+import streamlit as st
+import tomlkit
+from PIL import Image
+from matplotlib import cm
+from minio import Minio
+
+locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
+
+th = (0, 800)
+
+
+def _drr(a, axis):
+    a = image.copy()
+    c = th[0] <= a
+    a = (a * c).sum(axis=axis)
+    c = np.sum(c, axis=axis)
+    c[np.where(c <= 0)] = 1
+    a = a / c
+
+    sm = cm.ScalarMappable(cmap='grey')
+    sm.set_clim(th)
+    a = sm.to_rgba(a, bytes=True)
+
+    if axis in (1, 2):
+        a = np.flipud(a)
+
+    return a
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--config', required=True)
+    args = parser.parse_args()
+
+    cfg_path = Path(args.config)
+    cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
+    client = Minio(**cfg['minio']['client'])
+
+    st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed')
+    st.markdown('### 全髋关节置换数据分类')
+
+    if 'detect' not in cfg:
+        cfg['detect'] = {}
+
+    with st.spinner('统计', show_time=True):
+        valid, valid_series = {}, 0
+        for object_name, detect in cfg['detect'].items():
+            if detect[0] == '无效':
+                continue
+            if detect[1] == '无效':
+                continue
+            if not detect[2]:
+                continue
+
+            valid_series += 1
+
+            patient, series = object_name.split('/')
+
+            if patient not in valid:
+                valid[patient] = [set(), set()]
+
+            for _ in range(2):
+                valid[patient][_].add(detect[_])
+
+        valid_pair = 0
+        for value in valid.values():
+            for _ in range(2):
+                if len(value[_]) >= 2:
+                    valid_pair += 1
+
+    count, total = len(cfg['detect']), cfg['minio']['nii']['objects']
+    st.progress(count / total, text=f'{count / total:.3f}%')
+    st.caption(f'标注 {count} / {total} 有效 {valid_series} 配对 {valid_pair}')
+
+    if (it := st.session_state.get('it')) is None:
+        with st.empty():
+            if st.button('下一个'):
+                with st.spinner('检索', show_time=True):
+                    for it in client.list_objects('nii', recursive=True):
+                        if it.is_dir:
+                            continue
+
+                        if it.object_name in cfg['detect']:
+                            continue
+
+                        st.session_state['it'] = it
+                        break
+
+                with tempfile.TemporaryDirectory() as tdir:
+                    f = Path(tdir) / 'image.nii.gz'
+
+                    with st.spinner('下载', show_time=True):
+                        client.fget_object('nii', it.object_name, f.as_posix())
+
+                    with st.spinner('读取', show_time=True):
+                        image = itk.imread(f)
+
+                info = itk.dict_from_image(image)
+                del info['name'], info['bufferedRegion'], info['data']
+
+                image = itk.array_from_image(image)
+                info['imageType']['range'] = np.array([np.min(image), np.max(image)])
+
+                if info['imageType']['dimension'] != 3:
+                    drr = None
+                elif info['imageType']['componentType'] in ('uint8',):
+                    drr = None
+                elif info['imageType']['components'] != 1:
+                    drr = None
+                else:
+                    with st.spinner('透视', show_time=True):
+                        l = np.array(info['spacing']) * np.array(info['size'])
+                        l = tuple(max(round(_) * 2, 1) for _ in l)
+                        drr = []
+                        for _ in range(2):
+                            x = _drr(image.copy(), _)
+                            x = Image.fromarray(x).resize([(l[2], l[0]), (l[2], l[1])][_])
+                            drr.append(np.array(x))
+
+                st.session_state['info'] = info
+                st.session_state['drr'] = drr
+
+                st.rerun()
+    else:
+        info = st.session_state['info']
+        drr = st.session_state['drr']
+
+        st.info(it.object_name)
+
+        st.caption('轴位')
+        if drr:
+            st.image(drr[0])
+        else:
+            st.warning('透视失败')
+
+        axial_ok = st.checkbox('(1/3) 上前下后')
+
+        st.caption('正位')
+        if drr:
+            st.image(drr[1])
+        else:
+            st.warning('透视失败')
+
+        coronal_l = st.radio('(2/3) 左髋 👉', ['无效', '术前', '术后'])
+        coronal_r = st.radio('(3/3) 右髋 👈', ['无效', '术前', '术后'])
+
+        st.write(info)
+
+        info_ok = False
+        if info['imageType']['dimension'] != 3:
+            st.warning('图像不是三维')
+        elif info['imageType']['componentType'] not in ('int16', 'int32'):
+            st.warning('图像不是有效值型 {}'.format(info['imageType']['componentType']))
+        elif info['imageType']['components'] != 1:
+            st.warning('图像不是单通道')
+        else:
+            info_ok = True
+
+        if st.button('提交'):
+            cfg['detect'][it.object_name] = [coronal_r, coronal_l, info_ok, datetime.now()]
+            cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
+
+            for _ in ('it', 'info', 'drr'):
+                del st.session_state[_]
+            st.rerun()
