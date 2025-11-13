@@ -28,13 +28,13 @@ def main(cfg_path: str):
         except S3Error:
             pass
 
+        print(object_name)
         with tempfile.TemporaryDirectory() as tdir:
             image = Path(tdir) / 'image.nii.gz'
             label = Path(tdir) / 'label.nii.gz'
 
             client.fget_object('nii', object_name, image.as_posix())
 
-            print(object_name)
             with ProcessPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(seg, image.as_posix(), label.as_posix())
                 future.result()
@@ -62,5 +62,5 @@ if __name__ == '__main__':
     while True:
         main(args.config)
         print('\rWaiting' + '.' * _, end='', flush=True)
-        _ = 3 if _ == 2 else 3
+        _ = 3 if _ == 2 else 2
         time.sleep(1)
