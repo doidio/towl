@@ -78,8 +78,8 @@ if __name__ == '__main__':
                     with st.spinner('下载', show_time=True):
                         client.fget_object('nii', it.object_name, f.as_posix())
 
-                        name = it.object_name.removesuffix('.nii.gz') + '.dcm'
-                        dcm = client.get_object('dcm', name).data
+                        dcm = it.object_name.removesuffix('.nii.gz') + '.dcm'
+                        dcm = client.get_object('dcm', dcm).data
                         dcm = pydicom.dcmread(BytesIO(dcm))
 
                     with st.spinner('读取', show_time=True):
