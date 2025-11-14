@@ -4,10 +4,12 @@ import argparse
 import locale
 import tempfile
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 import itk
 import numpy as np
+import pydicom
 import streamlit as st
 import tomlkit
 from PIL import Image
@@ -52,39 +54,13 @@ if __name__ == '__main__':
     if 'detect' not in cfg:
         cfg['detect'] = {}
 
-    with st.spinner('统计', show_time=True):
-        valid, valid_series = {}, 0
-        for object_name, detect in cfg['detect'].items():
-            if detect[0] == '无效':
-                continue
-            if detect[1] == '无效':
-                continue
-            if not detect[2]:
-                continue
-
-            valid_series += 1
-
-            patient, series = object_name.split('/')
-
-            if patient not in valid:
-                valid[patient] = [set(), set()]
-
-            for _ in range(2):
-                valid[patient][_].add(detect[_])
-
-        valid_pair = 0
-        for value in valid.values():
-            for _ in range(2):
-                if len(value[_]) >= 2:
-                    valid_pair += 1
-
     count, total = len(cfg['detect']), cfg['minio']['nii']['objects']
-    st.progress(count / total, text=f'{count / total:.3f}%')
-    st.caption(f'标注 {count} / {total} 有效 {valid_series} 配对 {valid_pair}')
+    st.progress(count / total, text=f'{100 * count / total:.2f}%')
+    st.caption(f'{count} / {total}')
 
     if (it := st.session_state.get('it')) is None:
         with st.empty():
-            if st.button('下一个'):
+            if st.button('🐋 下一个 🐳'):
                 with st.spinner('检索', show_time=True):
                     for it in client.list_objects('nii', recursive=True):
                         if it.is_dir:
@@ -102,6 +78,10 @@ if __name__ == '__main__':
                     with st.spinner('下载', show_time=True):
                         client.fget_object('nii', it.object_name, f.as_posix())
 
+                        name = it.object_name.removesuffix('.nii.gz') + '.dcm'
+                        dcm = client.get_object('dcm', name).data
+                        dcm = pydicom.dcmread(BytesIO(dcm))
+
                     with st.spinner('读取', show_time=True):
                         image = itk.imread(f)
 
@@ -110,6 +90,12 @@ if __name__ == '__main__':
 
                 image = itk.array_from_image(image)
                 info['imageType']['range'] = np.array([np.min(image), np.max(image)])
+                info['origin'] = np.array(info['origin'])
+                info['spacing'] = np.array(info['spacing'])
+                info['size'] = np.array(info['size'])
+                info['dicom'] = {
+                    'ImageType': dcm.get('ImageType'),
+                }
 
                 if info['imageType']['dimension'] != 3:
                     drr = None
@@ -124,7 +110,7 @@ if __name__ == '__main__':
                         drr = []
                         for _ in range(2):
                             x = _drr(image.copy(), _)
-                            x = Image.fromarray(x).resize([(l[2], l[0]), (l[2], l[1])][_])
+                            x = Image.fromarray(x).resize([(l[0], l[1]), (l[0], l[2])][_])
                             drr.append(np.array(x))
 
                 st.session_state['info'] = info
@@ -165,6 +151,17 @@ if __name__ == '__main__':
             st.warning('图像不是单通道')
         else:
             info_ok = True
+
+        try:
+            tag = info['dicom']['ImageType']
+            for _ in ('DERIVED', 'SECONDARY', 'MPR'):
+                if _ in tag:
+                    info_ok = False
+                    st.warning(f'图像不是原始数据 {tag}')
+                    break
+        except (TypeError, Exception):
+            info_ok = False
+            st.warning(f'图像缺失 DICOM 属性 ImageType')
 
         if st.button('提交'):
             cfg['detect'][it.object_name] = [coronal_r, coronal_l, info_ok, datetime.now()]

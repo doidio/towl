@@ -28,7 +28,7 @@ def main(cfg_path: str):
         except S3Error:
             pass
 
-        print(object_name)
+        print(f'\n{object_name}')
         with tempfile.TemporaryDirectory() as tdir:
             image = Path(tdir) / 'image.nii.gz'
             label = Path(tdir) / 'label.nii.gz'
@@ -58,9 +58,9 @@ if __name__ == '__main__':
     parser.add_argument('--max_workers', type=int, default=4)
     args = parser.parse_args()
 
-    _ = 2
     while True:
         main(args.config)
-        print('\rWaiting' + '.' * _, end='', flush=True)
-        _ = 3 if _ == 2 else 2
-        time.sleep(1)
+
+        for _ in range(60, 0, -1):
+            print(f'\rRetry in {_}s...', end='', flush=True)
+            time.sleep(1)
