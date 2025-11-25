@@ -1,6 +1,7 @@
 import argparse
 import tempfile
 import time
+import warnings
 from concurrent.futures import ProcessPoolExecutor
 from io import BytesIO
 from pathlib import Path
@@ -14,6 +15,7 @@ def main(cfg_path: str):
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
     client = Minio(**cfg['minio']['client'])
 
+    object_names = set()
     for object_name, detect in cfg['detect'].items():
         if detect[0] == '无效':
             continue
@@ -22,13 +24,22 @@ def main(cfg_path: str):
         if not detect[2]:
             continue
 
+        object_names.add(object_name)
+
+    total = len([_ for _ in client.list_objects('total', recursive=True)
+                 if not _.is_dir and _.object_name.endswith('.nii.gz')])
+    print(f'\n[{total}/{len(object_names)}]')
+
+    for object_name in object_names:
         try:
             client.stat_object('total', object_name)
             continue
         except S3Error:
             pass
 
-        print(f'\n{object_name}')
+        total += 1
+        print(_ := f'\n[{total}/{len(object_names)}] {object_name}')
+
         with tempfile.TemporaryDirectory() as tdir:
             image = Path(tdir) / 'image.nii.gz'
             label = Path(tdir) / 'label.nii.gz'
@@ -37,13 +48,16 @@ def main(cfg_path: str):
 
             with ProcessPoolExecutor(max_workers=1) as executor:
                 future = executor.submit(seg, image.as_posix(), label.as_posix())
-                future.result()
+                try:
+                    future.result()
+                except Exception as e:
+                    warnings.warn(str(e))
 
             if label.exists():
-                print(object_name, 'done')
+                print(_, 'done')
                 client.fput_object('total', object_name, label.as_posix())
             else:
-                print(object_name, 'error')
+                print(_, 'error')
                 client.put_object('total', object_name, BytesIO(b''), 0)
 
 
@@ -55,7 +69,6 @@ def seg(image_path: str, label_path: str):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
-    parser.add_argument('--max_workers', type=int, default=4)
     args = parser.parse_args()
 
     while True:

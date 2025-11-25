@@ -1,0 +1,5 @@
+[train]
+root = '.train'
+batch_size = 64
+epochs = 50
+val_interval = 5

@@ -175,3 +175,4 @@ fs/
 .gradio/
 .clips/
 .fs/
+g_tha/.train/
