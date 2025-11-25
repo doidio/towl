@@ -26,9 +26,10 @@ def main(cfg_path: str):
 
         object_names.add(object_name)
 
+    patients = len(list(client.list_objects('total')))
     total = len([_ for _ in client.list_objects('total', recursive=True)
                  if not _.is_dir and _.object_name.endswith('.nii.gz')])
-    print(f'\n[{total}/{len(object_names)}]')
+    print(f'\n[{total}/{len(object_names)}] {patients} patients')
 
     for object_name in object_names:
         try:

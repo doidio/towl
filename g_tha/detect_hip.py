@@ -95,6 +95,9 @@ if __name__ == '__main__':
                 info['size'] = np.array(info['size'])
                 info['dicom'] = {
                     'ImageType': dcm.get('ImageType'),
+                    'PatientName': dcm.get('PatientName'),
+                    'StudyDate': dcm.get('StudyDate'),
+                    'StudyTime': dcm.get('StudyTime'),
                 }
 
                 if info['imageType']['dimension'] != 3:
