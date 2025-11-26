@@ -8,6 +8,7 @@ from pathlib import Path
 
 import tomlkit
 from minio import Minio, S3Error
+from tqdm import tqdm
 
 
 def main(cfg_path: str):
@@ -24,45 +25,39 @@ def main(cfg_path: str):
 
         object_names.add(object_name)
 
-    patients = len(list(client.list_objects('total')))
-    total = len([_ for _ in client.list_objects('total', recursive=True)
-                 if not _.is_dir and _.object_name.endswith('.nii.gz') and _.size > 0])
-    print(f'\n[{total}/{len(object_names)}] {patients} patients')
+    for object_name in tqdm(object_names):
+        for bucket in ('total', 'appendicular-bones'):
+            try:
+                if client.stat_object(bucket, object_name).size > 0:
+                    continue
+            except S3Error:
+                pass
 
-    for object_name in object_names:
-        try:
-            if client.stat_object('total', object_name).size > 0:
-                continue
-        except S3Error:
-            pass
+            with tempfile.TemporaryDirectory() as tdir:
+                image = Path(tdir) / 'image.nii.gz'
+                label = Path(tdir) / 'label.nii.gz'
 
-        total += 1
-        print(f'\n[{total}/{len(object_names)}]', object_name)
+                client.fget_object('nii', object_name, image.as_posix())
 
-        with tempfile.TemporaryDirectory() as tdir:
-            image = Path(tdir) / 'image.nii.gz'
-            label = Path(tdir) / 'label.nii.gz'
+                with ProcessPoolExecutor(max_workers=1) as executor:
+                    task = bucket.replace('-', '_')
+                    future = executor.submit(seg, image.as_posix(), label.as_posix(), task)
+                    try:
+                        future.result()
+                    except Exception as e:
+                        warnings.warn(str(e), stacklevel=3)
 
-            client.fget_object('nii', object_name, image.as_posix())
-
-            with ProcessPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(seg, image.as_posix(), label.as_posix())
-                try:
-                    future.result()
-                except Exception as e:
-                    warnings.warn(str(e))
-
-            if label.exists():
-                print(f'[{total}/{len(object_names)}]', object_name, 'done')
-                client.fput_object('total', object_name, label.as_posix())
-            else:
-                print(f'[{total}/{len(object_names)}]', object_name, 'error')
-                client.put_object('total', object_name, BytesIO(b''), 0)
+                if label.exists():
+                    print(object_name, 'done')
+                    client.fput_object(bucket, object_name, label.as_posix())
+                else:
+                    print(object_name, 'error')
+                    client.put_object(bucket, object_name, BytesIO(b''), 0)
 
 
-def seg(image_path: str, label_path: str):
+def seg(image_path: str, label_path: str, task: str):
     from totalsegmentator.python_api import totalsegmentator
-    totalsegmentator(image_path, label_path, True, task='total', quiet=True)
+    totalsegmentator(image_path, label_path, True, task=task, quiet=True)
 
 
 # 数据超过 (512,512,1000) Windows 平台报错 OSError: [WinError 87]
