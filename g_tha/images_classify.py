@@ -1,4 +1,4 @@
-# uv run streamlit run detect_hip.py --server.port 8501 -- --config config.toml
+# uv run streamlit run images_classify.py --server.port 8501 -- --config config.toml --images images.toml
 
 import argparse
 import locale
@@ -42,31 +42,42 @@ def _drr(a, axis):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
+    parser.add_argument('--images', required=True)
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
     client = Minio(**cfg['minio']['client'])
 
+    images_path = Path(args.images)
+    if images_path.exists():
+        images = tomlkit.loads(images_path.read_text('utf-8'))
+    else:
+        images = {}
+
     st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed')
     st.markdown('### 全髋关节置换数据分类')
 
-    if 'detect' not in cfg:
-        cfg['detect'] = {}
+    count = len(images['images'])
+    if 'total' not in st.session_state:
+        total = len([_ for _ in client.list_objects('nii', recursive=True)
+                     if not _.is_dir and _.object_name.endswith('.nii.gz')])
+        st.session_state['total'] = total
+    else:
+        total = st.session_state['total']
 
-    count, total = len(cfg['detect']), cfg['minio']['nii']['objects']
     st.progress(count / total, text=f'{100 * count / total:.2f}%')
     st.caption(f'{count} / {total}')
 
     if (it := st.session_state.get('it')) is None:
         with st.empty():
-            if st.button('🐋 下一个 🐳'):
+            if st.button('下一个'):
                 with st.spinner('检索', show_time=True):
                     for it in client.list_objects('nii', recursive=True):
                         if it.is_dir:
                             continue
 
-                        if it.object_name in cfg['detect']:
+                        if it.object_name in images['images']:
                             continue
 
                         st.session_state['it'] = it
@@ -124,52 +135,58 @@ if __name__ == '__main__':
         info = st.session_state['info']
         drr = st.session_state['drr']
 
-        st.info(it.object_name)
+        with st.form('submit'):
+            st.info(it.object_name)
 
-        st.caption('轴位')
-        if drr:
-            st.image(drr[0])
-        else:
-            st.warning('透视失败')
+            st.caption('轴位')
+            if drr:
+                st.image(drr[0])
+            else:
+                st.warning('透视失败')
 
-        axial_ok = st.checkbox('(1/3) 上前下后')
+            axial_ok = st.checkbox('(1/3) 上前下后')
 
-        st.caption('正位')
-        if drr:
-            st.image(drr[1])
-        else:
-            st.warning('透视失败')
+            st.caption('正位')
+            if drr:
+                st.image(drr[1])
+            else:
+                st.warning('透视失败')
 
-        coronal_l = st.radio('(2/3) 左髋 👉', ['无效', '术前', '术后'])
-        coronal_r = st.radio('(3/3) 右髋 👈', ['无效', '术前', '术后'])
+            coronal_l = st.radio('(2/3) 左髋 👉', ['无效', '术前', '术后'])
+            coronal_r = st.radio('(3/3) 右髋 👈', ['无效', '术前', '术后'])
 
-        st.write(info)
+            st.write(info)
 
-        info_ok = False
-        if info['imageType']['dimension'] != 3:
-            st.warning('图像不是三维')
-        elif info['imageType']['componentType'] not in ('int16', 'int32'):
-            st.warning('图像不是有效值型 {}'.format(info['imageType']['componentType']))
-        elif info['imageType']['components'] != 1:
-            st.warning('图像不是单通道')
-        else:
-            info_ok = True
-
-        try:
-            tag = info['dicom']['ImageType']
-            for _ in ('DERIVED', 'SECONDARY', 'MPR'):
-                if _ in tag:
-                    info_ok = False
-                    st.warning(f'图像不是原始数据 {tag}')
-                    break
-        except (TypeError, Exception):
             info_ok = False
-            st.warning(f'图像缺失 DICOM 属性 ImageType')
+            if info['imageType']['dimension'] != 3:
+                st.warning('图像不是三维')
+            elif info['imageType']['componentType'] not in ('int16', 'int32'):
+                st.warning('图像不是有效值型 {}'.format(info['imageType']['componentType']))
+            elif info['imageType']['components'] != 1:
+                st.warning('图像不是单通道')
+            else:
+                info_ok = True
 
-        if st.button('提交'):
-            cfg['detect'][it.object_name] = [coronal_r, coronal_l, info_ok, datetime.now()]
-            cfg_path.write_text(tomlkit.dumps(cfg), 'utf-8')
+            try:
+                tag = info['dicom']['ImageType']
+                for _ in ('DERIVED', 'SECONDARY', 'MPR'):
+                    if _ in tag:
+                        info_ok = False
+                        st.warning(f'图像不是原始数据 {tag}')
+                        break
+            except (TypeError, Exception):
+                info_ok = False
+                st.warning(f'图像缺失 DICOM 属性 ImageType')
 
-            for _ in ('it', 'info', 'drr'):
-                del st.session_state[_]
-            st.rerun()
+            if st.form_submit_button('提交'):
+                images['format'] = {'object-name': ['右髋', '左髋', '元数据合理', '标注时间']}
+
+                if 'images' not in images:
+                    images['images'] = {}
+
+                images['images'][it.object_name] = [coronal_r, coronal_l, info_ok, datetime.now()]
+                images_path.write_text(tomlkit.dumps(images), 'utf-8')
+
+                for _ in ('total', 'it', 'info', 'drr'):
+                    del st.session_state[_]
+                st.rerun()

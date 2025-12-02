@@ -13,6 +13,20 @@ def diff_dmc(volume: wp.array3d(dtype=wp.float32), origin: np.ndarray, spacing: 
     return trimesh.Trimesh(vertices, indices)
 
 
+@wp.kernel
+def compute_sdf(
+        mesh: wp.uint64, vertices: wp.array1d(dtype=wp.vec3),
+        sdf: wp.array1d(dtype=float), max_dist: wp.float32,
+):
+    i = wp.tid()
+
+    p = vertices[i]
+    q = wp.mesh_query_point_sign_normal(mesh, p, max_dist)
+    closest = wp.mesh_eval_position(mesh, q.face, q.u, q.v)
+    d = -q.sign * wp.length(p - closest)
+    sdf[i] = d
+
+
 def winding_volume(mesh: trimesh.Trimesh, spacing: float, bounds: list, winding: float = 0.5):
     length = bounds[1] - bounds[0]
     size = (length / spacing).astype(int)
@@ -51,6 +65,7 @@ def mesh_winding_volume(
     d = -q.sign * wp.length(p - closest)
 
     array[i, j, k] = d
+
 
 @wp.kernel
 def extract_outlier_faces(
