@@ -14,4 +14,4 @@ def region_sample(
     uvw = wp.cw_div(p, volume_spacing)
     pixel = wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR)
 
-    array[i, j, k] = wp.max(array[i, j, k], array.dtype(pixel))
+    array[i, j, k] = array.dtype(pixel)
