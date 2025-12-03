@@ -1,0 +1,32 @@
+[project]
+name = "towl"
+version = "0.1.0"
+description = ""
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "cardiology",
+    "femur-anteversion",
+    "femur-app",
+    "g-tha",
+    "super-resolution",
+    "totalseg",
+    "towl",
+    "ukb-dixon",
+    "vascular",
+]
+
+[tool.uv.sources]
+cardiology = { workspace = true }
+femur-anteversion = { workspace = true }
+femur-app = { workspace = true }
+g-tha = { workspace = true }
+super-resolution = { workspace = true }
+totalseg = { workspace = true }
+towl = { workspace = true }
+ukb-dixon = { workspace = true }
+vascular = { workspace = true }
+
+[tool.uv.workspace]
+members = ["*"]
+exclude = [".*", "_*"]

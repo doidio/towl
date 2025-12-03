@@ -1,14 +1,17 @@
 [project]
-name = "totalseg"
+name = "super_resolution"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "tomlkit",
-    "webdavclient3",
-    "humanize",
-    "TotalSegmentator",
+    "chainner-ext>=0.3.10",
+    "kornia>=0.8.2",
+    "numpy>=2.3.5",
+    "opencv-python>=4.11.0.86",
+    "pillow>=12.0.0",
+    "pydicom>=3.0.1",
+    "tqdm>=4.67.1",
 ]
 
 [[tool.uv.index]]

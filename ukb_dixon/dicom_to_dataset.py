@@ -1,5 +1,3 @@
-# pip install numpy pydicom itk tqdm
-
 import argparse
 import tempfile
 import warnings
@@ -14,17 +12,18 @@ import warp as wp
 from pydicom.errors import InvalidDicomError
 from tqdm import tqdm
 
-from kernel import region_sample
+from kernel import region_sample_F_W, region_sample_in_opp
+
+wp.config.quiet = True
 
 
-def main(zip_file: str, dataset_dir: str, is_val: bool):
-    dataset_dir = Path(dataset_dir).absolute()
-    train_val = 'val' if is_val else 'train'
+def main(zip_file: str, dataset: str):
+    dataset = Path(dataset).absolute()
 
     with zipfile.ZipFile(zip_file) as zf:
 
-        for suffix in ('W', 'F'):
-            images_dir = dataset_dir / suffix / train_val / 'images'
+        for suffix in ('W', 'F', 'in', 'opp'):
+            images_dir = dataset / 'images' / suffix
 
             with tempfile.TemporaryDirectory() as tdir:
 
@@ -47,10 +46,10 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
                 for _ in subfolders:
                     images.append(itk.imread(_))
 
-                for image in sorted(images, key=lambda _: itk.origin(_)[2]):
-                    _ = images_dir / f'{Path(zip_file).stem}_{suffix}_{itk.origin(image)[2]}.nii.gz'
-                    _.parent.mkdir(parents=True, exist_ok=True)
-                    itk.imwrite(image, _.as_posix())
+                # for image in sorted(images, key=lambda _: itk.origin(_)[2]):
+                #     _ = images_dir / f'{Path(zip_file).stem}_{suffix}_{itk.origin(image)[2]}.nii.gz'
+                #     _.parent.mkdir(parents=True, exist_ok=True)
+                #     itk.imwrite(image, _.as_posix())
 
                 volumes, spacings, box = [], [], None
                 for image in images:
@@ -82,17 +81,23 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
                 region = wp.full(shape=(*size,), value=0, dtype=wp.float32)
 
                 for volume, spacing, origin in volumes:
-                    wp.launch(region_sample, region.shape, [
-                        wp.uint64(volume.id), wp.vec3(spacing), wp.vec3(origin),
-                        region, wp.vec3(re_spacing), wp.vec3(box[0]),
-                    ])
+                    if suffix in ('W', 'F'):
+                        wp.launch(region_sample_F_W, region.shape, [
+                            wp.uint64(volume.id), wp.vec3(spacing), wp.vec3(origin),
+                            region, wp.vec3(re_spacing), wp.vec3(box[0]), 100.0,
+                        ])
+                    else:
+                        wp.launch(region_sample_in_opp, region.shape, [
+                            wp.uint64(volume.id), wp.vec3(spacing), wp.vec3(origin),
+                            region, wp.vec3(re_spacing), wp.vec3(box[0]),
+                        ])
 
                 region = region.numpy().astype(np.uint16)
                 image = itk.image_from_array(region.transpose(2, 1, 0).copy())
                 image.SetOrigin(box[0])
                 image.SetSpacing(re_spacing)
 
-                _ = images_dir / f'{Path(zip_file).stem}_{suffix}.nii.gz'
+                _ = images_dir / f'{Path(zip_file).stem}.nii.gz'
                 _.parent.mkdir(parents=True, exist_ok=True)
                 itk.imwrite(image, _.as_posix())
 
@@ -100,21 +105,17 @@ def main(zip_file: str, dataset_dir: str, is_val: bool):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--zip_dir', type=str, required=True)
-    parser.add_argument('--dataset_dir', type=str, required=True)
-    parser.add_argument('--val_count', type=int, default=100)
-    parser.add_argument('--max_workers', type=int, default=16)
+    parser.add_argument('--dataset', type=str, required=True)
+    parser.add_argument('--max_workers', type=int, default=10)
     args = parser.parse_args()
 
     zip_dir = Path(args.zip_dir).absolute()
     zip_files = [_ for _ in zip_dir.rglob('*.zip')]
 
-    bools = np.zeros(len(zip_files), bool)
-    bools[:args.val_count] = True
-
     with ProcessPoolExecutor(max_workers=args.max_workers) as executor:
         futures = {executor.submit(
-            main, it[0].as_posix(), args.dataset_dir, it[1],
-        ) for it in zip(zip_files, bools)}
+            main, it.as_posix(), args.dataset,
+        ) for it in zip_files}
 
         try:
             for _ in tqdm(as_completed(futures), total=len(futures)):

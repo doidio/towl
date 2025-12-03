@@ -5,7 +5,7 @@ name = "g_tha"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "diso>=0.1.4",
     "itk>=5.4.4.post1",

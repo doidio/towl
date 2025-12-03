@@ -1,5 +1,5 @@
 # CUDA driver & Toolkit & Microsoft Visual C++
-# pip install itk pyglet trimesh rtree scikit-learn
+# pip install vtk itk pyglet trimesh rtree scikit-learn
 # pip install torch --index-url https://download.pytorch.org/whl/cu129
 # pip install wheel diso
 # pip install -U --pre warp-lang --extra-index-url=https://pypi.nvidia.com/

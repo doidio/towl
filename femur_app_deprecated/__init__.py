@@ -6,8 +6,8 @@ import gmsh
 import gradio as gr
 from loguru import logger
 
-import towl.mesh
-import towl.kernel
+import mesh
+import kernel
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 

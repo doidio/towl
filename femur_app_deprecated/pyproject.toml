@@ -1,14 +1,10 @@
 [project]
-name = "totalseg"
+name = "femur_app"
 version = "0.1.0"
-description = "Add your description here"
+description = ""
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "tomlkit",
-    "webdavclient3",
-    "humanize",
-    "TotalSegmentator",
 ]
 
 [[tool.uv.index]]

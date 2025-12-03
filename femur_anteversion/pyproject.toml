@@ -1,14 +1,19 @@
 [project]
-name = "totalseg"
+name = "femur_anteversion"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "tomlkit",
-    "webdavclient3",
-    "humanize",
-    "TotalSegmentator",
+    "diso>=0.1.4",
+    "itk>=5.4.5",
+    "pyglet>=2.1.11",
+    "rtree>=1.4.1",
+    "scikit-learn>=1.7.2",
+    "trimesh>=4.10.0",
+    "warp-lang>=1.10.1",
+    "wheel>=0.45.1",
+    "newton @ git+https://github.com/newton-physics/newton.git@669325b7460b68cc260fce413d1d2e99625fc373",
 ]
 
 [[tool.uv.index]]

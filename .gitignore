@@ -170,9 +170,8 @@ cython_debug/
 # PyPI configuration file
 .pypirc
 .idea/
-fs/
 */.gradio/
-.gradio/
-.clips/
-.fs/
+.*/
 g_tha/.train/
+uv.lock
+.python-version
