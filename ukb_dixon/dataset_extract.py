@@ -20,7 +20,7 @@ def main(nifti_file: str, done: bool):
     labels_dir = images_dir.parent / 'labels'
     table = {}
 
-    # 体积
+    # total_mr体积
     label = labels_dir / 'total_mr' / Path(nifti_file).name
     if not label.exists():
         return None
@@ -75,6 +75,21 @@ def main(nifti_file: str, done: bool):
         drr[np.where(np.average(label == o, 2) > 0)] = (i + 1) * 84
 
     f = labels_dir / 'total_mr_lateral' / Path(nifti_file).name.replace('.nii.gz', '.png')
+    f.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.flipud(drr), mode='L').convert('RGB').save(f)
+
+    # tissue正位叠加图，生成训练数据
+    label = labels_dir / 'tissue_types_mr' / Path(nifti_file).name
+    if not label.exists():
+        return None
+    label = itk.imread(label)
+    label = itk.array_from_image(label)
+
+    drr = np.zeros_like(label[:, 0, :], np.uint8)
+    for i in (1, 3, 2):  # 皮下脂肪1、骨骼肌3、躯干脂肪2依次覆盖
+        drr[np.where(np.average(label == i, 1) > 0)] = i * 84
+
+    f = labels_dir / 'tissue_types_mr_frontal' / Path(nifti_file).name.replace('.nii.gz', '.png')
     f.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(np.flipud(drr), mode='L').convert('RGB').save(f)
 
