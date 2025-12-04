@@ -6,6 +6,7 @@ from pathlib import Path
 import itk
 import numpy as np
 import tomlkit
+from PIL import Image
 from tqdm import tqdm
 
 WaterParts = list(range(40, 50))
@@ -13,12 +14,14 @@ TotalParts = [18, 19] + list(range(36, 50))
 
 
 def main(nifti_file: str, done: bool):
-    if done: return None
+    # if done: return None
 
+    images_dir = Path(nifti_file).parent.parent
+    labels_dir = images_dir.parent / 'labels'
     table = {}
 
     # 体积
-    label = Path(nifti_file).parent.parent.parent / 'labels' / 'total_mr' / Path(nifti_file).name
+    label = labels_dir / 'total_mr' / Path(nifti_file).name
     if not label.exists():
         return None
     label = itk.imread(label)
@@ -30,12 +33,12 @@ def main(nifti_file: str, done: bool):
     table['volume'] = volume
 
     # 读取水脂原图
-    fat = Path(nifti_file).parent.parent / 'F' / Path(nifti_file).name
+    fat = images_dir / 'F' / Path(nifti_file).name
     fat = itk.imread(fat)
     fat = itk.array_from_image(fat).astype(float)
     fat_dtype = fat.dtype
 
-    water = Path(nifti_file).parent.parent / 'W' / Path(nifti_file).name
+    water = images_dir / 'W' / Path(nifti_file).name
     water = itk.imread(water)
     water = itk.array_from_image(water).astype(float)
     water_dtype = water.dtype
@@ -47,12 +50,12 @@ def main(nifti_file: str, done: bool):
             water[z], fat[z] = fat[z].copy(), water[z].copy()
 
     _ = itk.image_from_array(fat.astype(fat_dtype))
-    f = Path(nifti_file).parent.parent / 'F_fix' / Path(nifti_file).name
+    f = images_dir / 'F_fix' / Path(nifti_file).name
     f.parent.mkdir(parents=True, exist_ok=True)
     itk.imwrite(_, f.as_posix())
 
     _ = itk.image_from_array(water.astype(water_dtype))
-    f = Path(nifti_file).parent.parent / 'W_fix' / Path(nifti_file).name
+    f = images_dir / 'W_fix' / Path(nifti_file).name
     f.parent.mkdir(parents=True, exist_ok=True)
     itk.imwrite(_, f.as_posix())
 
@@ -66,6 +69,15 @@ def main(nifti_file: str, done: bool):
         'std': {str(_): np.std(fin[np.where(label == _)]) for _ in TotalParts},
     }
 
+    # 脊柱侧位叠加图，生成训练数据
+    drr = np.zeros_like(label[:, :, 0], np.uint8)
+    for i, o in enumerate(range(18, 21)):  # 骶尾骨、椎体、椎间盘依次覆盖
+        drr[np.where(np.average(label == o, 2) > 0)] = (i + 1) * 84
+
+    f = labels_dir / 'total_mr_lateral' / Path(nifti_file).name.replace('.nii.gz', '.png')
+    f.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.flipud(drr), mode='L').convert('RGB').save(f)
+
     return table
 
 
@@ -77,7 +89,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     dataset = Path(args.dataset)
-    images_dir = dataset / 'images' / 'opp'
+    opp_dir = dataset / 'images' / 'opp'
 
     output_file = Path(args.output_file)
     if output_file.exists():
@@ -87,7 +99,7 @@ if __name__ == '__main__':
 
     with ProcessPoolExecutor(max_workers=args.max_workers) as executor:
         futures = {executor.submit(main, _.as_posix(), _.name in output): _.name
-                   for _ in images_dir.glob('*.nii.gz')}
+                   for _ in opp_dir.glob('*.nii.gz')}
 
         try:
             for fu in tqdm(as_completed(futures), total=len(futures)):
