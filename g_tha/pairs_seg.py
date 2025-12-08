@@ -16,15 +16,6 @@ def main(cfg_path: str):
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
     client = Minio(**cfg['minio']['client'])
 
-    object_names = set()
-    for object_name, detect in cfg['detect'].items():
-        if detect[0] == '无效' and detect[1] == '无效':
-            continue
-        if not detect[2]:
-            continue
-
-        object_names.add(object_name)
-
     for object_name in tqdm(object_names):
         for bucket in ('total', 'appendicular-bones'):
             try:
@@ -111,7 +102,16 @@ def seg(image_path: str, label_path: str, task: str):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
+    parser.add_argument('--pairs', required=True)
     args = parser.parse_args()
+
+    pairs: dict = tomlkit.loads(Path(args.pairs).read_text('utf-8'))
+
+    object_names = set()
+    for patient in pairs:
+        for rl in pairs[patient]:
+            object_names.add(pairs[patient][rl][2])
+            object_names.add(pairs[patient][rl][3])
 
     while True:
         main(args.config)

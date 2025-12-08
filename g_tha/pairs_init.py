@@ -84,8 +84,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_workers', type=int, default=1)
     args = parser.parse_args()
 
-    images_path = Path(args.images)
-    images = tomlkit.loads(images_path.read_text('utf-8'))
+    images = tomlkit.loads(Path(args.images).read_text('utf-8'))
 
     # patient/right_left
     table = {}
