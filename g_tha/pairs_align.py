@@ -161,7 +161,7 @@ def main(cfg_path: str, redo_mse: float,
     matrix = np.identity(4)
     matrix[0, 3] = np.max(roi_meshes[0].vertices[:, 0]) - np.max(roi_meshes[1].vertices[:, 0])
     matrix, _, mse = trimesh.registration.icp(
-        vertices, roi_meshes[0], matrix, 1e-5, 500,
+        vertices, roi_meshes[0], matrix, 1e-5, 200,
         **dict(reflection=False, scale=False),
     )
 
