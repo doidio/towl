@@ -22,7 +22,7 @@ wp.config.quiet = True
 
 hu_bone = 350
 hu_metal = 2700
-far_from_metal = 20.0
+far_from_metal = 15.0
 
 
 def main(cfg_path: str, redo_mse: float,
@@ -122,7 +122,7 @@ def main(cfg_path: str, redo_mse: float,
     zl = [np.max(_.vertices[:, 0]) - np.min(_.vertices[:, 0]) for _ in roi_meshes]
 
     # 术前比术后短，术后远端截断
-    if 1.2 * zl[0] < zl[1]:
+    if 1.05 * zl[0] < zl[1]:
         z_min = np.min(roi_meshes[1].vertices[:, 0]) + zl[1] - zl[0]
 
         mask = post_mesh.vertices[:, 0] >= z_min
