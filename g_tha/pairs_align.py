@@ -22,7 +22,6 @@ wp.config.quiet = True
 
 hu_bone = 350
 hu_metal = 2700
-anti_metal = 9.0
 far_from_metal = 20.0
 
 
@@ -151,7 +150,7 @@ def main(cfg_path: str, redo_mse: float,
     # 到假体距离加权采样
     # m = d.min(), d.max()
     # w = (m[1] - sdf) / (m[1] - m[0])
-    # w = np.exp(-anti_metal * w)
+    # w = np.exp(-9.0 * w)
     p = d > far_from_metal
     p = p / p.sum()
 
@@ -162,7 +161,7 @@ def main(cfg_path: str, redo_mse: float,
     matrix = np.identity(4)
     matrix[0, 3] = np.max(roi_meshes[0].vertices[:, 0]) - np.max(roi_meshes[1].vertices[:, 0])
     matrix, _, mse = trimesh.registration.icp(
-        vertices, roi_meshes[0], matrix, 1e-5, 200,
+        vertices, roi_meshes[0], matrix, 1e-5, 500,
         **dict(reflection=False, scale=False),
     )
 
@@ -186,10 +185,10 @@ def main(cfg_path: str, redo_mse: float,
     pl.camera_position = 'zx'
     pl.reset_camera()
     pl.camera.parallel_scale = max(zl) * 0.6
-    (f := Path(f'.pairs_align/redo_{redo_mse}/{patient}_{rl}.png')).parent.mkdir(parents=True, exist_ok=True)
-    pl.screenshot(f.as_posix())
     if not pl.off_screen:
         pl.show()
+    (f := Path(f'.pairs_align/redo_{redo_mse}/{patient}_{rl}.png')).parent.mkdir(parents=True, exist_ok=True)
+    pl.screenshot(f.as_posix())
 
     xform = np.array(wp.transform_from_matrix(wp.mat44(matrix)), dtype=float).tolist()
     return mse, xform
