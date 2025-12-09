@@ -1,6 +1,23 @@
+from typing import Dict
+
 import numpy as np
+import pyvista as pv
 import trimesh
 import warp as wp
+
+
+def tri_poly(tri: trimesh.Trimesh | tuple, cell_data: Dict[str, np.ndarray] = None):
+    if isinstance(tri, trimesh.Trimesh):
+        tri = (tri.vertices, tri.faces)
+    _ = np.insert(tri[1].reshape(-1, 3), 0, 3, axis=1)
+
+    pd = pv.PolyData(tri[0], _)
+
+    if cell_data is not None:
+        for name, data in cell_data.items():
+            pd.cell_data[name] = data
+
+    return pd
 
 
 def diff_dmc(volume: wp.array3d(dtype=wp.float32), origin: np.ndarray, spacing: float | np.ndarray,
@@ -23,7 +40,9 @@ def compute_sdf(
     p = vertices[i]
     q = wp.mesh_query_point_sign_normal(mesh, p, max_dist)
     closest = wp.mesh_eval_position(mesh, q.face, q.u, q.v)
-    d = -q.sign * wp.length(p - closest)
+    dxyz = p - closest
+    # dxyz[2] *= 0.1
+    d = q.sign * wp.length(dxyz)
     sdf[i] = d
 
 
@@ -85,10 +104,6 @@ def extract_outlier_faces(
     if q.result:
         mask[i] = False
 
-    # q = wp.mesh_query_ray(mesh, face_center - n * 1e-6, n, max_dist)
-    #
-    # if q.result:
-    #     mask[i] = False
 
 
 @wp.kernel

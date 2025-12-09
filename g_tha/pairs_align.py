@@ -13,18 +13,21 @@ import warp as wp
 from minio import Minio, S3Error
 from tqdm import tqdm
 
+from g_tha.kernel import tri_poly
 from kernel import diff_dmc, compute_sdf
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
 wp.config.quiet = True
 
-hu_bone = 226
-hu_metal = 1600
+hu_bone = 350
+hu_metal = 2700
+anti_metal = 9.0
+far_from_metal = 20.0
 
 
-def main(cfg_path: str, patient: str, rl: str, mse: float, _: list, pre_object_name: str, post_object_name: str,
-         redo_mse: float):
+def main(cfg_path: str, redo_mse: float,
+         patient: str, rl: str, mse: float, _: list, pre_object_name: str, post_object_name: str):
     if 0 < redo_mse and 0 <= mse < redo_mse:
         return None
 
@@ -103,8 +106,6 @@ def main(cfg_path: str, patient: str, rl: str, mse: float, _: list, pre_object_n
                 warnings.warn(f'metal-empty {trace}', stacklevel=3)
                 return None
 
-            mesh = max(mesh.split(), key=lambda c: c.area)
-            mesh = trimesh.smoothing.filter_taubin(mesh)
             metal_meshes.append(mesh)
 
         # 提取骨等值面
@@ -120,6 +121,8 @@ def main(cfg_path: str, patient: str, rl: str, mse: float, _: list, pre_object_n
     # 限制术后配准点采样区域，不太超出术前远端
     post_mesh: trimesh.Trimesh = roi_meshes[1].copy()
     zl = [np.max(_.vertices[:, 0]) - np.min(_.vertices[:, 0]) for _ in roi_meshes]
+
+    # 术前比术后短，术后远端截断
     if 1.2 * zl[0] < zl[1]:
         z_min = np.min(roi_meshes[1].vertices[:, 0]) + zl[1] - zl[0]
 
@@ -131,23 +134,26 @@ def main(cfg_path: str, patient: str, rl: str, mse: float, _: list, pre_object_n
         post_mesh_outlier = roi_meshes[1].copy()
         post_mesh_outlier.update_faces(np.all(mask[post_mesh_outlier.faces], axis=1))
         post_mesh_outlier.remove_unreferenced_vertices()
+
+    # 术前比术后长或等长
     else:
         post_mesh_outlier = None
 
-    # 计算术后网格到假体距离
+    # 计算术后网格到假体的加权距离
     metal = wp.Mesh(wp.array(metal_meshes[1].vertices, wp.vec3), wp.array(metal_meshes[1].faces.flatten(), wp.int32))
-    sdf = wp.zeros((len(post_mesh.vertices),), float)
+    d = wp.zeros((len(post_mesh.vertices),), float)
     max_dist = np.linalg.norm(sizes[1] * spacings[1])
-    wp.launch(compute_sdf, sdf.shape, [
-        wp.uint64(metal.id), wp.array1d(post_mesh.vertices, wp.vec3), sdf, max_dist,
+    wp.launch(compute_sdf, d.shape, [
+        wp.uint64(metal.id), wp.array1d(post_mesh.vertices, wp.vec3), d, max_dist,
     ])
-    sdf = sdf.numpy()
-    m = sdf.min(), sdf.max()
+    d = d.numpy()
 
     # 到假体距离加权采样
-    w = (sdf - m[0]) / (m[1] - m[0])
-    w = np.exp(-15 * w)
-    p = w / w.sum()
+    # m = d.min(), d.max()
+    # w = (m[1] - sdf) / (m[1] - m[0])
+    # w = np.exp(-anti_metal * w)
+    p = d > far_from_metal
+    p = p / p.sum()
 
     _ = np.random.choice(len(post_mesh.vertices), size=10000, replace=False, p=p)
     vertices = post_mesh.vertices[_]
@@ -161,6 +167,7 @@ def main(cfg_path: str, patient: str, rl: str, mse: float, _: list, pre_object_n
     )
 
     post_mesh.apply_transform(matrix)
+    metal_meshes[1].apply_transform(matrix)
     if post_mesh_outlier is not None:
         post_mesh_outlier.apply_transform(matrix)
     vertices = trimesh.transform_points(vertices, matrix)
@@ -174,12 +181,15 @@ def main(cfg_path: str, patient: str, rl: str, mse: float, _: list, pre_object_n
         pl.add_mesh(post_mesh_outlier, color='green')
     pl.add_mesh(post_mesh, color='lightgreen')
     pl.add_mesh(roi_meshes[0], color='lightyellow')
+    pl.add_mesh(tri_poly(metal_meshes[1]), color='blue')
     pl.add_points(vertices, color='crimson', render_points_as_spheres=True, point_size=2)
     pl.camera_position = 'zx'
     pl.reset_camera()
     pl.camera.parallel_scale = max(zl) * 0.6
-    Path('.pairs_align').mkdir(parents=True, exist_ok=True)
-    pl.screenshot(f'.pairs_align/{patient}_{rl}.png')
+    (f := Path(f'.pairs_align/redo_{redo_mse}/{patient}_{rl}.png')).parent.mkdir(parents=True, exist_ok=True)
+    pl.screenshot(f.as_posix())
+    if not pl.off_screen:
+        pl.show()
 
     xform = np.array(wp.transform_from_matrix(wp.mat44(matrix)), dtype=float).tolist()
     return mse, xform
@@ -189,18 +199,17 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--pairs', required=True)
-    parser.add_argument('--redo_mse', type=float, default=0.0)
-    parser.add_argument('--max_workers', type=int, default=8)
+    parser.add_argument('--redo_mse', type=float, default=10)
+    parser.add_argument('--max_workers', type=int, default=1)
     args = parser.parse_args()
 
     pairs_path = Path(args.pairs)
     pairs: dict = tomlkit.loads(pairs_path.read_text('utf-8'))
+    items = [(patient, rl, *pairs[patient][rl]) for patient in pairs for rl in pairs[patient]]
+    items = sorted(items, key=lambda _: _[2], reverse=True)
 
     with ProcessPoolExecutor(max_workers=args.max_workers) as executor:
-        futures = {
-            executor.submit(main, args.config, *(_ := (patient, rl, *pairs[patient][rl])), args.redo_mse): _
-            for patient in pairs for rl in pairs[patient]
-        }
+        futures = {executor.submit(main, args.config, args.redo_mse, *_): _ for _ in items}
 
         try:
             for fu in tqdm(as_completed(futures), total=len(futures)):
