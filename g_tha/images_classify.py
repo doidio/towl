@@ -22,7 +22,7 @@ th = (0, 800)
 
 
 def _drr(a, axis):
-    a = image.copy()
+    a = a.copy()
     c = th[0] <= a
     a = (a * c).sum(axis=axis)
     c = np.sum(c, axis=axis)
