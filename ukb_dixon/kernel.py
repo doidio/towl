@@ -27,7 +27,7 @@ def region_sample_F_W(
 
 
 @wp.kernel
-def region_sample_in_opp(
+def resample_opp(
         volume: wp.uint64, volume_spacing: wp.vec3, volume_origin: wp.vec3,
         array: wp.array(ndim=3), spacing: wp.vec3, origin: wp.vec3,
 ):
