@@ -11,6 +11,7 @@ import numpy as np
 import pydicom
 import streamlit as st
 from PIL import Image
+from pydicom.errors import InvalidDicomError
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
@@ -24,33 +25,44 @@ def main(dicom_dir, cine_dir):
         files = list(dicom_dir.rglob('*'))
 
         for _, f in enumerate(files, 1):
+            if f.is_dir():
+                continue
+
             s.update(label=f'[ {_} / {len(files)} ] 读取 {f.as_posix()}')
             bar.progress(_ / len(files))
 
-            ds = pydicom.dcmread(f)
+            try:
+                ds = pydicom.dcmread(f)
+            except (InvalidDicomError, Exception):
+                continue
+
             study = str(ds.StudyInstanceUID)
             protocol = str(ds.ProtocolName).strip()
-            if protocol.startswith('cine') and protocol.endswith('retro_sax'):
-                pos = tuple(float(_) for _ in ds.ImagePositionPatient)
-                axes = tuple(float(_) for _ in ds.ImageOrientationPatient)
+            if not protocol.startswith('cine'):
+                    continue
+            if False in [_ in ds for _ in ('ImagePositionPatient', 'ImageOrientationPatient', 'InstanceNumber')]:
+                continue
 
-                matrix = np.array([[*axes[:3], 0], [*axes[3:], 0], [*np.cross(axes[:3], axes[3:]), 0], [*pos, 1]])
-                origin = tuple(np.linalg.inv(matrix)[3, :3])
+            pos = tuple(float(_) for _ in ds.ImagePositionPatient)
+            axes = tuple(float(_) for _ in ds.ImageOrientationPatient)
 
-                axes = sha1(np.array(axes).tobytes()).hexdigest()
+            matrix = np.array([[*axes[:3], 0], [*axes[3:], 0], [*np.cross(axes[:3], axes[3:]), 0], [*pos, 1]])
+            origin = tuple(np.linalg.inv(matrix)[3, :3])
 
-                if study not in series:
-                    series[study] = {}
+            axes = sha1(np.array(axes).tobytes()).hexdigest()
 
-                if axes not in series[study]:
-                    series[study][axes] = {}
+            if study not in series:
+                series[study] = {}
 
-                frame = int(ds.InstanceNumber)
-                if frame not in series[study][axes]:
-                    series[study][axes][frame] = {}
+            if axes not in series[study]:
+                series[study][axes] = {}
 
-                series[study][axes][frame][origin[2]] = f
-                total += 1
+            frame = int(ds.InstanceNumber)
+            if frame not in series[study][axes]:
+                series[study][axes][frame] = {}
+
+            series[study][axes][frame][origin[2]] = f
+            total += 1
 
         processed = 0
 
