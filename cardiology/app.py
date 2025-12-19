@@ -17,7 +17,7 @@ locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
 
 def main(dicom_dir, cine_dir):
-    series, total = {}, 0
+    tree, total = {}, 0
 
     with st.status('', expanded=True) as s:
         bar = st.progress(0)
@@ -39,7 +39,7 @@ def main(dicom_dir, cine_dir):
             study = str(ds.StudyInstanceUID)
             protocol = str(ds.ProtocolName).strip()
             if not protocol.startswith('cine'):
-                    continue
+                continue
             if False in [_ in ds for _ in ('ImagePositionPatient', 'ImageOrientationPatient', 'InstanceNumber')]:
                 continue
 
@@ -49,66 +49,73 @@ def main(dicom_dir, cine_dir):
             matrix = np.array([[*axes[:3], 0], [*axes[3:], 0], [*np.cross(axes[:3], axes[3:]), 0], [*pos, 1]])
             origin = tuple(np.linalg.inv(matrix)[3, :3])
 
-            axes = sha1(np.array(axes).tobytes()).hexdigest()
+            axes = ','.join([str(_) for _ in axes])
+            # axes = sha1(np.array(axes).tobytes()).hexdigest()
 
-            if study not in series:
-                series[study] = {}
+            if study not in tree:
+                tree[study] = {}
 
-            if axes not in series[study]:
-                series[study][axes] = {}
+            if protocol not in tree[study]:
+                tree[study][protocol] = {}
+
+            if axes not in tree[study][protocol]:
+                tree[study][protocol][axes] = {}
 
             frame = int(ds.InstanceNumber)
-            if frame not in series[study][axes]:
-                series[study][axes][frame] = {}
+            if frame not in tree[study][protocol][axes]:
+                tree[study][protocol][axes][frame] = {}
 
-            series[study][axes][frame][origin[2]] = f
+            tree[study][protocol][axes][frame][origin[2]] = f
             total += 1
 
         processed = 0
 
         with st.empty():
-            for study in series:
-                for axes in series[study]:
-                    for frame in series[study][axes]:
-                        images, pngs, spacing = [], [], None
+            for study in tree:
+                for protocol in tree[study]:
+                    for axes in tree[study][protocol]:
+                        for frame in tree[study][protocol][axes]:
+                            images, pngs, spacing = [], [], None
 
-                        for k, z in enumerate(sorted(series[study][axes][frame])):
-                            f = series[study][axes][frame][z]
+                            for k, z in enumerate(sorted(tree[study][protocol][axes][frame])):
+                                f = tree[study][protocol][axes][frame][z]
 
-                            _ = itk.imread(f.as_posix())
-                            spc = np.array([*itk.spacing(_)])
+                                _ = itk.imread(f.as_posix())
+                                spc = np.array([*itk.spacing(_)])
 
-                            if spacing is None:
-                                spacing = spc
-                            elif np.any(spacing != spc):
-                                warnings.warn(f'conflict spacing {study} {axes} {spacing} {spc}')
+                                if spacing is None:
+                                    spacing = spc
+                                elif np.any(spacing != spc):
+                                    warnings.warn(f'conflict spacing {study} {axes} {spacing} {spc}')
 
-                            _ = itk.array_from_image(_).squeeze()
-                            images.append(_)
+                                _ = itk.array_from_image(_).squeeze()
+                                images.append(_)
 
-                            _ = _.astype(float)
-                            mean, std = np.mean(_), np.std(_)
-                            _ = np.clip((_ - mean) / std / 3 + 0.5, 0, 1) * 255
-                            _ = _.astype(np.uint8)
-                            pngs.append(_)
+                                _ = _.astype(float)
+                                mean, std = np.mean(_), np.std(_)
+                                _ = np.clip((_ - mean) / std / 3 + 0.5, 0, 1) * 255
+                                _ = _.astype(np.uint8)
+                                pngs.append(_)
 
-                            f = cine_dir / f'{study}' / f'{axes}' / f'slice_{k + 1}' / f'frame_{frame}.png'
+                                f = cine_dir / f'{study}' / f'{protocol}' / f'{axes}'
+                                f = f / f'slice_{k + 1}' / f'frame_{frame}.png'
+                                f.parent.mkdir(parents=True, exist_ok=True)
+                                Image.fromarray(_).save(f)
+
+                                processed += 1
+                                s.update(label=f'[ {processed} / {total} ] 写入 {f.as_posix()}')
+                                bar.progress(processed / total)
+
+                            st.image(np.hstack(pngs))
+
+                            image = np.stack(images, axis=0)
+                            image = itk.image_from_array(image)
+                            image.SetSpacing(spacing)
+
+                            f = cine_dir / f'{study}' / f'{protocol}' / f'{axes}' / 'nifti'
+                            f = f / f'{study}_{protocol}_{axes}_frame_{frame}.nii.gz'
                             f.parent.mkdir(parents=True, exist_ok=True)
-                            Image.fromarray(_).save(f)
-
-                            processed += 1
-                            s.update(label=f'[ {processed} / {total} ] 写入 {f.as_posix()}')
-                            bar.progress(processed / total)
-
-                        st.image(np.hstack(pngs))
-
-                        image = np.stack(images, axis=0)
-                        image = itk.image_from_array(image)
-                        image.SetSpacing(spacing)
-
-                        f = cine_dir / f'{study}' / f'{axes}' / f'{study}_{axes}_frame_{frame}.nii.gz'
-                        f.parent.mkdir(parents=True, exist_ok=True)
-                        itk.imwrite(image, f.as_posix())
+                            itk.imwrite(image, f.as_posix())
 
 
 if __name__ == '__main__':
