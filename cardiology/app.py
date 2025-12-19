@@ -113,7 +113,7 @@ def main(dicom_dir, cine_dir):
                             image.SetSpacing(spacing)
 
                             f = cine_dir / f'{study}' / f'{protocol}' / f'{axes}' / 'nifti'
-                            f = f / f'{study}_{protocol}_{axes}_frame_{frame}.nii.gz'
+                            f = f / f'frame_{frame}.nii.gz'
                             f.parent.mkdir(parents=True, exist_ok=True)
                             itk.imwrite(image, f.as_posix())
 
