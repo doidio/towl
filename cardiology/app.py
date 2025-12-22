@@ -36,6 +36,9 @@ def main(dicom_dir, cine_dir):
             except (InvalidDicomError, Exception):
                 continue
 
+            if 'InlineVF' in str(ds.SeriesDescription):
+                continue
+
             study = str(ds.StudyInstanceUID)
             protocol = str(ds.ProtocolName).strip()
             if not protocol.startswith('cine'):
