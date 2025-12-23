@@ -1,9 +1,9 @@
 import argparse
 import tempfile
 import time
+import traceback
 import warnings
 from concurrent.futures import ProcessPoolExecutor
-from io import BytesIO
 from pathlib import Path
 
 import tomlkit
@@ -36,14 +36,14 @@ def main(cfg_path: str):
                     try:
                         future.result()
                     except Exception as e:
+                        traceback.print_exception(e)
                         warnings.warn(str(e), stacklevel=3)
 
                 if label.exists():
-                    print(object_name, 'done')
+                    print(object_name, bucket, 'done')
                     client.fput_object(bucket, object_name, label.as_posix())
                 else:
-                    print(object_name, 'error')
-                    client.put_object(bucket, object_name, BytesIO(b''), 0)
+                    print(object_name, bucket, 'error')
 
 
 def seg(image_path: str, label_path: str, task: str):

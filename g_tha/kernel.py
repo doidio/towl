@@ -6,6 +6,16 @@ import trimesh
 import warp as wp
 
 
+def itk_monkey_patch():
+    import itk, locale
+    locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
+
+    # 修正 itk.imread 读取 Direction 错误，导致 TotalSeg 分割错误
+    # itk 默认 ForceOrthogonalDirection=True 不适用于从脚到头 (FFS) 或斜切 (gantry-tilt) 扫描
+    _New = itk.ImageSeriesReader.New
+    itk.ImageSeriesReader.New = lambda *a, **k: _New(*a, **{**k, 'ForceOrthogonalDirection': False})
+
+
 def tri_poly(tri: trimesh.Trimesh | tuple, cell_data: Dict[str, np.ndarray] = None):
     if isinstance(tri, trimesh.Trimesh):
         tri = (tri.vertices, tri.faces)
@@ -29,6 +39,86 @@ def diff_dmc(volume: wp.array3d(dtype=wp.float32), origin: np.ndarray, spacing: 
     vertices = vertices * spacing * (np.array(volume.shape) - [1, 1, 1]) + origin
     return trimesh.Trimesh(vertices, indices)
 
+def icp(a, b, initial=None, threshold=1e-5, max_iterations=20, **kwargs):
+    """
+    Apply the iterative closest point algorithm to align a point cloud with
+    another point cloud or mesh. Will only produce reasonable results if the
+    initial transformation is roughly correct. Initial transformation can be
+    found by applying Procrustes' analysis to a suitable set of landmark
+    points (often picked manually).
+
+    Parameters
+    ----------
+    a : (n,3) float
+      List of points in space.
+    b : (m,3) float or Trimesh
+      List of points in space or mesh.
+    initial : (4,4) float
+      Initial transformation.
+    threshold : float
+      Stop when change in cost is less than threshold
+    max_iterations : int
+      Maximum number of iterations
+    kwargs : dict
+      Args to pass to procrustes
+
+    Returns
+    ----------
+    matrix : (4,4) float
+      The transformation matrix sending a to b
+    transformed : (n,3) float
+      The image of a under the transformation
+    cost : float
+      The cost of the transformation
+    """
+    from scipy.spatial import cKDTree
+    from trimesh import util
+    from trimesh.transformations import transform_points
+    from trimesh.registration import procrustes
+
+    a = np.asanyarray(a, dtype=np.float64)
+    if not util.is_shape(a, (-1, 3)):
+        raise ValueError("points must be (n,3)!")
+
+    if initial is None:
+        initial = np.eye(4)
+
+    is_mesh = util.is_instance_named(b, "Trimesh")
+    if not is_mesh:
+        b = np.asanyarray(b, dtype=np.float64)
+        if not util.is_shape(b, (-1, 3)):
+            raise ValueError("points must be (n,3)!")
+        btree = cKDTree(b)
+
+    # transform a under initial_transformation
+    a = transform_points(a, initial)
+    total_matrix = initial
+
+    # start with infinite cost
+    old_cost = np.inf
+
+    # avoid looping forever by capping iterations
+    for it in range(max_iterations):
+        # Closest point in b to each point in a
+        if is_mesh:
+            closest, _distance, _faces = b.nearest.on_surface(a)
+        else:
+            _distances, ix = btree.query(a, 1)
+            closest = b[ix]
+
+        # align a with closest points
+        matrix, transformed, cost = procrustes(a=a, b=closest, **kwargs)
+
+        # update a with our new transformed points
+        a = transformed
+        total_matrix = np.dot(matrix, total_matrix)
+
+        if old_cost - cost < threshold:
+            break
+        else:
+            old_cost = cost
+
+    return total_matrix, transformed, cost, it
 
 @wp.kernel
 def compute_sdf(
@@ -103,7 +193,6 @@ def extract_outlier_faces(
     q = wp.mesh_query_ray(mesh, face_center + n * 1e-6, n, max_dist)
     if q.result:
         mask[i] = False
-
 
 
 @wp.kernel

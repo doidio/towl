@@ -1,6 +1,7 @@
 import argparse
 import locale
 import tempfile
+import traceback
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
@@ -13,8 +14,7 @@ import warp as wp
 from minio import Minio, S3Error
 from tqdm import tqdm
 
-from g_tha.kernel import tri_poly
-from kernel import diff_dmc, compute_sdf
+from kernel import diff_dmc, compute_sdf, icp
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
@@ -22,13 +22,15 @@ wp.config.quiet = True
 
 hu_bone = 350
 hu_metal = 2700
-far_from_metal = 15.0
+far_from_metal = (15.0, 10.0, 7.5, 5.0)
 
 
 def main(cfg_path: str, redo_mse: float,
-         patient: str, rl: str, mse: float, _: list, pre_object_name: str, post_object_name: str):
+         patient: str, rl: str, mse: float, xform: list, pre_object_name: str, post_object_name: str):
     if 0 < redo_mse and 0 <= mse < redo_mse:
         return None
+
+    print(patient, rl, mse)
 
     cfg_path = Path(cfg_path)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
@@ -46,18 +48,20 @@ def main(cfg_path: str, redo_mse: float,
             try:
                 client.fget_object(_ := 'total', object_name, f.as_posix())
             except S3Error:
+                warnings.warn(f'total-fget {trace}', stacklevel=2)
                 return None
 
             try:
                 total = itk.imread(f.as_posix(), itk.UC)
             except RuntimeError:
+                warnings.warn(f'itk-read {trace}', stacklevel=2)
                 return None
 
         total = itk.array_from_image(total)
 
         # 检查分割图子区
         if np.sum(total == label_femur) == 0:
-            warnings.warn(f'femur-empty {trace}', stacklevel=3)
+            warnings.warn(f'femur-empty {trace}', stacklevel=2)
             return None
 
         ijk = np.argwhere(total == label_femur)
@@ -69,13 +73,13 @@ def main(cfg_path: str, redo_mse: float,
             try:
                 client.fget_object('nii', object_name, f.as_posix())
             except S3Error:
-                warnings.warn(f'nii-fget {trace}', stacklevel=3)
+                warnings.warn(f'nii-fget {trace}', stacklevel=2)
                 return None
 
             try:
                 image = itk.imread(f.as_posix(), itk.SS)
             except RuntimeError as e:
-                warnings.warn(f'nii-read {trace} {e}', stacklevel=3)
+                warnings.warn(f'nii-read {trace} {e}', stacklevel=2)
                 return None
 
         size = np.array([float(_) for _ in reversed(itk.size(image))])
@@ -102,7 +106,7 @@ def main(cfg_path: str, redo_mse: float,
         else:
             mesh = diff_dmc(wp.from_numpy(roi_image, wp.float32), np.zeros(3), spacing, hu_metal)
             if mesh.is_empty:
-                warnings.warn(f'metal-empty {trace}', stacklevel=3)
+                warnings.warn(f'metal-empty {trace}', stacklevel=2)
                 return None
 
             metal_meshes.append(mesh)
@@ -110,7 +114,7 @@ def main(cfg_path: str, redo_mse: float,
         # 提取骨等值面
         mesh = diff_dmc(wp.from_numpy(roi_image, wp.float32), np.zeros(3), spacing, hu_bone)
         if mesh.is_empty:
-            warnings.warn(f'roi-empty {trace}', stacklevel=3)
+            warnings.warn(f'roi-empty {trace}', stacklevel=2)
             return None
 
         mesh = max(mesh.split(), key=lambda c: c.area)
@@ -151,25 +155,43 @@ def main(cfg_path: str, redo_mse: float,
     # m = d.min(), d.max()
     # w = (m[1] - sdf) / (m[1] - m[0])
     # w = np.exp(-9.0 * w)
-    p = d > far_from_metal
-    p = p / p.sum()
 
-    _ = np.random.choice(len(post_mesh.vertices), size=10000, replace=False, p=p)
-    vertices = post_mesh.vertices[_]
+    if len(xform) == 7:
+        init_matrix = np.array(wp.transform_to_matrix(wp.transform(*xform))).reshape((4, 4))
+    else:
+        init_matrix = np.identity(4)
+        init_matrix[0, 3] = np.max(roi_meshes[0].vertices[:, 0]) - np.max(roi_meshes[1].vertices[:, 0])
 
-    # 配准术后远离假体的点云到术前网格
-    matrix = np.identity(4)
-    matrix[0, 3] = np.max(roi_meshes[0].vertices[:, 0]) - np.max(roi_meshes[1].vertices[:, 0])
-    matrix, _, mse = trimesh.registration.icp(
-        vertices, roi_meshes[0], matrix, 1e-5, 200,
-        **dict(reflection=False, scale=False),
-    )
+    # 配准术后到术前，配准特征点尽量远离金属，但术后过短则不得不接近金属
+    matrix, vertices = None, None
+    for far in far_from_metal:
+        p = d > far
+        p = p / p.sum()
 
-    post_mesh.apply_transform(matrix)
-    metal_meshes[1].apply_transform(matrix)
-    if post_mesh_outlier is not None:
-        post_mesh_outlier.apply_transform(matrix)
-    vertices = trimesh.transform_points(vertices, matrix)
+        if (n := int(np.sum(p > 0))) < 100:
+            continue
+
+        _ = np.random.choice(len(post_mesh.vertices), size=min(n, 10000), replace=False, p=p)
+        vertices = post_mesh.vertices[_]
+
+        matrix, _, mse, it = icp(
+            vertices, roi_meshes[0], init_matrix, 1e-5, 200,
+            **dict(reflection=False, scale=False),
+        )
+        print(f'{patient} {rl} METAL-FREE {far}mm SURFACE-POINTS {n} ITERS {it} MSE {mse:.3f}mm')
+
+        if mse < 1.0:
+            break
+
+    if vertices is None:
+        raise RuntimeError('ICP failed')
+
+    # post_mesh.apply_transform(matrix)
+    # metal_meshes[1].apply_transform(matrix)
+    # if post_mesh_outlier is not None:
+    #     post_mesh_outlier.apply_transform(matrix)
+    # vertices = trimesh.transform_points(vertices, matrix)
+    roi_meshes[0].apply_transform(np.linalg.inv(matrix))
 
     import pyvista as pv
     pl = pv.Plotter(title=f'{patient}.{rl}', window_size=[500, 1000], off_screen=True)
@@ -180,15 +202,16 @@ def main(cfg_path: str, redo_mse: float,
         pl.add_mesh(post_mesh_outlier, color='green')
     pl.add_mesh(post_mesh, color='lightgreen')
     pl.add_mesh(roi_meshes[0], color='lightyellow')
-    pl.add_mesh(tri_poly(metal_meshes[1]), color='blue')
+    pl.add_mesh(metal_meshes[1], color='blue')
     pl.add_points(vertices, color='crimson', render_points_as_spheres=True, point_size=2)
     pl.camera_position = 'zx'
     pl.reset_camera()
     pl.camera.parallel_scale = max(zl) * 0.6
     if not pl.off_screen:
-        pl.show()
+        pl.show(auto_close=False)
     (f := Path(f'.pairs_align/redo_{redo_mse}/{patient}_{rl}.png')).parent.mkdir(parents=True, exist_ok=True)
     pl.screenshot(f.as_posix())
+    pl.close()
 
     xform = np.array(wp.transform_from_matrix(wp.mat44(matrix)), dtype=float).tolist()
     return mse, xform
@@ -198,8 +221,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     parser.add_argument('--pairs', required=True)
-    parser.add_argument('--redo_mse', type=float, default=10)
-    parser.add_argument('--max_workers', type=int, default=1)
+    parser.add_argument('--redo_mse', type=float, default=0)
+    parser.add_argument('--max_workers', type=int, default=4)
     args = parser.parse_args()
 
     pairs_path = Path(args.pairs)
@@ -219,6 +242,7 @@ if __name__ == '__main__':
                         pairs[_[0]][_[1]][1] = result[1]
                         pairs_path.write_text(tomlkit.dumps(pairs), 'utf-8')
                 except Exception as _:
+                    traceback.print_exception(_)
                     warnings.warn(f'{_} {futures[fu]}', stacklevel=2)
 
         except KeyboardInterrupt:

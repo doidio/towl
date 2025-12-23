@@ -22,6 +22,9 @@ import tomlkit
 from minio import Minio
 from tqdm import tqdm
 
+from kernel import itk_monkey_patch
+
+itk_monkey_patch()
 
 class FatalError(Exception):
     pass
@@ -81,7 +84,6 @@ def main(zip_file: str, cfg_path: str):
 
                 # 读取图像体积
                 try:
-                    f = tdir / f'{series.name}.nii.gz'
                     image = itk.imread(series)
                 except (RuntimeError, Exception):
                     continue
@@ -92,6 +94,7 @@ def main(zip_file: str, cfg_path: str):
                     continue
 
                 # 写入临时文件
+                f = tdir / f'{series.name}.nii.gz'
                 itk.imwrite(image, f, compression=True)
 
                 # 上传归档

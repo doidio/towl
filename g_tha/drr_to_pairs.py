@@ -141,34 +141,14 @@ if __name__ == '__main__':
                         del st.session_state[_]
                     st.rerun()
 
-        with st.expander('镜像矫正'):
-            with st.form('mirror'):
-                mirror = [st.multiselect(_, options.keys()) for _ in ['上下', '前后', '左右']]
-                if st.form_submit_button('确定'):
-                    st.rerun()
-
         for i in options.values():
             t = series[i]
             with st.expander(f'[{i}] {t[0]}', expanded=True):
                 st.caption(t[-1].split('/')[1])
                 col1, col2 = st.columns(2)
                 with col1:
-                    image = t[3]
-                    if i in [options[_] for _ in mirror[0]]:
-                        image = np.flipud(image)
-                        st.caption('镜像上下')
-                    if i in [options[_] for _ in mirror[2]]:
-                        image = np.fliplr(image)
-                        st.caption('镜像左右')
-                    st.image(image)
+                    st.image(t[3])
                 with col2:
-                    image = t[2]
-                    if i in [options[_] for _ in mirror[1]]:
-                        image = np.flipud(image)
-                        st.caption('镜像前后')
-                    if i in [options[_] for _ in mirror[2]]:
-                        image = np.fliplr(image)
-                        st.caption('镜像左右')
-                    st.image(image)
+                    st.image(t[2])
 
                 st.code(tomlkit.dumps(t[1]), 'toml')
