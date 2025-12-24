@@ -78,8 +78,8 @@ def main(cfg_path: str, redo_mse: float,
 
             try:
                 image = itk.imread(f.as_posix(), itk.SS)
-            except RuntimeError as e:
-                warnings.warn(f'nii-read {trace} {e}', stacklevel=2)
+            except RuntimeError as mse:
+                warnings.warn(f'nii-read {trace} {mse}', stacklevel=2)
                 return None
 
         size = np.array([float(_) for _ in reversed(itk.size(image))])
@@ -163,7 +163,7 @@ def main(cfg_path: str, redo_mse: float,
         init_matrix[0, 3] = np.max(roi_meshes[0].vertices[:, 0]) - np.max(roi_meshes[1].vertices[:, 0])
 
     # 配准术后到术前，配准特征点尽量远离金属，但术后过短则不得不接近金属
-    matrix, vertices = None, None
+    pak = None
     for far in far_from_metal:
         p = d > far
         p = p / p.sum()
@@ -175,16 +175,21 @@ def main(cfg_path: str, redo_mse: float,
         vertices = post_mesh.vertices[_]
 
         matrix, _, mse, it = icp(
-            vertices, roi_meshes[0], init_matrix, 1e-5, 200,
+            vertices, roi_meshes[0], init_matrix, 1e-5, 2000,
             **dict(reflection=False, scale=False),
         )
-        print(f'{patient} {rl} METAL-FREE {far}mm SURFACE-POINTS {n} ITERS {it} MSE {mse:.3f}mm')
 
-        if mse < 1.0:
+        if pak is None or pak[0] > mse:
+            pak = (mse, far, n, vertices, matrix, mse, it)
+
+        if pak[0] < 1.0:
             break
 
-    if vertices is None:
+    if pak is None:
         raise RuntimeError('ICP failed')
+
+    mse, far, n, vertices, matrix, mse, it = pak
+    print(f'{patient} {rl} METAL-FREE {far}mm SURFACE-POINTS {n} ITERS {it} MSE {mse:.3f}mm')
 
     # post_mesh.apply_transform(matrix)
     # metal_meshes[1].apply_transform(matrix)
@@ -222,7 +227,7 @@ if __name__ == '__main__':
     parser.add_argument('--config', required=True)
     parser.add_argument('--pairs', required=True)
     parser.add_argument('--redo_mse', type=float, default=0)
-    parser.add_argument('--max_workers', type=int, default=4)
+    parser.add_argument('--max_workers', type=int, default=1)
     args = parser.parse_args()
 
     pairs_path = Path(args.pairs)

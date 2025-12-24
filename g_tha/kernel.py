@@ -16,6 +16,75 @@ def itk_monkey_patch():
     itk.ImageSeriesReader.New = lambda *a, **k: _New(*a, **{**k, 'ForceOrthogonalDirection': False})
 
 
+@wp.kernel
+def _wp_closest_point_kernel(
+        mesh_id: wp.uint64,
+        points: wp.array(dtype=wp.vec3),
+        out_closest: wp.array(dtype=wp.vec3),
+        out_dist: wp.array(dtype=wp.float32),
+        out_tid: wp.array(dtype=wp.int32)
+):
+    tid = wp.tid()
+    p = points[tid]
+
+    # 执行 Warp 内置的 Mesh 查询
+    # max_dist 设为极大值以模拟无限制查询
+    query = wp.mesh_query_point(mesh_id, p, 1e10)
+
+    if query.result:
+        # 计算查询点到最近点的向量
+        closest_p = wp.mesh_eval_position(mesh_id, query.face, query.u, query.v)
+        out_closest[tid] = closest_p
+        out_dist[tid] = wp.length(p - closest_p)
+        out_tid[tid] = query.face
+    else:
+        out_tid[tid] = -1
+
+
+def closest_point(mesh, points):
+    """
+    使用 NVIDIA Warp 替换 trimesh.proximity.closest_point
+    """
+    points = np.asanyarray(points, dtype=np.float32)  # Warp 常用 float32
+    num_points = len(points)
+
+    # 1. 缓存 Warp Mesh 对象，避免重复构建 BVH
+    if not hasattr(mesh, '_warp_mesh') or mesh._warp_mesh is None:
+        # 将 trimesh 数据传输到 Warp 数组
+        faces = wp.array(mesh.faces.flatten(), dtype=wp.int32)
+        verts = wp.array(mesh.vertices, dtype=wp.vec3)
+
+        # 创建 Warp Mesh 句柄
+        mesh_id = wp.Mesh(verts, faces)
+        mesh._warp_mesh = mesh_id
+    else:
+        mesh_id = mesh._warp_mesh
+
+    # 2. 准备输入/输出数据 (GPU Array)
+    wp_points = wp.from_numpy(points, dtype=wp.vec3)
+    out_closest = wp.zeros(num_points, dtype=wp.vec3)
+    out_dist = wp.zeros(num_points, dtype=wp.float32)
+    out_tid = wp.zeros(num_points, dtype=wp.int32)
+
+    # 3. 启动 Kernel
+    wp.launch(
+        kernel=_wp_closest_point_kernel,
+        dim=num_points,
+        inputs=[mesh_id.id, wp_points, out_closest, out_dist, out_tid],
+    )
+
+    # 4. 将结果转回 NumPy 并保持接口一致
+    return (
+        out_closest.numpy().astype(np.float64),
+        out_dist.numpy().astype(np.float64),
+        out_tid.numpy().astype(np.int32)
+    )
+
+
+def trimesh_monkey_patch():
+    trimesh.proximity.closest_point = closest_point
+
+
 def tri_poly(tri: trimesh.Trimesh | tuple, cell_data: Dict[str, np.ndarray] = None):
     if isinstance(tri, trimesh.Trimesh):
         tri = (tri.vertices, tri.faces)
@@ -38,6 +107,7 @@ def diff_dmc(volume: wp.array3d(dtype=wp.float32), origin: np.ndarray, spacing: 
     vertices, indices = vertices.cpu().numpy(), indices.cpu().numpy()
     vertices = vertices * spacing * (np.array(volume.shape) - [1, 1, 1]) + origin
     return trimesh.Trimesh(vertices, indices)
+
 
 def icp(a, b, initial=None, threshold=1e-5, max_iterations=20, **kwargs):
     """
@@ -71,6 +141,8 @@ def icp(a, b, initial=None, threshold=1e-5, max_iterations=20, **kwargs):
     cost : float
       The cost of the transformation
     """
+    trimesh_monkey_patch()
+
     from scipy.spatial import cKDTree
     from trimesh import util
     from trimesh.transformations import transform_points
@@ -119,6 +191,7 @@ def icp(a, b, initial=None, threshold=1e-5, max_iterations=20, **kwargs):
             old_cost = cost
 
     return total_matrix, transformed, cost, it
+
 
 @wp.kernel
 def compute_sdf(
