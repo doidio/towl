@@ -101,11 +101,15 @@ def tri_poly(tri: trimesh.Trimesh | tuple, cell_data: Dict[str, np.ndarray] = No
 
 def diff_dmc(volume: wp.array3d(dtype=wp.float32), origin: np.ndarray, spacing: float | np.ndarray,
              threshold: float, ):
+    # vertices, indices = wp.MarchingCubes.extract_surface_marching_cubes(
+    #     -volume, -threshold, wp.vec3(origin), wp.vec3(origin + spacing * (np.array(volume.shape) - 1)),
+    # )
+    # return trimesh.Trimesh(vertices.numpy(), indices.numpy().reshape((-1, 3)))
     import torch
     from diso import DiffDMC
     vertices, indices = DiffDMC(dtype=torch.float32)(-wp.to_torch(volume), None, isovalue=-threshold)
     vertices, indices = vertices.cpu().numpy(), indices.cpu().numpy()
-    vertices = vertices * spacing * (np.array(volume.shape) - [1, 1, 1]) + origin
+    vertices = vertices * spacing * (np.array(volume.shape) - 1) + origin
     return trimesh.Trimesh(vertices, indices)
 
 
@@ -204,7 +208,6 @@ def compute_sdf(
     q = wp.mesh_query_point_sign_normal(mesh, p, max_dist)
     closest = wp.mesh_eval_position(mesh, q.face, q.u, q.v)
     dxyz = p - closest
-    # dxyz[2] *= 0.1
     d = q.sign * wp.length(dxyz)
     sdf[i] = d
 

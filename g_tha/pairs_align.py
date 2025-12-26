@@ -20,17 +20,21 @@ locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
 wp.config.quiet = True
 
-hu_bone = 350
-hu_metal = 2700
-far_from_metal = (15.0, 10.0, 7.5, 5.0)
+hu_bone = 250  # 200, 250, 350, 550 骨阈值轮测选优
+hu_metal = 2700  # 金属假体阈值
+far_from_metal = (30, 15, 10, 7.5, 5.0,)  # 远离金属的距离
+
+
+class UserCanceled(RuntimeError):
+    pass
 
 
 def main(cfg_path: str, redo_mse: float,
-         patient: str, rl: str, mse: float, xform: list, pre_object_name: str, post_object_name: str):
-    if 0 < redo_mse and 0 <= mse < redo_mse:
+         patient: str, rl: str, save_mse: float, _: list, pre_object_name: str, post_object_name: str):
+    if 0 < redo_mse and 0 <= save_mse < redo_mse:
         return None
 
-    print(patient, rl, mse)
+    print(patient, rl, save_mse)
 
     cfg_path = Path(cfg_path)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
@@ -125,7 +129,7 @@ def main(cfg_path: str, redo_mse: float,
     post_mesh: trimesh.Trimesh = roi_meshes[1].copy()
     zl = [np.max(_.vertices[:, 0]) - np.min(_.vertices[:, 0]) for _ in roi_meshes]
 
-    # 术前比术后短，术后远端截断
+    # 术后比术前长，术后远端截断
     if 1.05 * zl[0] < zl[1]:
         z_min = np.min(roi_meshes[1].vertices[:, 0]) + zl[1] - zl[0]
 
@@ -151,25 +155,21 @@ def main(cfg_path: str, redo_mse: float,
     ])
     d = d.numpy()
 
-    # 到假体距离加权采样
-    # m = d.min(), d.max()
-    # w = (m[1] - sdf) / (m[1] - m[0])
-    # w = np.exp(-9.0 * w)
-
-    if len(xform) == 7:
-        init_matrix = np.array(wp.transform_to_matrix(wp.transform(*xform))).reshape((4, 4))
-    else:
-        init_matrix = np.identity(4)
-        init_matrix[0, 3] = np.max(roi_meshes[0].vertices[:, 0]) - np.max(roi_meshes[1].vertices[:, 0])
+    # 初始近端对齐
+    init_matrix = np.identity(4)
+    init_matrix[0, 3] = np.max(roi_meshes[0].vertices[:, 0]) - np.max(roi_meshes[1].vertices[:, 0])
 
     # 配准术后到术前，配准特征点尽量远离金属，但术后过短则不得不接近金属
     pak = None
     for far in far_from_metal:
-        p = d > far
-        p = p / p.sum()
+        _ = d - far
+        # _[np.where(_ > far * 2)] = 0
+        p = np.clip(_, 0, far)
 
         if (n := int(np.sum(p > 0))) < 100:
             continue
+
+        p = p / p.sum()
 
         _ = np.random.choice(len(post_mesh.vertices), size=min(n, 10000), replace=False, p=p)
         vertices = post_mesh.vertices[_]
@@ -178,18 +178,15 @@ def main(cfg_path: str, redo_mse: float,
             vertices, roi_meshes[0], init_matrix, 1e-5, 2000,
             **dict(reflection=False, scale=False),
         )
+        print(f'{patient} {rl} METAL-FREE {far}mm SURFACE-POINTS {n} ITERS {it} MSE {mse:.3f}mm')
 
         if pak is None or pak[0] > mse:
             pak = (mse, far, n, vertices, matrix, mse, it)
-
-        if pak[0] < 1.0:
-            break
 
     if pak is None:
         raise RuntimeError('ICP failed')
 
     mse, far, n, vertices, matrix, mse, it = pak
-    print(f'{patient} {rl} METAL-FREE {far}mm SURFACE-POINTS {n} ITERS {it} MSE {mse:.3f}mm')
 
     # post_mesh.apply_transform(matrix)
     # metal_meshes[1].apply_transform(matrix)
@@ -198,8 +195,11 @@ def main(cfg_path: str, redo_mse: float,
     # vertices = trimesh.transform_points(vertices, matrix)
     roi_meshes[0].apply_transform(np.linalg.inv(matrix))
 
+    # if mse > save_mse:
+    #     raise UserCanceled
+
     import pyvista as pv
-    pl = pv.Plotter(title=f'{patient}.{rl}', window_size=[500, 1000], off_screen=True)
+    pl = pv.Plotter(title=f'{patient}.{rl}', window_size=[500, 1000], off_screen=False)
     # pl.add_camera_orientation_widget()
     pl.enable_parallel_projection()
     pl.add_text(f'MSE {mse:.3f} mm', font_size=9)
@@ -210,10 +210,18 @@ def main(cfg_path: str, redo_mse: float,
     pl.add_mesh(metal_meshes[1], color='blue')
     pl.add_points(vertices, color='crimson', render_points_as_spheres=True, point_size=2)
     pl.camera_position = 'zx'
-    pl.reset_camera()
+    pl.reset_camera(bounds=post_mesh.bounds.T.flatten())
     pl.camera.parallel_scale = max(zl) * 0.6
     if not pl.off_screen:
         pl.show(auto_close=False)
+
+    if pl._closed:
+        raise UserCanceled
+
+    pl.camera_position = 'zx'
+    pl.reset_camera(bounds=post_mesh.bounds.T.flatten())
+    pl.camera.parallel_scale = max(zl) * 0.6
+    pl.update()
     (f := Path(f'.pairs_align/redo_{redo_mse}/{patient}_{rl}.png')).parent.mkdir(parents=True, exist_ok=True)
     pl.screenshot(f.as_posix())
     pl.close()
@@ -246,6 +254,8 @@ if __name__ == '__main__':
                         pairs[_[0]][_[1]][0] = result[0]
                         pairs[_[0]][_[1]][1] = result[1]
                         pairs_path.write_text(tomlkit.dumps(pairs), 'utf-8')
+                except UserCanceled:
+                    print('UserCanceled')
                 except Exception as _:
                     traceback.print_exception(_)
                     warnings.warn(f'{_} {futures[fu]}', stacklevel=2)
