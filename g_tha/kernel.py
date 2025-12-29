@@ -5,6 +5,8 @@ import pyvista as pv
 import trimesh
 import warp as wp
 
+wp.config.quiet = True
+
 
 def itk_monkey_patch():
     import itk, locale
@@ -14,6 +16,9 @@ def itk_monkey_patch():
     # itk 默认 ForceOrthogonalDirection=True 不适用于从脚到头 (FFS) 或斜切 (gantry-tilt) 扫描
     _New = itk.ImageSeriesReader.New
     itk.ImageSeriesReader.New = lambda *a, **k: _New(*a, **{**k, 'ForceOrthogonalDirection': False})
+
+
+itk_monkey_patch()
 
 
 @wp.kernel
@@ -145,8 +150,6 @@ def icp(a, b, initial=None, threshold=1e-5, max_iterations=20, **kwargs):
     cost : float
       The cost of the transformation
     """
-    trimesh_monkey_patch()
-
     from scipy.spatial import cKDTree
     from trimesh import util
     from trimesh.transformations import transform_points
@@ -195,6 +198,9 @@ def icp(a, b, initial=None, threshold=1e-5, max_iterations=20, **kwargs):
             old_cost = cost
 
     return total_matrix, transformed, cost, it
+
+
+trimesh_monkey_patch()
 
 
 @wp.kernel
