@@ -64,7 +64,7 @@ elif (it := st.session_state.get('roi')) is None:
     client, pairs = st.session_state['init']
     p, rl = st.session_state['prl']
 
-    st.code(f'股骨阈值 = {hu_bone}, 金属阈值 = {hu_metal}')
+    st.code(f'股骨阈值 = {hu_bone}  金属阈值 = {hu_metal}')
     st.code(f'PatientID_RL = {p}_{rl}')
 
     label_femur = {'R': 76, 'L': 75}[rl]
@@ -141,7 +141,7 @@ elif (it := st.session_state.get('roi')) is None:
                     st.error(opname + f'子区不包含股骨')
                     st.stop()
 
-                mesh = max(mesh.split(), key=lambda c: c.area)
+                mesh = max(mesh.split(), key=lambda _: _.area)
                 mesh = trimesh.smoothing.filter_taubin(mesh)
                 bone_meshes.append(mesh)
 
@@ -157,14 +157,17 @@ else:
     st.code(f'术前 = {pairs[p][rl][2]}')
     st.code(f'术后 = {pairs[p][rl][3]}')
 
-    zl = [_.bounds[1][0] - _.bounds[0][0] for _ in bone_meshes]
-    zd = (zl[1] - zl[0])
-    z0 = st.number_input(f'近端截除 (0 ~ {int(zl[1]):.0f} mm)', 20, _ := int(zl[1]), step=5)
+    st.info('术后（绿）指定区域（浅绿）采样点（深红）配准到术前（浅黄）')
 
-    with st.spinner(_ := '配准', show_time=True):  # noqa
+    zl = [_.bounds[1][0] - _.bounds[0][0] for _ in bone_meshes]
+    z0 = st.number_input(f'大粗隆顶距 (0 ~ {int(zl[1]):.0f} mm)', 0, _ := int(zl[1]), 20, step=5)
+    zr = st.slider(f'采样点下上限 (%)', 0, 100, (0, 100), step=1)
+
+    with st.spinner(_ := '裁剪', show_time=True):  # noqa
         post_mesh: trimesh.Trimesh = bone_meshes[1].copy()
+
         if z0 > 0 or zl[0] < zl[1]:
-            z_max = np.max(bone_meshes[1].vertices[:, 0]) - z0
+            z_max = post_mesh.bounds[1][0] - z0
             z_min = z_max - zl[0]
 
             z = post_mesh.vertices[:, 0]
@@ -179,9 +182,7 @@ else:
         else:
             post_mesh_outlier = None
 
-        init_matrix = np.identity(4)
-        init_matrix[0, 3] = np.max(bone_meshes[0].vertices[:, 0]) - np.max(post_mesh.vertices[:, 0])
-
+    with st.spinner(_ := '采样', show_time=True):  # noqa
         # 计算术后网格到假体的加权距离
         metal = wp.Mesh(wp.array(metal_meshes[1].vertices, wp.vec3),
                         wp.array(metal_meshes[1].faces.flatten(), wp.int32))
@@ -192,11 +193,14 @@ else:
         ])
         d = d.numpy()
 
+        zr = [_ * post_mesh.bounds[1][0] / 100 for _ in zr]
+
         # 配准术后到术前，配准特征点尽量远离金属，但术后过短则不得不接近金属
-        far = st.number_input('远离金属 (mm)', 0, 50, 5, step=5)
+        far = st.number_input('采样点远离金属 (mm)', 0, 50, 5, step=5)
 
         _ = d - far
         _ = np.clip(_, 0, max(far, 1e-6))
+        _ *= (zr[0] <= post_mesh.vertices[:, 0]) & (post_mesh.vertices[:, 0] <= zr[1])
 
         if (n := int(np.sum(_ > 0))) < 100:
             st.error(f'采样点过少 {n}')
@@ -207,44 +211,79 @@ else:
         _ = np.random.choice(len(post_mesh.vertices), size=min(n, 10000), replace=False, p=_)
         vertices = post_mesh.vertices[_]
 
+    with st.spinner(_ := '配准', show_time=True):  # noqa
+        matrix = np.identity(4)
+        matrix[0, 3] = bone_meshes[0].bounds[1][0] - post_mesh.bounds[1][0]
         matrix, _, mse, it = icp(
-            vertices, bone_meshes[0], init_matrix, 1e-5, 2000,
+            vertices, bone_meshes[0], matrix, 1e-5, 2000,
             **dict(reflection=False, scale=False),
         )
         st.success(f'采样点 {min(n, 10000)} 迭代 {it} 误差 {mse:.3f} mm')
 
-    z, y = [post_mesh.bounds[1][_] - post_mesh.bounds[0][_] for _ in (0, 1)]
-    pl = pv.Plotter(off_screen=True, shape=(1, 2), border=False, window_size=[round(2000 * y / z), 1000])
-    pl.enable_parallel_projection()
-    pl.enable_depth_peeling()
-    camera = pl.camera
+    with st.spinner(_ := '场景', show_time=True):  # noqa
+        b = np.array(post_mesh.bounds)
 
-    if post_mesh_outlier is not None:
-        pl.add_mesh(post_mesh_outlier, color='green')
-    pl.add_mesh(post_mesh, color='lightgreen')
+        z, y, x = [b[1][_] - b[0][_] for _ in (0, 1, 2)]
+        h, wy, wx = [round(_ * 5) for _ in (z, y, x)]
 
-    pre_mesh: trimesh.Trimesh = bone_meshes[0].copy()
-    pre_mesh.apply_transform(np.linalg.inv(matrix))
-    pl.add_mesh(pre_mesh, color='lightyellow')
-    pl.add_points(vertices, color='crimson', render_points_as_spheres=True, point_size=2)
+        pl = pv.Plotter(
+            off_screen=True, border=False, window_size=[max(wy, wx), h],
+            line_smoothing=True, point_smoothing=True, polygon_smoothing=True,
+        )
+        pl.enable_parallel_projection()
+        pl.enable_depth_peeling()
+        pl.enable_anti_aliasing('msaa')
 
-    pl.subplot(0, 1)
-    pl.camera = camera
+        pl.add_mesh(metal_meshes[1], color='lightblue', name='metal')
 
-    pl.add_mesh(metal_meshes[1], color='lightblue')
+        if post_mesh_outlier is not None and len(post_mesh_outlier.faces):
+            pl.add_mesh(post_mesh_outlier, color='green')
+        pl.add_mesh(post_mesh, color='lightgreen')  # noqa
 
-    pl.camera_position = 'zx'
-    pl.reset_camera(bounds=post_mesh.bounds.T.flatten())
-    pl.camera.parallel_scale = zl[1] * 0.6
-    pl.render()
+        pre_mesh: trimesh.Trimesh = bone_meshes[0].copy()
+        pre_mesh.apply_transform(np.linalg.inv(matrix))
+        pl.add_mesh(pre_mesh, color='lightyellow')  # noqa
+        pl.add_points(vertices, color='crimson', render_points_as_spheres=True, point_size=3)
+
+        pl.add_mesh(metal_meshes[1], color='lightblue')
+
+        pl.camera_position = 'zx'
+        pl.reset_camera(bounds=b.T.flatten())
+        pl.camera.parallel_scale = (b[1][0] - b[0][0]) * 0.6
+        pl.reset_camera_clipping_range()
+        pl.render()
 
     if st.radio('plot', _ := ['2D 截图', '3D 场景'], horizontal=True, label_visibility='collapsed') == _[1]:
         with st.spinner(_ := '同步', show_time=True):  # noqa
             stpyvista(pl, panel_kwargs=PanelVTKKwargs(orientation_widget=True))
     else:
-        for i, _ in enumerate((0, 90 if rl == 'R' else -90)):
-            pl.camera.Azimuth(_)
+        s = pl.add_silhouette(pl.actors['metal'].GetMapper().GetInput(), color='lightgray')  # noqa
+
+        cols = []
+        for i, deg in enumerate([0, 90 if rl == 'R' else -90]):
+            [pl.actors[_].SetVisibility(False) for _ in pl.actors].clear()
+            s.SetVisibility(True)
+
+            pl.window_size = [[wx, wy][i], h]
+
+            pl.camera_position = 'zx'
+            pl.reset_camera(bounds=b.T.flatten())
+            pl.camera.Azimuth(deg)
+            pl.camera.parallel_scale = (b[1][0] - b[0][0]) * 0.6
+            pl.reset_camera_clipping_range()
             pl.render()
-            st.image(pl.screenshot(return_img=True), caption=['后视', '内侧视'][i])
+            a = pl.screenshot(return_img=True).copy()
+
+            [pl.actors[_].SetVisibility(True) for _ in pl.actors].clear()
+
+            pl.reset_camera_clipping_range()
+            pl.render()
+            c = pl.screenshot(return_img=True).copy()
+
+            mask = (a != pl.background_color.int_rgb).any(axis=-1)
+            c[mask] = a[mask]
+            cols.append(c)
+
+        st.image(np.hstack(cols))
 
     pl.close()
