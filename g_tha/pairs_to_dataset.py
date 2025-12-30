@@ -46,6 +46,14 @@ if (it := st.session_state.get('init')) is None:
                 pairs[prl] = {'prl': prl}
             pairs[prl][op] = f'{pid}/{nii}'
 
+        for prl in pairs:
+            try:
+                data = client.get_object('pair', '/'.join([prl.replace('_', '/'), 'align.toml'])).data
+                data = tomlkit.loads(data.decode('utf-8'))
+                pairs[prl].update(data)
+            except S3Error:
+                pass
+
     st.session_state['init'] = client, pairs
     st.rerun()
 elif (it := st.session_state.get('prl')) is None:
@@ -56,15 +64,7 @@ elif (it := st.session_state.get('prl')) is None:
         st.session_state['prl_input'] = prl
 
     prl = st.text_input('PatientID_RL', key='prl_input')
-    if len(prl):
-        pid, rl = prl.split('_')
-        try:
-            data = client.get_object('pair', f'{pid}/{rl}/align.toml').data
-            data = tomlkit.loads(data.decode('utf-8'))
-            pairs[prl].update(data)
-        except S3Error:
-            pass
-
+    if prl in pairs:
         st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
         if st.button('确定'):
@@ -191,10 +191,9 @@ else:
         else:
             post_mesh_outlier = None
 
-    zr_max, zr_min = tuple(zl[1] - round(post_mesh.bounds[_][0]) for _ in range(2))
+    _min, _max = d_proximal, zl[1]
     d_sample_range = st.slider(
-        f'采样点范围 ({zr_min} ~ {zr_max} mm)', zr_min, zr_max,
-        pairs[prl].get('d_sample_range', (zr_min, zr_max)), step=1,
+        f'采样点范围 ({_min} ~ {_max} mm)', _min, _max, pairs[prl].get('d_sample_range', (_min, _max)), step=1,
         help='近端 ~ 远端', key='d_sample_range',
     )
     zr = [zl[1] - d_sample_range[_] for _ in reversed(range(2))]
