@@ -59,6 +59,12 @@ if (it := st.session_state.get('init')) is None:
 elif (it := st.session_state.get('prl')) is None:
     client, pairs = st.session_state['init']
 
+    dn = len([_ for _ in pairs if 'post_xform' in pairs[_]])
+    ud = len(pairs) - dn
+
+    st.progress(_ := dn / (dn + ud), text=f'{100 * _:.2f}%')
+    st.metric('progress', f'{dn} / {dn + ud}', label_visibility='collapsed')
+
     if st.button('随机一个'):
         prl = choice(list(pairs.keys()))
         st.session_state['prl_input'] = prl
@@ -167,9 +173,11 @@ else:
 
     st.info('术后（绿）指定区域（浅绿）采样点（深红）配准到术前（浅黄）')
 
-    zl = [round(_.bounds[1][0]) - round(_.bounds[0][0]) for _ in bone_meshes]
+    zl = [round(_.bounds[1][0] - _.bounds[0][0]) for _ in bone_meshes]
+
     d_proximal = st.number_input(
-        f'近端截除 (0 ~ {zl[1]:.0f} mm)', 0, _ := zl[1], pairs[prl].get('d_proximal', 20), step=5, key='d_proximal',
+        f'近端截除 (0 ~ {zl[1]:.0f} mm)', 0, _ := zl[1], pairs[prl].get('d_proximal', 15), step=5,
+        help='截除术后比术前多余的近端特征，或截除术后到大粗隆顶端', key='d_proximal',
     )
 
     with st.spinner(_ := '裁剪', show_time=True):  # noqa
@@ -177,7 +185,7 @@ else:
 
         if d_proximal > 0 or zl[0] < zl[1]:
             z_max = post_mesh.bounds[1][0] - d_proximal
-            z_min = z_max - zl[0] + d_proximal
+            z_min = z_max - zl[0]
 
             z = post_mesh.vertices[:, 0]
             mask = (z_min <= z) & (z <= z_max)
@@ -191,12 +199,13 @@ else:
         else:
             post_mesh_outlier = None
 
-    _min, _max = d_proximal, zl[1]
+    zl.append(round(post_mesh.bounds[1][0] - post_mesh.bounds[0][0]))
+    _min, _max = d_proximal, d_proximal + min(zl[0], zl[2])
+
     d_sample_range = st.slider(
         f'采样点范围 ({_min} ~ {_max} mm)', _min, _max, pairs[prl].get('d_sample_range', (_min, _max)), step=1,
         help='近端 ~ 远端', key='d_sample_range',
     )
-    zr = [zl[1] - d_sample_range[_] for _ in reversed(range(2))]
 
     # 配准术后到术前，配准特征点尽量远离金属，但术后过短则不得不接近金属
     d_metal = st.number_input('采样点远离金属 (0 ~ 50 mm)', 0, 50, pairs[prl].get('d_metal', 5), step=5, key='d_metal')
@@ -211,9 +220,11 @@ else:
         ])
         d = d.numpy()
 
+        z0 = post_mesh.bounds[1][0] - post_mesh.vertices[:, 0]
+
         _ = d - d_metal
         _ = np.clip(_, 0, max(d_metal, 1e-6))
-        _ *= (zr[0] <= post_mesh.vertices[:, 0]) & (post_mesh.vertices[:, 0] <= zr[1])
+        _ *= (d_sample_range[0] - d_proximal <= z0) & (z0 <= d_sample_range[1] - d_proximal)
 
         if (n := min(int(np.sum(_ > 0)), 10000)) < 100:
             st.error(f'采样点过少 {n}')
@@ -227,7 +238,7 @@ else:
     with st.spinner(_ := '配准', show_time=True):  # noqa
         matrix = np.identity(4)
         matrix[0, 3] = bone_meshes[0].bounds[1][0] - post_mesh.bounds[1][0]
-        matrix, _, mse, it = icp(
+        matrix, _, mse, iters = icp(
             vertices, bone_meshes[0], matrix, 1e-5, 2000,
             **dict(reflection=False, scale=False),
         )
@@ -235,7 +246,7 @@ else:
     data = {
         'post_xform': np.array(wp.transform_from_matrix(wp.mat44(matrix)), dtype=float).tolist(),
         'post_points': n,
-        'iterations': it,
+        'iterations': iters,
         'mse': mse,
         'd_proximal': d_proximal,
         'd_sample_range': d_sample_range,
