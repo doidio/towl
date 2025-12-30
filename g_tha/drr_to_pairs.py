@@ -1,9 +1,10 @@
-# uv run streamlit run drr_to_pairs.py --server.port 8501 -- --config config.toml --pairs pairs.toml
+# uv run streamlit run drr_to_pairs.py --server.port 8501 -- --config config.toml
 
 import argparse
 import locale
 import tempfile
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 
 import numpy as np
@@ -14,31 +15,21 @@ from minio import Minio, S3Error
 
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
 
-
 parser = argparse.ArgumentParser()
 parser.add_argument('--config', required=True)
-parser.add_argument('--pairs', required=True)
 args = parser.parse_args()
 
 cfg_path = Path(args.config)
 cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
 client = Minio(**cfg['minio']['client'])
 
-pairs_path = Path(args.pairs)
-pairs: dict = tomlkit.loads(pairs_path.read_text('utf-8'))
-
 st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed')
 st.markdown('### 全髋关节置换术前术后配对')
 
 if (it := st.session_state.get('ud')) is None:
     with st.spinner('下一个', show_time=True):  # noqa
-        dn, ud = [], []
-        for _ in client.list_objects('drr'):
-            if not _.is_dir:
-                continue
-
-            object_name = _.object_name[:-1]
-            (dn if object_name in pairs else ud).append(object_name)
+        dn = [_.object_name[:-1] for _ in client.list_objects('pair')]
+        ud = [_.object_name[:-1] for _ in client.list_objects('drr') if _.object_name[:-1] not in dn]
 
     if len(ud):
         st.session_state['dn'] = dn
@@ -132,10 +123,13 @@ else:
             if len(n - {0, 2}) > 0:
                 st.error('选择数量错误，只能双选或不选')
             else:
-                pairs[patient] = {}
-                for i in [i for i, c in enumerate(rl) if len(c) == 2]:
-                    pairs[patient]['RL'[i]] = [-1, [], *[series[options[rl[i][_]]][-1] for _ in range(2)]]
-                pairs_path.write_text(tomlkit.dumps(pairs), 'utf-8')
+                for i, c in enumerate(rl):
+                    if len(c) == 2:
+                        pre, post = [series[options[rl[i][_]]][-1] for _ in range(2)]
+                        pre, post = [_.split('/')[-1] for _ in (pre, post)]
+                        client.put_object('pair', '/'.join([patient, 'RL'[i], 'pre', pre]), BytesIO(b''), 0)
+                        client.put_object('pair', '/'.join([patient, 'RL'[i], 'post', post]), BytesIO(b''), 0)
+                client.put_object('pair', '/'.join([patient, 'pair.done']), BytesIO(b''), 0)
 
                 for _ in ('dn', 'ud', 'patient', 'series'):
                     del st.session_state[_]

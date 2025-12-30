@@ -1,7 +1,8 @@
-# uv run streamlit run pairs_to_dataset.py --server.port 8502 -- --config config.toml --pairs pairs.toml
+# uv run streamlit run pairs_to_dataset.py --server.port 8502 -- --config config.toml
 
 import argparse
 import tempfile
+from io import BytesIO
 from pathlib import Path
 from random import choice
 
@@ -21,7 +22,7 @@ from kernel import diff_dmc, compute_sdf, icp
 st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed', layout='centered')
 st.markdown('### 全髋关节置换术前术后配准')
 
-hu_bone, hu_metal = 220, 2700
+ct_bone, ct_metal = 220, 2700
 
 if (it := st.session_state.get('init')) is None:
     with st.spinner('初始化', show_time=True):  # noqa
@@ -34,8 +35,16 @@ if (it := st.session_state.get('init')) is None:
         cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
         client = Minio(**cfg['minio']['client'])
 
-        pairs_path = Path(args.pairs)
-        pairs: dict = tomlkit.loads(pairs_path.read_text('utf-8'))
+        pairs = {}
+        for pid in client.list_objects('pair', recursive=True):
+            if not pid.object_name.endswith('.nii.gz'):
+                continue
+
+            pid, rl, op, nii = pid.object_name.split('/')
+            prl = f'{pid}_{rl}'
+            if prl not in pairs:
+                pairs[prl] = {'prl': prl}
+            pairs[prl][op] = f'{pid}/{nii}'
 
     st.session_state['init'] = client, pairs
     st.rerun()
@@ -43,38 +52,38 @@ elif (it := st.session_state.get('prl')) is None:
     client, pairs = st.session_state['init']
 
     if st.button('随机一个'):
-        p = choice([_ for _ in pairs.keys() if len(pairs[_].keys()) > 0])
-        rl = choice(list(pairs[p]))
-        st.session_state['prl_input'] = f'{p}_{rl}'
+        prl = choice(list(pairs.keys()))
+        st.session_state['prl_input'] = prl
 
     prl = st.text_input('PatientID_RL', key='prl_input')
     if len(prl):
-        prl = prl.split('_')
-        if len(prl) == 2 and pairs.get(prl[0], {}).get(prl[1]):
-            p, rl = prl
+        pid, rl = prl.split('_')
+        try:
+            data = client.get_object('pair', f'{pid}/{rl}/align.toml').data
+            data = tomlkit.loads(data.decode('utf-8'))
+            pairs[prl].update(data)
+        except S3Error:
+            pass
 
-            for i, _ in enumerate(('误差', '配准变换', '术前', '术后')):
-                st.code(f'{_} = {pairs[p][rl][i]}')
+        st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
-            if st.button('确定'):
-                st.session_state['prl'] = p, rl
-                st.rerun()
+        if st.button('确定'):
+            st.session_state['prl'] = prl
+            st.rerun()
 
 elif (it := st.session_state.get('roi')) is None:
     client, pairs = st.session_state['init']
-    p, rl = st.session_state['prl']
-
-    st.code(f'股骨阈值 = {hu_bone}  金属阈值 = {hu_metal}')
-    st.code(f'PatientID_RL = {p}_{rl}')
-
+    prl = st.session_state['prl']
+    rl = prl.split('_')[1]
     label_femur = {'R': 76, 'L': 75}[rl]
+
+    st.code(f'股骨阈值 = {ct_bone}  金属阈值 = {ct_metal}')
+    st.code(tomlkit.dumps(pairs[prl]), 'toml')
+
     roi_images, sizes, spacings, image_bgs = [], [], [], []
     bone_meshes, metal_meshes = [], []
 
-    for op, object_name in enumerate((pairs[p][rl][2], pairs[p][rl][3])):
-        opname = ['术前', '术后'][op]
-        st.code(f'{opname} = {object_name}')
-
+    for op, object_name in enumerate((pairs[prl]['pre'], pairs[prl]['post'])):
         with tempfile.TemporaryDirectory() as tdir:
             with st.spinner(_ := '下载自动分割', show_time=True):  # noqa
                 f = Path(tdir) / 'total.nii.gz'
@@ -121,14 +130,14 @@ elif (it := st.session_state.get('roi')) is None:
                 roi_total = total[b[0, 0]:b[1, 0] + 1, b[0, 1]:b[1, 1] + 1, b[0, 2]:b[1, 2] + 1]
 
                 # 抹除子区中的非股骨高亮体素
-                roi_image[np.where((roi_total != label_femur) & (roi_image > hu_bone))] = image_bg
+                roi_image[np.where((roi_total != label_femur) & (roi_image > ct_bone))] = image_bg
                 roi_images.append(roi_image)
 
                 # 提取术后假体等值面
                 if op == 0:
                     metal_meshes.append(None)
                 else:
-                    mesh = diff_dmc(wp.from_numpy(roi_image, wp.float32), np.zeros(3), spacing, hu_metal)
+                    mesh = diff_dmc(wp.from_numpy(roi_image, wp.float32), np.zeros(3), spacing, ct_metal)
                     if mesh.is_empty:
                         st.error(f'术后子区不包含金属')
                         st.stop()
@@ -136,9 +145,9 @@ elif (it := st.session_state.get('roi')) is None:
                     metal_meshes.append(mesh)
 
                 # 提取股骨等值面
-                mesh = diff_dmc(wp.from_numpy(roi_image, wp.float32), np.zeros(3), spacing, hu_bone)
+                mesh = diff_dmc(wp.from_numpy(roi_image, wp.float32), np.zeros(3), spacing, ct_bone)
                 if mesh.is_empty:
-                    st.error(opname + f'子区不包含股骨')
+                    st.error(['术前', '术后'][op] + f'子区不包含股骨')
                     st.stop()
 
                 mesh = max(mesh.split(), key=lambda _: _.area)
@@ -149,26 +158,26 @@ elif (it := st.session_state.get('roi')) is None:
     st.rerun()
 else:
     client, pairs = st.session_state['init']
-    p, rl = st.session_state['prl']
+    prl = st.session_state['prl']
+    pid, rl = prl.split('_')
     roi_images, sizes, spacings, image_bgs, bone_meshes, metal_meshes = st.session_state['roi']
 
-    st.code(f'股骨阈值 = {hu_bone}  金属阈值 = {hu_metal}')
-    st.code(f'PatientID_RL = {p}_{rl}')
-    st.code(f'术前 = {pairs[p][rl][2]}')
-    st.code(f'术后 = {pairs[p][rl][3]}')
+    st.code(f'股骨阈值 = {ct_bone}  金属阈值 = {ct_metal}')
+    st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
     st.info('术后（绿）指定区域（浅绿）采样点（深红）配准到术前（浅黄）')
 
-    zl = [_.bounds[1][0] - _.bounds[0][0] for _ in bone_meshes]
-    z0 = st.number_input(f'大粗隆顶距 (0 ~ {int(zl[1]):.0f} mm)', 0, _ := int(zl[1]), 20, step=5)
-    zr = st.slider(f'采样点下上限 (%)', 0, 100, (0, 100), step=1)
+    zl = [round(_.bounds[1][0]) - round(_.bounds[0][0]) for _ in bone_meshes]
+    d_proximal = st.number_input(
+        f'近端截除 (0 ~ {zl[1]:.0f} mm)', 0, _ := zl[1], pairs[prl].get('d_proximal', 20), step=5, key='d_proximal',
+    )
 
     with st.spinner(_ := '裁剪', show_time=True):  # noqa
         post_mesh: trimesh.Trimesh = bone_meshes[1].copy()
 
-        if z0 > 0 or zl[0] < zl[1]:
-            z_max = post_mesh.bounds[1][0] - z0
-            z_min = z_max - zl[0]
+        if d_proximal > 0 or zl[0] < zl[1]:
+            z_max = post_mesh.bounds[1][0] - d_proximal
+            z_min = z_max - zl[0] + d_proximal
 
             z = post_mesh.vertices[:, 0]
             mask = (z_min <= z) & (z <= z_max)
@@ -182,8 +191,18 @@ else:
         else:
             post_mesh_outlier = None
 
+    zr_max, zr_min = tuple(zl[1] - round(post_mesh.bounds[_][0]) for _ in range(2))
+    d_sample_range = st.slider(
+        f'采样点范围 ({zr_min} ~ {zr_max} mm)', zr_min, zr_max,
+        pairs[prl].get('d_sample_range', (zr_min, zr_max)), step=1,
+        help='近端 ~ 远端', key='d_sample_range',
+    )
+    zr = [zl[1] - d_sample_range[_] for _ in reversed(range(2))]
+
+    # 配准术后到术前，配准特征点尽量远离金属，但术后过短则不得不接近金属
+    d_metal = st.number_input('采样点远离金属 (0 ~ 50 mm)', 0, 50, pairs[prl].get('d_metal', 5), step=5, key='d_metal')
+
     with st.spinner(_ := '采样', show_time=True):  # noqa
-        # 计算术后网格到假体的加权距离
         metal = wp.Mesh(wp.array(metal_meshes[1].vertices, wp.vec3),
                         wp.array(metal_meshes[1].faces.flatten(), wp.int32))
         d = wp.zeros((len(post_mesh.vertices),), float)
@@ -193,22 +212,17 @@ else:
         ])
         d = d.numpy()
 
-        zr = [_ * post_mesh.bounds[1][0] / 100 for _ in zr]
-
-        # 配准术后到术前，配准特征点尽量远离金属，但术后过短则不得不接近金属
-        far = st.number_input('采样点远离金属 (mm)', 0, 50, 5, step=5)
-
-        _ = d - far
-        _ = np.clip(_, 0, max(far, 1e-6))
+        _ = d - d_metal
+        _ = np.clip(_, 0, max(d_metal, 1e-6))
         _ *= (zr[0] <= post_mesh.vertices[:, 0]) & (post_mesh.vertices[:, 0] <= zr[1])
 
-        if (n := int(np.sum(_ > 0))) < 100:
+        if (n := min(int(np.sum(_ > 0)), 10000)) < 100:
             st.error(f'采样点过少 {n}')
             st.stop()
 
         _ = _ / _.sum()
 
-        _ = np.random.choice(len(post_mesh.vertices), size=min(n, 10000), replace=False, p=_)
+        _ = np.random.choice(len(post_mesh.vertices), size=n, replace=False, p=_)
         vertices = post_mesh.vertices[_]
 
     with st.spinner(_ := '配准', show_time=True):  # noqa
@@ -218,10 +232,31 @@ else:
             vertices, bone_meshes[0], matrix, 1e-5, 2000,
             **dict(reflection=False, scale=False),
         )
-        st.success(f'采样点 {min(n, 10000)} 迭代 {it} 误差 {mse:.3f} mm')
+
+    data = {
+        'post_xform': np.array(wp.transform_from_matrix(wp.mat44(matrix)), dtype=float).tolist(),
+        'post_points': n,
+        'iterations': it,
+        'mse': mse,
+        'd_proximal': d_proximal,
+        'd_sample_range': d_sample_range,
+        'd_metal': d_metal,
+    }
+    st.code(tomlkit.dumps(data), 'toml')
+
+    if st.button('提交'):
+        data = {**pairs[prl], **data}
+        data = tomlkit.dumps(data).encode('utf-8')
+        client.put_object('pair', '/'.join([pid, rl, 'align.toml']), BytesIO(data), len(data))
+
+        for _ in list(st.session_state.keys()):
+            del st.session_state[_]
+
+        st.rerun()
 
     with st.spinner(_ := '场景', show_time=True):  # noqa
         b = np.array(post_mesh.bounds)
+        b[1][0] += d_proximal
 
         z, y, x = [b[1][_] - b[0][_] for _ in (0, 1, 2)]
         h, wy, wx = [round(_ * 5) for _ in (z, y, x)]
@@ -234,7 +269,7 @@ else:
         pl.enable_depth_peeling()
         pl.enable_anti_aliasing('msaa')
 
-        pl.add_mesh(metal_meshes[1], color='lightblue', name='metal')
+        metal_actor = pl.add_mesh(metal_meshes[1], color='lightblue')
 
         if post_mesh_outlier is not None and len(post_mesh_outlier.faces):
             pl.add_mesh(post_mesh_outlier, color='green')
@@ -244,8 +279,6 @@ else:
         pre_mesh.apply_transform(np.linalg.inv(matrix))
         pl.add_mesh(pre_mesh, color='lightyellow')  # noqa
         pl.add_points(vertices, color='crimson', render_points_as_spheres=True, point_size=3)
-
-        pl.add_mesh(metal_meshes[1], color='lightblue')
 
         pl.camera_position = 'zx'
         pl.reset_camera(bounds=b.T.flatten())
@@ -257,12 +290,12 @@ else:
         with st.spinner(_ := '同步', show_time=True):  # noqa
             stpyvista(pl, panel_kwargs=PanelVTKKwargs(orientation_widget=True))
     else:
-        s = pl.add_silhouette(pl.actors['metal'].GetMapper().GetInput(), color='lightgray')  # noqa
+        sil = pl.add_silhouette(metal_actor.GetMapper().GetInput(), color='lightgray')  # noqa
 
         cols = []
         for i, deg in enumerate([0, 90 if rl == 'R' else -90]):
             [pl.actors[_].SetVisibility(False) for _ in pl.actors].clear()
-            s.SetVisibility(True)
+            sil.SetVisibility(True)
 
             pl.window_size = [[wx, wy][i], h]
 
