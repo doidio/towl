@@ -16,6 +16,20 @@ def main(cfg_path: str):
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
     client = Minio(**cfg['minio']['client'])
 
+    object_names = []
+    for _ in client.list_objects('pair', recursive=True):
+        if not _.object_name.endswith('.nii.gz'):
+            continue
+
+        pid, rl, op, nii = _.object_name.split('/')
+
+        try:
+            client.stat_object('nii', _ := f'{pid}/{nii}')
+        except S3Error:
+            continue
+
+        object_names.append(_)
+
     for object_name in tqdm(object_names):
         for bucket in ('total', 'appendicular-bones'):
             try:
@@ -23,6 +37,8 @@ def main(cfg_path: str):
                     continue
             except S3Error:
                 pass
+
+            print(object_name, bucket)
 
             with tempfile.TemporaryDirectory() as tdir:
                 image = Path(tdir) / 'image.nii.gz'
@@ -102,20 +118,15 @@ def seg(image_path: str, label_path: str, task: str):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
-    parser.add_argument('--pairs', required=True)
     args = parser.parse_args()
 
-    pairs: dict = tomlkit.loads(Path(args.pairs).read_text('utf-8'))
+    try:
+        while True:
+            main(args.config)
 
-    object_names = set()
-    for patient in pairs:
-        for rl in pairs[patient]:
-            object_names.add(pairs[patient][rl][2])
-            object_names.add(pairs[patient][rl][3])
+            for _ in range(60, 0, -1):
+                print(f'\rRetry in {_}s...', end='', flush=True)
+                time.sleep(1)
 
-    while True:
-        main(args.config)
-
-        for _ in range(60, 0, -1):
-            print(f'\rRetry in {_}s...', end='', flush=True)
-            time.sleep(1)
+    except KeyboardInterrupt:
+        print('Keyboard interrupted terminating...')

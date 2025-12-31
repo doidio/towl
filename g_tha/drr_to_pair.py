@@ -1,4 +1,4 @@
-# uv run streamlit run drr_to_pairs.py --server.port 8501 -- --config config.toml
+# uv run streamlit run drr_to_pair.py --server.port 8501 -- --config config.toml
 
 import argparse
 import locale

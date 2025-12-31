@@ -1,4 +1,4 @@
-# uv run streamlit run pairs_to_dataset.py --server.port 8502 -- --config config.toml
+# uv run streamlit run pair_align.py --server.port 8502 -- --config config.toml
 
 import argparse
 import tempfile
