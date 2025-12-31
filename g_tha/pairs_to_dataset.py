@@ -254,19 +254,20 @@ else:
     }
     st.code(tomlkit.dumps(data), 'toml')
 
-    if 'excluded' in pairs[prl]:
-        st.session_state['excluded'] = pairs[prl]['excluded']
-    excluded = st.multiselect('排除理由', ['骨折'], accept_new_options=True, key='excluded')
+    with st.form('submit'):
+        if 'excluded' in pairs[prl] and 'excluded' not in st.session_state:
+            st.session_state['excluded'] = pairs[prl]['excluded']
+        excluded = st.multiselect('是否排除', ['配准差', '骨折'], accept_new_options=True, key='excluded')
 
-    if st.button('提交（覆盖）' if 'post_xform' in pairs[prl] else '提交'):
-        data = {**pairs[prl], **data}
-        if len(excluded):
-            data.update({'excluded': excluded})
-        data = tomlkit.dumps(data).encode('utf-8')
-        client.put_object('pair', '/'.join([pid, rl, 'align.toml']), BytesIO(data), len(data))
+        if st.form_submit_button('提交（覆盖）' if 'post_xform' in pairs[prl] else '提交'):
+            data = {**pairs[prl], **data}
+            if len(excluded):
+                data.update({'excluded': excluded})
+            data = tomlkit.dumps(data).encode('utf-8')
+            client.put_object('pair', '/'.join([pid, rl, 'align.toml']), BytesIO(data), len(data))
 
-        st.session_state.clear()
-        st.rerun()
+            st.session_state.clear()
+            st.rerun()
 
     with st.spinner(_ := '场景', show_time=True):  # noqa
         b = np.array(post_mesh.bounds)

@@ -135,15 +135,16 @@ else:
 
     options = {f'[{i}]': i for i, t in enumerate(series)}
     if len(pairs):
+        st.code(tomlkit.dumps(pairs), 'toml')
+
         ls = [_[-1] for _ in series]
         for prl in pairs:
             pid, rl = prl.split('_')
             pre = ls.index(pairs[prl]['pre'])
             post = ls.index(pairs[prl]['post'])
             pre, post = [f'[{_}]' for _ in (pre, post)]
-            if pre in options and post in options:
+            if pre in options and post in options and f'select_{rl}' not in st.session_state:
                 st.session_state[f'select_{rl}'] = (pre, post)
-        st.code(tomlkit.dumps(pairs), 'toml')
 
     with st.form('submit'):
         rl = st.columns(2)
