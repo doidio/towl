@@ -4,7 +4,6 @@ import argparse
 import tempfile
 from io import BytesIO
 from pathlib import Path
-from random import choice
 
 import itk
 import numpy as np
@@ -28,7 +27,6 @@ if (it := st.session_state.get('init')) is None:
     with st.spinner('初始化', show_time=True):  # noqa
         parser = argparse.ArgumentParser()
         parser.add_argument('--config', required=True)
-        parser.add_argument('--pairs', required=True)
         args = parser.parse_args()
 
         cfg_path = Path(args.config)
@@ -36,11 +34,11 @@ if (it := st.session_state.get('init')) is None:
         client = Minio(**cfg['minio']['client'])
 
         pairs = {}
-        for pid in client.list_objects('pair', recursive=True):
-            if not pid.object_name.endswith('.nii.gz'):
+        for _ in client.list_objects('pair', recursive=True):
+            if not _.object_name.endswith('.nii.gz'):
                 continue
 
-            pid, rl, op, nii = pid.object_name.split('/')
+            pid, rl, op, nii = _.object_name.split('/')
             prl = f'{pid}_{rl}'
             if prl not in pairs:
                 pairs[prl] = {'prl': prl}
@@ -65,9 +63,11 @@ elif (it := st.session_state.get('prl')) is None:
     st.progress(_ := dn / (dn + ud), text=f'{100 * _:.2f}%')
     st.metric('progress', f'{dn} / {dn + ud}', label_visibility='collapsed')
 
-    if st.button('随机一个'):
-        prl = choice(list(pairs.keys()))
-        st.session_state['prl_input'] = prl
+    if st.button('下一个'):
+        for prl in pairs:
+            if 'post_xform' not in pairs[prl]:
+                st.session_state['prl_input'] = prl
+                break
 
     prl = st.text_input('PatientID_RL', key='prl_input')
     if prl in pairs:
@@ -254,14 +254,18 @@ else:
     }
     st.code(tomlkit.dumps(data), 'toml')
 
-    if st.button('提交'):
+    if 'excluded' in pairs[prl]:
+        st.session_state['excluded'] = pairs[prl]['excluded']
+    excluded = st.multiselect('排除理由', ['骨折'], accept_new_options=True, key='excluded')
+
+    if st.button('提交（覆盖）' if 'post_xform' in pairs[prl] else '提交'):
         data = {**pairs[prl], **data}
+        if len(excluded):
+            data.update({'excluded': excluded})
         data = tomlkit.dumps(data).encode('utf-8')
         client.put_object('pair', '/'.join([pid, rl, 'align.toml']), BytesIO(data), len(data))
 
-        for _ in list(st.session_state.keys()):
-            del st.session_state[_]
-
+        st.session_state.clear()
         st.rerun()
 
     with st.spinner(_ := '场景', show_time=True):  # noqa
