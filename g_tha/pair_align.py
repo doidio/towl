@@ -18,8 +18,8 @@ from stpyvista.panel_backend import PanelVTKKwargs
 
 from kernel import diff_dmc, compute_sdf, icp
 
-st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed', layout='centered')
-st.markdown('### 全髋关节置换术前术后配准')
+st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed', layout='wide')
+st.markdown('### G-THA 术前术后配准')
 
 ct_bone, ct_metal = 220, 2700
 
@@ -39,6 +39,10 @@ if (it := st.session_state.get('init')) is None:
                 continue
 
             pid, rl, op, nii = _.object_name.split('/')
+
+            if op not in ('pre', 'post'):
+                continue
+
             prl = f'{pid}_{rl}'
             if prl not in pairs:
                 pairs[prl] = {'prl': prl}
@@ -168,170 +172,174 @@ else:
     pid, rl = prl.split('_')
     roi_images, sizes, spacings, image_bgs, bone_meshes, metal_meshes = st.session_state['roi']
 
-    st.code(f'股骨阈值 = {ct_bone}  金属阈值 = {ct_metal}')
-    st.code(tomlkit.dumps(pairs[prl]), 'toml')
+    col_l, col_r = st.columns(2)
 
-    st.info('术后（绿）指定区域（浅绿）采样点（深红）配准到术前（浅黄）')
+    with col_l:
+        st.code(f'股骨阈值 = {ct_bone}  金属阈值 = {ct_metal}')
+        st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
-    zl = [round(_.bounds[1][0] - _.bounds[0][0]) for _ in bone_meshes]
+        st.info('术后（绿）指定区域（浅绿）采样点（深红）配准到术前（浅黄）')
 
-    d_proximal = st.number_input(
-        f'近端截除 (0 ~ {zl[1]:.0f} mm)', 0, _ := zl[1], pairs[prl].get('d_proximal', 15), step=5,
-        help='截除术后比术前多余的近端特征，或截除术后到大粗隆顶端', key='d_proximal',
-    )
+        zl = [round(_.bounds[1][0] - _.bounds[0][0]) for _ in bone_meshes]
 
-    with st.spinner(_ := '裁剪', show_time=True):  # noqa
-        post_mesh: trimesh.Trimesh = bone_meshes[1].copy()
-
-        if d_proximal > 0 or zl[0] < zl[1]:
-            z_max = post_mesh.bounds[1][0] - d_proximal
-            z_min = z_max - zl[0]
-
-            z = post_mesh.vertices[:, 0]
-            mask = (z_min <= z) & (z <= z_max)
-            post_mesh.update_faces(np.all(mask[post_mesh.faces], axis=1))
-            post_mesh.remove_unreferenced_vertices()
-
-            mask = ~mask
-            post_mesh_outlier = bone_meshes[1].copy()
-            post_mesh_outlier.update_faces(np.all(mask[post_mesh_outlier.faces], axis=1))
-            post_mesh_outlier.remove_unreferenced_vertices()
-        else:
-            post_mesh_outlier = None
-
-    zl.append(round(post_mesh.bounds[1][0] - post_mesh.bounds[0][0]))
-    _min, _max = d_proximal, d_proximal + min(zl[0], zl[2])
-
-    d_sample_range = st.slider(
-        f'采样点范围 ({_min} ~ {_max} mm)', _min, _max, pairs[prl].get('d_sample_range', (_min, _max)), step=1,
-        help='近端 ~ 远端', key='d_sample_range',
-    )
-
-    # 配准术后到术前，配准特征点尽量远离金属，但术后过短则不得不接近金属
-    d_metal = st.number_input('采样点远离金属 (0 ~ 50 mm)', 0, 50, pairs[prl].get('d_metal', 5), step=5, key='d_metal')
-
-    with st.spinner(_ := '采样', show_time=True):  # noqa
-        metal = wp.Mesh(wp.array(metal_meshes[1].vertices, wp.vec3),
-                        wp.array(metal_meshes[1].faces.flatten(), wp.int32))
-        d = wp.zeros((len(post_mesh.vertices),), float)
-        max_dist = np.linalg.norm(sizes[1] * spacings[1])
-        wp.launch(compute_sdf, d.shape, [
-            wp.uint64(metal.id), wp.array1d(post_mesh.vertices, wp.vec3), d, max_dist,
-        ])
-        d = d.numpy()
-
-        z0 = post_mesh.bounds[1][0] - post_mesh.vertices[:, 0]
-
-        _ = d - d_metal
-        _ = np.clip(_, 0, max(d_metal, 1e-6))
-        _ *= (d_sample_range[0] - d_proximal <= z0) & (z0 <= d_sample_range[1] - d_proximal)
-
-        if (n := min(int(np.sum(_ > 0)), 10000)) < 100:
-            st.error(f'采样点过少 {n}')
-            st.stop()
-
-        _ = _ / _.sum()
-
-        _ = np.random.choice(len(post_mesh.vertices), size=n, replace=False, p=_)
-        vertices = post_mesh.vertices[_]
-
-    with st.spinner(_ := '配准', show_time=True):  # noqa
-        matrix = np.identity(4)
-        matrix[0, 3] = bone_meshes[0].bounds[1][0] - post_mesh.bounds[1][0]
-        matrix, _, mse, iters = icp(
-            vertices, bone_meshes[0], matrix, 1e-5, 2000,
-            **dict(reflection=False, scale=False),
+        d_proximal = st.number_input(
+            f'近端截除 (0 ~ {zl[1]:.0f} mm)', 0, _ := zl[1], pairs[prl].get('d_proximal', 15), step=5,
+            help='截除术后比术前多余的近端特征，或截除术后到大粗隆顶端', key='d_proximal',
         )
 
-    data = {
-        'post_xform': np.array(wp.transform_from_matrix(wp.mat44(matrix)), dtype=float).tolist(),
-        'post_points': n,
-        'iterations': iters,
-        'mse': mse,
-        'd_proximal': d_proximal,
-        'd_sample_range': d_sample_range,
-        'd_metal': d_metal,
-    }
-    st.code(tomlkit.dumps(data), 'toml')
+        with st.spinner(_ := '裁剪', show_time=True):  # noqa
+            post_mesh: trimesh.Trimesh = bone_meshes[1].copy()
 
-    with st.form('submit'):
-        if 'excluded' in pairs[prl] and 'excluded' not in st.session_state:
-            st.session_state['excluded'] = pairs[prl]['excluded']
-        excluded = st.multiselect('是否排除', ['配准差', '骨折'], accept_new_options=True, key='excluded')
+            if d_proximal > 0 or zl[0] < zl[1]:
+                z_max = post_mesh.bounds[1][0] - d_proximal
+                z_min = z_max - zl[0]
 
-        if st.form_submit_button('提交（覆盖）' if 'post_xform' in pairs[prl] else '提交'):
-            data = {**pairs[prl], **data}
-            if len(excluded):
-                data.update({'excluded': excluded})
-            data = tomlkit.dumps(data).encode('utf-8')
-            client.put_object('pair', '/'.join([pid, rl, 'align.toml']), BytesIO(data), len(data))
+                z = post_mesh.vertices[:, 0]
+                mask = (z_min <= z) & (z <= z_max)
+                post_mesh.update_faces(np.all(mask[post_mesh.faces], axis=1))
+                post_mesh.remove_unreferenced_vertices()
 
-            st.session_state.clear()
-            st.rerun()
+                mask = ~mask
+                post_mesh_outlier = bone_meshes[1].copy()
+                post_mesh_outlier.update_faces(np.all(mask[post_mesh_outlier.faces], axis=1))
+                post_mesh_outlier.remove_unreferenced_vertices()
+            else:
+                post_mesh_outlier = None
 
-    with st.spinner(_ := '场景', show_time=True):  # noqa
-        b = np.array(post_mesh.bounds)
-        b[1][0] += d_proximal
+        zl.append(round(post_mesh.bounds[1][0] - post_mesh.bounds[0][0]))
+        _min, _max = d_proximal, d_proximal + min(zl[0], zl[2])
 
-        z, y, x = [b[1][_] - b[0][_] for _ in (0, 1, 2)]
-        h, wy, wx = [round(_ * 5) for _ in (z, y, x)]
-
-        pl = pv.Plotter(
-            off_screen=True, border=False, window_size=[max(wy, wx), h],
-            line_smoothing=True, point_smoothing=True, polygon_smoothing=True,
+        d_sample_range = st.slider(
+            f'采样点范围 ({_min} ~ {_max} mm)', _min, _max, pairs[prl].get('d_sample_range', (_min, _max)), step=1,
+            help='近端 ~ 远端', key='d_sample_range',
         )
-        pl.enable_parallel_projection()
-        pl.enable_depth_peeling()
-        pl.enable_anti_aliasing('msaa')
 
-        metal_actor = pl.add_mesh(metal_meshes[1], color='lightblue')
+        # 配准术后到术前，配准特征点尽量远离金属，但术后过短则不得不接近金属
+        d_metal = st.number_input('采样点远离金属 (0 ~ 50 mm)', 0, 50, pairs[prl].get('d_metal', 5), step=5, key='d_metal')
 
-        if post_mesh_outlier is not None and len(post_mesh_outlier.faces):
-            pl.add_mesh(post_mesh_outlier, color='green')
-        pl.add_mesh(post_mesh, color='lightgreen')  # noqa
+        with st.spinner(_ := '采样', show_time=True):  # noqa
+            metal = wp.Mesh(wp.array(metal_meshes[1].vertices, wp.vec3),
+                            wp.array(metal_meshes[1].faces.flatten(), wp.int32))
+            d = wp.zeros((len(post_mesh.vertices),), float)
+            max_dist = np.linalg.norm(sizes[1] * spacings[1])
+            wp.launch(compute_sdf, d.shape, [
+                wp.uint64(metal.id), wp.array1d(post_mesh.vertices, wp.vec3), d, max_dist,
+            ])
+            d = d.numpy()
 
-        pre_mesh: trimesh.Trimesh = bone_meshes[0].copy()
-        pre_mesh.apply_transform(np.linalg.inv(matrix))
-        pl.add_mesh(pre_mesh, color='lightyellow')  # noqa
-        pl.add_points(vertices, color='crimson', render_points_as_spheres=True, point_size=3)
+            z0 = post_mesh.bounds[1][0] - post_mesh.vertices[:, 0]
 
-        pl.camera_position = 'zx'
-        pl.reset_camera(bounds=b.T.flatten())
-        pl.camera.parallel_scale = (b[1][0] - b[0][0]) * 0.6
-        pl.reset_camera_clipping_range()
-        pl.render()
+            _ = d - d_metal
+            _ = np.clip(_, 0, max(d_metal, 1e-6))
+            _ *= (d_sample_range[0] - d_proximal <= z0) & (z0 <= d_sample_range[1] - d_proximal)
 
-    if st.radio('plot', _ := ['2D 截图', '3D 场景'], horizontal=True, label_visibility='collapsed') == _[1]:
-        with st.spinner(_ := '同步', show_time=True):  # noqa
-            stpyvista(pl, panel_kwargs=PanelVTKKwargs(orientation_widget=True))
-    else:
-        sil = pl.add_silhouette(metal_actor.GetMapper().GetInput(), color='lightgray')  # noqa
+            if (n := min(int(np.sum(_ > 0)), 10000)) < 100:
+                st.error(f'采样点过少 {n}')
+                st.stop()
 
-        cols = []
-        for i, deg in enumerate([0, 90 if rl == 'R' else -90]):
-            [pl.actors[_].SetVisibility(False) for _ in pl.actors].clear()
-            sil.SetVisibility(True)
+            _ = _ / _.sum()
 
-            pl.window_size = [[wx, wy][i], h]
+            _ = np.random.choice(len(post_mesh.vertices), size=n, replace=False, p=_)
+            vertices = post_mesh.vertices[_]
+
+        with st.spinner(_ := '配准', show_time=True):  # noqa
+            matrix = np.identity(4)
+            matrix[0, 3] = bone_meshes[0].bounds[1][0] - post_mesh.bounds[1][0]
+            matrix, _, mse, iters = icp(
+                vertices, bone_meshes[0], matrix, 1e-5, 2000,
+                **dict(reflection=False, scale=False),
+            )
+
+        data = {
+            'post_xform': np.array(wp.transform_from_matrix(wp.mat44(matrix)), dtype=float).tolist(),
+            'post_points': n,
+            'iterations': iters,
+            'mse': mse,
+            'd_proximal': d_proximal,
+            'd_sample_range': d_sample_range,
+            'd_metal': d_metal,
+        }
+        st.code(tomlkit.dumps(data), 'toml')
+
+        with st.form('submit'):
+            if 'excluded' in pairs[prl] and 'excluded' not in st.session_state:
+                st.session_state['excluded'] = pairs[prl]['excluded']
+            excluded = st.multiselect('是否排除', ['配准差', '小转子下骨折', '小转子下截骨'], accept_new_options=True, key='excluded')
+
+            if st.form_submit_button('提交（覆盖）' if 'post_xform' in pairs[prl] else '提交'):
+                data = {**pairs[prl], **data}
+                if len(excluded):
+                    data.update({'excluded': excluded})
+                data = tomlkit.dumps(data).encode('utf-8')
+                client.put_object('pair', '/'.join([pid, rl, 'align.toml']), BytesIO(data), len(data))
+
+                st.session_state.clear()
+                st.rerun()
+
+    with col_r:
+        with st.spinner(_ := '场景', show_time=True):  # noqa
+            b = np.array(post_mesh.bounds)
+            b[1][0] += d_proximal
+
+            z, y, x = [b[1][_] - b[0][_] for _ in (0, 1, 2)]
+            h, wy, wx = [round(_ * 5) for _ in (z, y, x)]
+
+            pl = pv.Plotter(
+                off_screen=True, border=False, window_size=[768, 768],
+                line_smoothing=True, point_smoothing=True, polygon_smoothing=True,
+            )
+            pl.enable_parallel_projection()
+            pl.enable_depth_peeling()
+            pl.enable_anti_aliasing('msaa')
+
+            metal_actor = pl.add_mesh(metal_meshes[1], color='lightblue')
+
+            if post_mesh_outlier is not None and len(post_mesh_outlier.faces):
+                pl.add_mesh(post_mesh_outlier, color='green')
+            pl.add_mesh(post_mesh, color='lightgreen')  # noqa
+
+            pre_mesh: trimesh.Trimesh = bone_meshes[0].copy()
+            pre_mesh.apply_transform(np.linalg.inv(matrix))
+            pl.add_mesh(pre_mesh, color='lightyellow')  # noqa
+            pl.add_points(vertices, color='crimson', render_points_as_spheres=True, point_size=3)
 
             pl.camera_position = 'zx'
             pl.reset_camera(bounds=b.T.flatten())
-            pl.camera.Azimuth(deg)
             pl.camera.parallel_scale = (b[1][0] - b[0][0]) * 0.6
             pl.reset_camera_clipping_range()
             pl.render()
-            a = pl.screenshot(return_img=True).copy()
 
-            [pl.actors[_].SetVisibility(True) for _ in pl.actors].clear()
+        if st.radio('plot', _ := ['2D 截图', '3D 场景'], horizontal=True, label_visibility='collapsed') == _[1]:
+            with st.spinner(_ := '同步', show_time=True):  # noqa
+                stpyvista(pl, panel_kwargs=PanelVTKKwargs(orientation_widget=True))
+        else:
+            sil = pl.add_silhouette(metal_actor.GetMapper().GetInput(), color='lightgray')  # noqa
 
-            pl.reset_camera_clipping_range()
-            pl.render()
-            c = pl.screenshot(return_img=True).copy()
+            cols = []
+            for i, deg in enumerate([0, 90 if rl == 'R' else -90]):
+                [pl.actors[_].SetVisibility(False) for _ in pl.actors].clear()
+                sil.SetVisibility(True)
 
-            mask = (a != pl.background_color.int_rgb).any(axis=-1)
-            c[mask] = a[mask]
-            cols.append(c)
+                pl.window_size = [[wx, wy][i], h]
 
-        st.image(np.hstack(cols))
+                pl.camera_position = 'zx'
+                pl.reset_camera(bounds=b.T.flatten())
+                pl.camera.Azimuth(deg)
+                pl.camera.parallel_scale = (b[1][0] - b[0][0]) * 0.6
+                pl.reset_camera_clipping_range()
+                pl.render()
+                a = pl.screenshot(return_img=True).copy()
 
-    pl.close()
+                [pl.actors[_].SetVisibility(True) for _ in pl.actors].clear()
+
+                pl.reset_camera_clipping_range()
+                pl.render()
+                c = pl.screenshot(return_img=True).copy()
+
+                mask = (a != pl.background_color.int_rgb).any(axis=-1)
+                c[mask] = a[mask]
+                cols.append(c)
+
+            st.image(np.hstack(cols))
+
+        pl.close()

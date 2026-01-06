@@ -1,9 +1,12 @@
-from typing import Dict
+from typing import Dict, Literal
 
+import cv2
 import numpy as np
 import pyvista as pv
 import trimesh
 import warp as wp
+from chainner_ext import resize, ResizeFilter
+from matplotlib import cm
 
 wp.config.quiet = True
 
@@ -203,6 +206,36 @@ def icp(a, b, initial=None, threshold=1e-5, max_iterations=20, **kwargs):
 trimesh_monkey_patch()
 
 
+def fast_drr(a, ax, th=(0, 900), mode: Literal['mean', 'max'] = 'mean'):
+    a = a.copy()
+    c = th[0] <= a
+    a *= c
+    if mode == 'mean':
+        a = a.sum(axis=ax)
+        c = np.sum(c, axis=ax)
+        c[np.where(c <= 0)] = 1
+        a = a / c
+    elif mode == 'max':
+        a = a.max(axis=ax)
+
+    sm = cm.ScalarMappable(cmap='grey')
+    sm.set_clim(th)
+    a = sm.to_rgba(a, bytes=True)
+
+    return a[:, :, :3].copy()
+
+
+def resize_uint8(img, shape):
+    img = img.astype(np.float32) / 255.0
+    img = resize(img, tuple(round(_) for _ in reversed(shape)), ResizeFilter.CubicMitchell, False)
+    img = (np.clip(img, 0.0, 1.0) * 255.0).astype(np.uint8)
+    return img
+
+
+def cv2_line(img, p0, p1, color, thickness=1):
+    cv2.line(img, p0[::-1], p1[::-1], color, thickness)
+
+
 @wp.kernel
 def compute_sdf(
         mesh: wp.uint64, vertices: wp.array1d(dtype=wp.vec3),
@@ -218,115 +251,185 @@ def compute_sdf(
     sdf[i] = d
 
 
-def winding_volume(mesh: trimesh.Trimesh, spacing: float, bounds: list, winding: float = 0.5):
-    length = bounds[1] - bounds[0]
-    size = (length / spacing).astype(int)
-    size = np.max([size, [1, 1, 1]], axis=0)
-    max_dist = np.linalg.norm(bounds[1] - bounds[0])
+@wp.kernel
+def compose_op(
+        image_a: wp.array3d(dtype=float), image_b: wp.array3d(dtype=float), image_c: wp.array3d(dtype=float),
+        xform_a: wp.transform, volume_b: wp.uint64, spacing_a: wp.vec3, spacing_b: wp.vec3,
+        ct_bone: float, ct_metal: float, swap: bool,
+):
+    i, j, k = wp.tid()
+    a = image_a[i, j, k]
 
-    mesh = wp.Mesh(wp.array(mesh.vertices, wp.vec3), wp.array(mesh.faces.flatten(), wp.int32), None, True)
-    volume = wp.empty(shape=(*size,), dtype=wp.float32)
+    pa = wp.cw_mul(spacing_a, wp.vec3(wp.float32(i), wp.float32(j), wp.float32(k)))
+    pb = wp.transform_point(xform_a, pa)
 
-    wp.launch(mesh_winding_volume, volume.shape, [
-        mesh.id, volume, wp.vec3(wp.float32(spacing)),
-        wp.vec3(bounds[0]), max_dist, winding,
-    ])
+    uvw = wp.cw_div(pb, spacing_b)
+    b = wp.volume_sample_f(volume_b, uvw, wp.Volume.LINEAR)
 
-    return volume
+    image_b[i, j, k] = b
+
+    if swap:
+        a, b = b, a
+
+    image_c[i, j, k] = b if b > ct_metal else wp.min(a, ct_metal)
 
 
 @wp.kernel
-def mesh_winding_volume(
-        mesh: wp.uint64, array: wp.array(dtype=wp.float32, ndim=3),
-        spacing: wp.vec3, origin: wp.vec3,
-        max_dist: wp.float32, threshold: wp.float32,
+def contact_drr(
+        image_a: wp.array3d(dtype=float), image_b: wp.array3d(dtype=float),
+        image_3: wp.array3d(dtype=float), image_2: wp.array2d(dtype=wp.vec3ub),
+        ct_bone: float, ct_metal: float, ct_bg: float, ct_min: float, ct_width: float,
+        ax: int, swap: bool, reverse: bool,
 ):
-    """计算网格的卷绕密度，适用于不封闭网格"""
-    i, j, k = wp.tid()
+    i, j = wp.tid()
 
-    p = origin
-    p += wp.cw_mul(spacing, wp.vec3(wp.float32(i), wp.float32(j), wp.float32(k)))
+    end = image_a.shape[ax]
+    gap_to_metal = float(0.0)
+    gap_to_bone = float(0.0)
+    metal = bool(False)
+    bone = bool(False)
+    add = float(0.0)
+    count = float(0.0)
 
-    q = wp.mesh_query_point_sign_winding_number(
-        mesh, p, max_dist, wp.float32(2.0), threshold,
+    for k in range(end):
+        if reverse:
+            k = end - 1 - k
+
+        if ax == 1:
+            _ = wp.vec3i(i, k, j)
+        elif ax == 2:
+            _ = wp.vec3i(i, j, k)
+        else:
+            _ = wp.vec3i(k, i, j)
+
+        a = image_a[_[0], _[1], _[2]]
+        b = image_b[_[0], _[1], _[2]]
+
+        if swap:
+            a, b = b, a
+
+        if b > ct_metal:  # 假体
+            metal = True
+        elif a > ct_bone:  # 骨
+            if not metal:
+                gap_to_metal = 0.0
+            else:
+                bone = True
+        else:  # 间隙
+            if not metal:
+                gap_to_metal += 1.0
+            elif not bone:
+                gap_to_bone += 1.0
+
+        _3 = image_3[_[0], _[1], _[2]]
+        if _3 > ct_min:
+            add += _3
+            count += 1.0
+
+    if count > 0.0:
+        grey = add / count
+    else:
+        grey = ct_bg
+
+    grey = 255.0 * (grey - ct_min) / ct_width
+    grey = wp.clamp(grey, 0.0, 255.0)
+
+    if metal:
+        if gap_to_metal == gap_to_bone:
+            r, g, b = 0.0, 255.0, 255.0
+        elif gap_to_metal < gap_to_bone:
+            r, g, b = 0.0, 0.0, 255.0
+        else:
+            r, g, b = 0.0, 255.0, 0.0
+
+        if wp.min(gap_to_metal, gap_to_bone) > 1:
+            r, g, b = grey, grey, grey
+
+        image_2[i, j] = wp.vec3ub(wp.uint8(r), wp.uint8(g), wp.uint8(b))
+    else:
+        image_2[i, j] = wp.vec3ub(wp.uint8(grey), wp.uint8(grey), wp.uint8(grey))
+
+
+@wp.kernel
+def contact_drr_ml(
+        image_a: wp.array3d(dtype=float), image_b: wp.array3d(dtype=float),
+        image_3: wp.array3d(dtype=float), image_2: wp.array2d(dtype=wp.vec3ub),
+        ct_bone: float, ct_metal: float, ct_bg: float, ct_min: float, ct_width: float, swap: bool, reverse: bool,
+):
+    i, j = wp.tid()
+
+    end = image_a.shape[2]
+    add = float(0.0)
+    count = float(0.0)
+
+    for k in range(end):
+        if reverse:
+            k = end - 1 - k
+
+        a = image_a[i, j, k]
+        b = image_b[i, j, k]
+
+        if swap:
+            a, b = b, a
+
+        if image_3[i, j, k] > ct_min:
+            add += image_3[i, j, k]
+            count += 1.0
+
+    if count > 0.0:
+        rgb = add / count
+    else:
+        rgb = ct_bg
+
+    rgb = 255.0 * (rgb - ct_min) / ct_width
+    rgb = wp.clamp(rgb, 0.0, 255.0)
+
+    image_2[i, j] = wp.vec3ub(wp.uint8(rgb), wp.uint8(rgb), wp.uint8(rgb))
+
+
+@wp.kernel
+def flatten_drr(
+        image: wp.array2d(dtype=wp.vec3ub), spacing: wp.float32, start: wp.vec3, to: wp.vec3, depth: float,
+        volume_a: wp.uint64, xform_a: wp.transform, volume_b: wp.uint64, spacing_a: wp.vec3, spacing_b: wp.vec3,
+        ct_bone: float, ct_metal: float, swap: bool,
+):
+    i, j = wp.tid()
+
+    r = spacing * wp.vec3(
+        wp.float32(0),
+        wp.float32(i) - wp.float32(image.shape[0]) / 2.0,
+        wp.float32(j) - wp.float32(image.shape[1]) / 2.0,
     )
 
-    closest = wp.mesh_eval_position(mesh, q.face, q.u, q.v)
+    center = wp.length(r) * to + start
 
-    d = -q.sign * wp.length(p - closest)
+    r = wp.normalize(r)
 
-    array[i, j, k] = d
+    intersect, gap, step = float(0.0), float(0.0), 0.1
+    for _ in range(1, int(depth / step) + 1):
+        pa = center + wp.float32(_) * r * step
+        uvw = wp.cw_div(pa, spacing_a)
+        a = wp.volume_sample_f(volume_a, uvw, wp.Volume.LINEAR)
 
+        pb = wp.transform_point(xform_a, pa)
+        uvw = wp.cw_div(pb, spacing_b)
+        b = wp.volume_sample_f(volume_b, uvw, wp.Volume.LINEAR)
 
-@wp.kernel
-def extract_outlier_faces(
-        mesh: wp.uint64, vertices: wp.array1d(dtype=wp.vec3),
-        faces: wp.array1d(dtype=wp.vec3i), face_normals: wp.array1d(dtype=wp.vec3),
-        mask: wp.array1d(dtype=wp.bool), max_dist: wp.float32,
-):
-    i = wp.tid()
+        if swap:
+            a, b = b, a
 
-    p0 = vertices[faces[i][0]]
-    p1 = vertices[faces[i][1]]
-    p2 = vertices[faces[i][2]]
-    face_center = (p0 + p1 + p2) / 3.0
+        if b >= ct_metal:
+            if a >= ct_bone:  # 术前骨 -> 术后有假体 = 磨锉
+                intersect += step
+        elif a < ct_bone:  # 术前腔 -> 术后无假体 = 间隙
+            gap += step
+        else:  # 术前骨 -> 术后无假体 = 接触
+            break
 
-    n = wp.normalize(face_normals[i])
-    q = wp.mesh_query_ray(mesh, face_center + n * 1e-6, n, max_dist)
-    if q.result:
-        mask[i] = False
-
-
-@wp.kernel
-def compare_loss(
-        volume_a: wp.uint64, spacing_a: wp.vec3,
-        volume_b: wp.uint64, spacing_b: wp.vec3,
-        hu_bone: float, hu_metal: float,
-        pos: wp.array1d(dtype=wp.vec3), rot: wp.array1d(dtype=wp.quat),
-        loss: wp.array1d(dtype=float), count: wp.array1d(dtype=float),
-):
-    i, j, k = wp.tid()
-
-    # 术前图像直接取值
-    uvw_a = wp.vec3(wp.float32(i), wp.float32(j), wp.float32(k))
-    grad_a = wp.vec3()
-    voxel_a = wp.volume_sample_grad_f(volume_a, uvw_a, wp.Volume.LINEAR, grad_a)
-
-    # 仅比较介于骨与金属之间的体素
-    if voxel_a < hu_bone:
-        return
-
-    # 术后图像经过配准变换插值
-    p_a = wp.cw_mul(spacing_a, uvw_a)
-    p_b = wp.transform_point(wp.transform(pos[0], rot[0]), p_a)
-    uvw_b = wp.cw_div(p_b, spacing_b)
-    grad_b = wp.vec3()
-    voxel_b = wp.volume_sample_grad_f(volume_b, uvw_b, wp.Volume.LINEAR, grad_b)
-
-    # 仅比较介于骨与金属之间的体素
-    if voxel_b > hu_metal:
-        return
-
-    # 累计值差异
-    diff = wp.abs(voxel_a - voxel_b)
-
-    # 累计梯度方向差异
-    grad_a = wp.normalize(grad_a)
-    grad_b = wp.normalize(grad_b)
-    cos = wp.dot(grad_a, grad_b)
-    cos = 1.0 - wp.clamp(cos, -1.0, 1.0)
-
-    loss[0] += cos
-    count[0] += 1.0
-
-
-@wp.kernel
-def average_loss(loss: wp.array1d(dtype=float), count: wp.array1d(dtype=float)):
-    i = wp.tid()
-    loss[i] /= count[i]
-
-
-@wp.kernel
-def normalize_quat(x: wp.array(dtype=wp.quat)):
-    i = wp.tid()
-    x[i] = wp.normalize(x[i])
+    value = -intersect if intersect > 0.0 else gap
+    value = wp.clamp(value * 3.0, -depth, depth)
+    image[i, j] = wp.vec3ub(
+        wp.uint8(0), wp.uint8(0), wp.uint8(255.0 * value / depth),
+    ) if value >= 0.0 else wp.vec3ub(
+        wp.uint8(255.0 * -value / depth), wp.uint8(0), wp.uint8(0),
+    )

@@ -7,12 +7,14 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
+    "chainner-ext>=0.3.10",
     "diso>=0.1.4",
     "itk>=5.4.4.post1",
     "matplotlib>=3.10.7",
     "minio>=7.2.18",
     "monai-generative>=0.2.3",
     "monai[lpips]>=1.5.1",
+    "opencv-python>=4.11.0.86",
     "py-cpuinfo>=9.0.0",
     "pydicom>=3.0.1",
     "pyvista>=0.46.4",

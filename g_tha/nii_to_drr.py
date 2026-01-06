@@ -11,31 +11,12 @@ import numpy as np
 import pydicom
 import tomlkit
 from PIL import Image
-from matplotlib import cm
 from minio import Minio
 from tqdm import tqdm
 
+from kernel import fast_drr
+
 locale.setlocale(locale.LC_ALL, 'zh_CN.UTF-8')
-
-th = (0, 800)
-
-
-def _drr(a, axis):
-    a = a.copy()
-    c = th[0] <= a
-    a = (a * c).sum(axis=axis)
-    c = np.sum(c, axis=axis)
-    c[np.where(c <= 0)] = 1
-    a = a / c
-
-    sm = cm.ScalarMappable(cmap='grey')
-    sm.set_clim(th)
-    a = sm.to_rgba(a, bytes=True)
-
-    if axis in (1, 2):
-        a = np.flipud(a)
-
-    return a
 
 
 def main(cfg_path: str, done: str, nii_name: str):
@@ -88,7 +69,7 @@ def main(cfg_path: str, done: str, nii_name: str):
 
         try:
             for _ in range(2):
-                x = _drr(image, _)
+                x = fast_drr(image, _)
                 x = Image.fromarray(x).resize([(l[0], l[1]), (l[0], l[2])][_])
 
                 name = nii_name + '/' + ['axial', 'coronal'][_] + '.png'

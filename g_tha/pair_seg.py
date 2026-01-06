@@ -23,6 +23,9 @@ def main(cfg_path: str):
 
         pid, rl, op, nii = _.object_name.split('/')
 
+        if op not in ('pre', 'post'):
+            continue
+
         try:
             client.stat_object('nii', _ := f'{pid}/{nii}')
         except S3Error:
@@ -59,7 +62,7 @@ def main(cfg_path: str):
                     print(object_name, bucket, 'done')
                     client.fput_object(bucket, object_name, label.as_posix())
                 else:
-                    print(object_name, bucket, 'error')
+                    warnings.warn(' '.join([object_name, bucket, 'error']))
 
 
 def seg(image_path: str, label_path: str, task: str):
