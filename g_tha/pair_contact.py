@@ -201,14 +201,14 @@ else:
                         stack = []
                         for _ in images:
                             img = fast_drr(_[z:z + 1], ax)
-                            cv2_line(img, p0, p1, (255, 0, 0), 2)
+                            # cv2_line(img, p0, p1, (255, 0, 0), 2)
                             stack.append(resize_uint8(img, np.array(spacing) * img.shape[:2] * 5))
 
                         img = np.hstack(stack)
                         if ax in (1, 2):
                             img = np.flipud(img)
-                        _ = ['近端', '远端'][i], ['术前', '术后'][a], ['术前', '术后'][b], '骨与假体融合'
-                        cols[ax].image(img, '{} ({}, {}, {})'.format(*_))
+                        _ = ['近端', '远端'][i], ['术前', '术后'][a], ['术前', '术后'][b], '融合'
+                        cols[ax].image(img, '{}：{}（左）{}（中）{}（右）'.format(*_))
                 else:
                     p0, p1 = proximal.copy(), distal.copy()
                     del p0[ax], p1[ax]
@@ -216,22 +216,20 @@ else:
                     stack = []
                     for _ in images:
                         img = fast_drr(_, ax)
-                        cv2_line(img, p0, p1, (255, 0, 0), 2)
-                        stack.append(resize_uint8(img, np.array(spacing) * img.shape[:2]))
+                        # cv2_line(img, p0, p1, (255, 0, 0), 2)
+                        stack.append(resize_uint8(img, np.array(spacing) * img.shape[:2] * 1.5))
 
                     img = np.hstack(stack)
                     if ax in (1, 2):
                         img = np.flipud(img)
-                    _ = ['轴位', '正位', '侧位'][ax], ['术前', '术后'][a], ['术前', '术后'][b], '骨与假体融合'
-                    cols[ax].image(img, '{} ({}, {}, {})'.format(*_))
+                    _ = ['轴位', '正位', '侧位'][ax], ['术前', '术后'][a], ['术前', '术后'][b], '融合'
+                    cols[ax].image(img, '{}：{} {} {}'.format(*_))
 
-            cols = st.columns(4, vertical_alignment='bottom')
+            cols = st.columns(3, vertical_alignment='top')
 
             # 正位/侧位接触
             th = 0.0, 900.0
-            for i in range(4):
-                ax = i % 2 + 1  # 前A后P内M外L
-
+            for ax in (1, 2):
                 p0, p1 = proximal.copy(), distal.copy()
                 del p0[ax], p1[ax]
 
@@ -246,16 +244,18 @@ else:
                     image_2 = wp.empty((*size,), wp.vec3ub)
                     wp.launch(contact_drr, image_2.shape, [
                         image_a, image_b, image_3, image_2,
-                        float(ct_bone), float(ct_metal), image_bgs[0], th[0], th[1] - th[0], ax, a > 0, i // 2 > 0,
+                        float(ct_bone), float(ct_metal), image_bgs[0], th[0], th[1] - th[0], ax, a > 0,
+                        wp.vec3i(proximal), wp.vec3i(distal),
                     ])
                     image_2 = image_2.numpy()
                     # cv2_line(image_2, p0, p1, (255, 0, 0), 2)
-                    stack.append(resize_uint8(image_2, np.array(spacing) * image_2.shape[:2]))
+                    stack.append(resize_uint8(image_2, np.array(spacing) * image_2.shape[:2] * 1.5))
 
                 img = np.hstack(stack)
                 if ax in (1, 2):
                     img = np.flipud(img)
-                _ = ['前方（A）', '内侧（M）', '后方（P）', '外侧（L）']
-                if rl == 'R':
-                    _[1], _[3] = _[3], _[1]
-                cols[i].image(img, _[i] + '接触')
+                if rl == 'L':
+                    _ = ['正位：内（蓝）外（绿）接触', '侧位：前（蓝）后（绿）接触']
+                else:
+                    _ = ['正位：内（绿）外（蓝）接触', '侧位：前（蓝）后（绿）接触']
+                cols[ax].image(img, _[ax - 1])

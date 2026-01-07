@@ -48,7 +48,10 @@ elif (it := st.session_state.get('pid')) is None:
         with st.spinner('下一个', show_time=True):  # noqa
             ud = st.session_state['pid_input'] = ud[0]
 
-    pid = st.text_input('PatientID_RL', key='pid_input')
+    pid = st.text_input('PatientID', key='pid_input')
+
+    if '_' in pid:
+        pid = pid.split('_')[0]
 
     if len(pid):
         pairs = {}

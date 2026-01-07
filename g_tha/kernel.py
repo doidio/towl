@@ -279,52 +279,55 @@ def contact_drr(
         image_a: wp.array3d(dtype=float), image_b: wp.array3d(dtype=float),
         image_3: wp.array3d(dtype=float), image_2: wp.array2d(dtype=wp.vec3ub),
         ct_bone: float, ct_metal: float, ct_bg: float, ct_min: float, ct_width: float,
-        ax: int, swap: bool, reverse: bool,
+        ax: int, swap: bool, proximal: wp.vec3i, distal: wp.vec3i,
 ):
     i, j = wp.tid()
 
     end = image_a.shape[ax]
-    gap_to_metal = float(0.0)
-    gap_to_bone = float(0.0)
-    metal = bool(False)
-    bone = bool(False)
     add = float(0.0)
     count = float(0.0)
+    count_ = wp.vec2()
 
     for k in range(end):
-        if reverse:
-            k = end - 1 - k
-
         if ax == 1:
-            _ = wp.vec3i(i, k, j)
+            ijk = wp.vec3i(i, wp.int32(k), j)
+            ax_ = 2
         elif ax == 2:
-            _ = wp.vec3i(i, j, k)
+            ijk = wp.vec3i(i, j, wp.int32(k))
+            ax_ = 1
         else:
-            _ = wp.vec3i(k, i, j)
+            ijk = wp.vec3i(wp.int32(k), i, j)
+            ax_ = 2
 
-        a = image_a[_[0], _[1], _[2]]
-        b = image_b[_[0], _[1], _[2]]
+        _3 = image_3[ijk[0], ijk[1], ijk[2]]
+        if _3 > ct_min:
+            add += _3
+            count += 1.0
+
+        if ijk[0] > proximal[0]:
+            continue
+
+        a = image_a[ijk[0], ijk[1], ijk[2]]
+        b = image_b[ijk[0], ijk[1], ijk[2]]
 
         if swap:
             a, b = b, a
 
-        if b > ct_metal:  # 假体
-            metal = True
-        elif a > ct_bone:  # 骨
-            if not metal:
-                gap_to_metal = 0.0
-            else:
-                bone = True
-        else:  # 间隙
-            if not metal:
-                gap_to_metal += 1.0
-            elif not bone:
-                gap_to_bone += 1.0
+        if a >= ct_bone and b < ct_metal:  # 原位是骨
+            for _ in range(2):
+                ijk_ = ijk
+                ijk_[ax_] += 1 if _ > 0 else -1
+                if ijk_[ax_] < 0 or ijk_[ax_] >= image_a.shape[ax_]:
+                    continue
 
-        _3 = image_3[_[0], _[1], _[2]]
-        if _3 > ct_min:
-            add += _3
-            count += 1.0
+                a_ = image_a[ijk_[0], ijk_[1], ijk_[2]]
+                b_ = image_b[ijk_[0], ijk_[1], ijk_[2]]
+
+                if swap:
+                    a_, b_ = b_, a_
+
+                if b_ >= ct_metal:  # 邻位有金属
+                    count_[_] += 1.0
 
     if count > 0.0:
         grey = add / count
@@ -334,102 +337,18 @@ def contact_drr(
     grey = 255.0 * (grey - ct_min) / ct_width
     grey = wp.clamp(grey, 0.0, 255.0)
 
-    if metal:
-        if gap_to_metal == gap_to_bone:
-            r, g, b = 0.0, 255.0, 255.0
-        elif gap_to_metal < gap_to_bone:
-            r, g, b = 0.0, 0.0, 255.0
-        else:
-            r, g, b = 0.0, 255.0, 0.0
-
-        if wp.min(gap_to_metal, gap_to_bone) > 1:
-            r, g, b = grey, grey, grey
-
-        image_2[i, j] = wp.vec3ub(wp.uint8(r), wp.uint8(g), wp.uint8(b))
+    if count_[0] > 1.0 and count_[1] > 1.0:
+        r, g, b = 0.0, 255.0, 255.0
+    elif count_[0] > 1.0:
+        r, g, b = 0.0, 255.0, 0.0
+    elif count_[1] > 1.0:
+        r, g, b = 0.0, 0.0, 255.0
+    elif count_[0] > 0.0:
+        r, g, b = 127.0, 255.0, 127.0
+    elif count_[1] > 0.0:
+        r, g, b = 0.0, 127.0, 255.0
     else:
-        image_2[i, j] = wp.vec3ub(wp.uint8(grey), wp.uint8(grey), wp.uint8(grey))
+        r, g, b = grey, grey, grey
 
+    image_2[i, j] = wp.vec3ub(wp.uint8(r), wp.uint8(g), wp.uint8(b))
 
-@wp.kernel
-def contact_drr_ml(
-        image_a: wp.array3d(dtype=float), image_b: wp.array3d(dtype=float),
-        image_3: wp.array3d(dtype=float), image_2: wp.array2d(dtype=wp.vec3ub),
-        ct_bone: float, ct_metal: float, ct_bg: float, ct_min: float, ct_width: float, swap: bool, reverse: bool,
-):
-    i, j = wp.tid()
-
-    end = image_a.shape[2]
-    add = float(0.0)
-    count = float(0.0)
-
-    for k in range(end):
-        if reverse:
-            k = end - 1 - k
-
-        a = image_a[i, j, k]
-        b = image_b[i, j, k]
-
-        if swap:
-            a, b = b, a
-
-        if image_3[i, j, k] > ct_min:
-            add += image_3[i, j, k]
-            count += 1.0
-
-    if count > 0.0:
-        rgb = add / count
-    else:
-        rgb = ct_bg
-
-    rgb = 255.0 * (rgb - ct_min) / ct_width
-    rgb = wp.clamp(rgb, 0.0, 255.0)
-
-    image_2[i, j] = wp.vec3ub(wp.uint8(rgb), wp.uint8(rgb), wp.uint8(rgb))
-
-
-@wp.kernel
-def flatten_drr(
-        image: wp.array2d(dtype=wp.vec3ub), spacing: wp.float32, start: wp.vec3, to: wp.vec3, depth: float,
-        volume_a: wp.uint64, xform_a: wp.transform, volume_b: wp.uint64, spacing_a: wp.vec3, spacing_b: wp.vec3,
-        ct_bone: float, ct_metal: float, swap: bool,
-):
-    i, j = wp.tid()
-
-    r = spacing * wp.vec3(
-        wp.float32(0),
-        wp.float32(i) - wp.float32(image.shape[0]) / 2.0,
-        wp.float32(j) - wp.float32(image.shape[1]) / 2.0,
-    )
-
-    center = wp.length(r) * to + start
-
-    r = wp.normalize(r)
-
-    intersect, gap, step = float(0.0), float(0.0), 0.1
-    for _ in range(1, int(depth / step) + 1):
-        pa = center + wp.float32(_) * r * step
-        uvw = wp.cw_div(pa, spacing_a)
-        a = wp.volume_sample_f(volume_a, uvw, wp.Volume.LINEAR)
-
-        pb = wp.transform_point(xform_a, pa)
-        uvw = wp.cw_div(pb, spacing_b)
-        b = wp.volume_sample_f(volume_b, uvw, wp.Volume.LINEAR)
-
-        if swap:
-            a, b = b, a
-
-        if b >= ct_metal:
-            if a >= ct_bone:  # 术前骨 -> 术后有假体 = 磨锉
-                intersect += step
-        elif a < ct_bone:  # 术前腔 -> 术后无假体 = 间隙
-            gap += step
-        else:  # 术前骨 -> 术后无假体 = 接触
-            break
-
-    value = -intersect if intersect > 0.0 else gap
-    value = wp.clamp(value * 3.0, -depth, depth)
-    image[i, j] = wp.vec3ub(
-        wp.uint8(0), wp.uint8(0), wp.uint8(255.0 * value / depth),
-    ) if value >= 0.0 else wp.vec3ub(
-        wp.uint8(255.0 * -value / depth), wp.uint8(0), wp.uint8(0),
-    )
