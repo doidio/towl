@@ -12,7 +12,7 @@ import tomlkit
 import warp as wp
 from minio import Minio, S3Error
 
-from kernel import compose_op, fast_drr, cv2_line, resize_uint8, contact_drr
+from kernel import compose_op, fast_drr, resize_uint8, contact_drr
 
 st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed', layout='wide')
 st.markdown('### G-THA 骨与假体接触')
@@ -53,7 +53,7 @@ if (it := st.session_state.get('init')) is None:
 elif (it := st.session_state.get('prl')) is None:
     client, pairs = st.session_state['init']
 
-    dn = len([_ for _ in pairs if 'post_xform' in pairs[_]])
+    dn = len([_ for _ in pairs if 'post_xform' in pairs[_] and len(pairs[_].get('excluded', []))])
     ud = len(pairs) - dn
 
     st.progress(_ := dn / (dn + ud), text=f'{100 * _:.2f}%')
@@ -204,6 +204,8 @@ else:
                             # cv2_line(img, p0, p1, (255, 0, 0), 2)
                             stack.append(resize_uint8(img, np.array(spacing) * img.shape[:2] * 5))
 
+                        if a > 0: stack[0], stack[1] = stack[1], stack[0]
+
                         img = np.hstack(stack)
                         if ax in (1, 2):
                             img = np.flipud(img)
@@ -219,10 +221,12 @@ else:
                         # cv2_line(img, p0, p1, (255, 0, 0), 2)
                         stack.append(resize_uint8(img, np.array(spacing) * img.shape[:2] * 1.5))
 
+                    if a > 0: stack[0], stack[1] = stack[1], stack[0]
+
                     img = np.hstack(stack)
                     if ax in (1, 2):
                         img = np.flipud(img)
-                    _ = ['轴位', '正位', '侧位'][ax], ['术前', '术后'][a], ['术前', '术后'][b], '融合'
+                    _ = ['轴位', '正位', '侧位'][ax], '术前', '术后', '融合'
                     cols[ax].image(img, '{}：{} {} {}'.format(*_))
 
             cols = st.columns(3, vertical_alignment='top')
@@ -250,6 +254,8 @@ else:
                     image_2 = image_2.numpy()
                     # cv2_line(image_2, p0, p1, (255, 0, 0), 2)
                     stack.append(resize_uint8(image_2, np.array(spacing) * image_2.shape[:2] * 1.5))
+
+                if a > 0: stack[0], stack[1] = stack[1], stack[0]
 
                 img = np.hstack(stack)
                 if ax in (1, 2):
