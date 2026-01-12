@@ -65,7 +65,7 @@ elif (it := st.session_state.get('prl')) is None:
     ud = len(pairs) - dn
 
     st.progress(_ := dn / (dn + ud), text=f'{100 * _:.2f}%')
-    st.metric('progress', f'{dn} / {dn + ud}', label_visibility='collapsed')
+    st.metric('progress', f'{dn} / {dn + ud} 对腿', label_visibility='collapsed')
 
     if st.button('下一个'):
         for prl in pairs:
@@ -90,7 +90,7 @@ elif (it := st.session_state.get('roi')) is None:
     st.code(f'股骨阈值 = {ct_bone}  金属阈值 = {ct_metal}')
     st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
-    roi_images, sizes, spacings, image_bgs = [], [], [], []
+    roi_images, roi_bounds, sizes, spacings, origins, image_bgs = [], [], [], [], [], []
     bone_meshes, metal_meshes = [], []
 
     for op, object_name in enumerate((pairs[prl]['pre'], pairs[prl]['post'])):
@@ -112,7 +112,8 @@ elif (it := st.session_state.get('roi')) is None:
                     st.stop()
 
                 ijk = np.argwhere(total == label_femur)
-                b = np.array([ijk.min(axis=0), ijk.max(axis=0)])
+                box = np.array([ijk.min(axis=0), ijk.max(axis=0) + 1])
+                roi_bounds.append(box.tolist())
 
             with st.spinner(_ := '下载原图', show_time=True):  # noqa
                 f = Path(tdir) / 'image.nii.gz'
@@ -127,17 +128,20 @@ elif (it := st.session_state.get('roi')) is None:
 
                 size = np.array([float(_) for _ in reversed(itk.size(image))])
                 spacing = np.array([float(_) for _ in reversed(itk.spacing(image))])
+                origin = np.array([float(_) for _ in reversed(itk.origin(image))])
 
                 sizes.append(size)
                 spacings.append(spacing)
+                origins.append(origin)
 
                 image = itk.array_from_image(image)
+
                 image_bg = float(np.min(image))
                 image_bgs.append(image_bg)
 
             with st.spinner(_ := '提取子区', show_time=True):  # noqa
-                roi_image = image[b[0, 0]:b[1, 0] + 1, b[0, 1]:b[1, 1] + 1, b[0, 2]:b[1, 2] + 1]
-                roi_total = total[b[0, 0]:b[1, 0] + 1, b[0, 1]:b[1, 1] + 1, b[0, 2]:b[1, 2] + 1]
+                roi_image = image[box[0, 0]:box[1, 0], box[0, 1]:box[1, 1], box[0, 2]:box[1, 2]]
+                roi_total = total[box[0, 0]:box[1, 0], box[0, 1]:box[1, 1], box[0, 2]:box[1, 2]]
 
                 # 抹除子区中的非股骨高亮体素
                 roi_image[np.where((roi_total != label_femur) & (roi_image > ct_bone))] = image_bg
@@ -164,13 +168,13 @@ elif (it := st.session_state.get('roi')) is None:
                 mesh = trimesh.smoothing.filter_taubin(mesh)
                 bone_meshes.append(mesh)
 
-    st.session_state['roi'] = roi_images, sizes, spacings, image_bgs, bone_meshes, metal_meshes
+    st.session_state['roi'] = roi_images, roi_bounds, sizes, spacings, origins, image_bgs, bone_meshes, metal_meshes
     st.rerun()
 else:
     client, pairs = st.session_state['init']
     prl = st.session_state['prl']
     pid, rl = prl.split('_')
-    roi_images, sizes, spacings, image_bgs, bone_meshes, metal_meshes = st.session_state['roi']
+    roi_images, roi_bounds, sizes, spacings, origins, image_bgs, bone_meshes, metal_meshes = st.session_state['roi']
 
     col_l, col_r = st.columns(2)
 
@@ -215,7 +219,8 @@ else:
         )
 
         # 配准术后到术前，配准特征点尽量远离金属，但术后过短则不得不接近金属
-        d_metal = st.number_input('采样点远离金属 (0 ~ 50 mm)', 0, 50, pairs[prl].get('d_metal', 5), step=5, key='d_metal')
+        d_metal = st.number_input('采样点远离金属 (0 ~ 50 mm)', 0, 50, pairs[prl].get('d_metal', 5), step=5,
+                                  key='d_metal')
 
         with st.spinner(_ := '采样', show_time=True):  # noqa
             metal = wp.Mesh(wp.array(metal_meshes[1].vertices, wp.vec3),
@@ -250,8 +255,20 @@ else:
                 **dict(reflection=False, scale=False),
             )
 
+        offset = [np.array(origins[_]) + np.array(roi_bounds[_][0]) * np.array(spacings[_]) for _ in range(2)]
+
+        pre = np.identity(4)
+        pre[:3, 3] = offset[0]
+
+        post_inv = np.identity(4)
+        post_inv[:3, 3] = -offset[1]
+
+        g_matrix = pre @ matrix @ post_inv
+
         data = {
+            'roi_bounds': np.array(roi_bounds).tolist(),
             'post_xform': np.array(wp.transform_from_matrix(wp.mat44(matrix)), dtype=float).tolist(),
+            'post_xform_global': np.array(wp.transform_from_matrix(wp.mat44(g_matrix)), dtype=float).tolist(),
             'post_points': n,
             'iterations': iters,
             'mse': mse,
@@ -264,7 +281,8 @@ else:
         with st.form('submit'):
             if 'excluded' in pairs[prl] and 'excluded' not in st.session_state:
                 st.session_state['excluded'] = pairs[prl]['excluded']
-            excluded = st.multiselect('是否排除', ['配准差', '小转子下骨折', '小转子下截骨'], accept_new_options=True, key='excluded')
+            excluded = st.multiselect('是否排除', ['配准差', '小转子下骨折', '小转子下截骨'], accept_new_options=True,
+                                      key='excluded')
 
             if st.form_submit_button('提交（覆盖）' if 'post_xform' in pairs[prl] else '提交'):
                 data = {**pairs[prl], **data}

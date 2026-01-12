@@ -55,6 +55,7 @@ def main(cfg_path: str, done: str, nii_name: str):
         'PatientName': str(dcm.get('PatientName')),
         'StudyDate': str(dcm.get('StudyDate')),
         'StudyTime': str(dcm.get('StudyTime')),
+        'PatientPosition': str(dcm.get('PatientPosition')),
     }
 
     with tempfile.TemporaryDirectory() as tdir:

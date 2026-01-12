@@ -236,6 +236,39 @@ def cv2_line(img, p0, p1, color, thickness=1):
     cv2.line(img, p0[::-1], p1[::-1], color, thickness)
 
 
+def itk_threshold_largest(label, lower=1, upper=255):
+    import itk
+    if isinstance(label, np.ndarray):
+        inp = itk.image_from_array(label)
+    else:
+        inp = label
+
+    threshold = itk.binary_threshold_image_filter(
+        inp, lower_threshold=lower,
+        upper_threshold=upper,
+        inside_value=1, outside_value=0,
+    )
+    connected = itk.connected_component_image_filter(threshold)
+    largest = itk.label_shape_keep_n_objects_image_filter(
+        connected,
+        background_value=0,
+        number_of_objects=1,
+        attribute='NumberOfPixels'
+    )
+    out = itk.binary_threshold_image_filter(
+        largest,
+        lower_threshold=1,
+        upper_threshold=2 ** 31 - 1,
+        inside_value=1,
+        outside_value=0
+    )
+
+    if isinstance(label, np.ndarray):
+        out = itk.array_from_image(out)
+
+    return out
+
+
 @wp.kernel
 def compute_sdf(
         mesh: wp.uint64, vertices: wp.array1d(dtype=wp.vec3),
@@ -252,26 +285,43 @@ def compute_sdf(
 
 
 @wp.kernel
-def compose_op(
-        image_a: wp.array3d(dtype=float), image_b: wp.array3d(dtype=float), image_c: wp.array3d(dtype=float),
-        xform_a: wp.transform, volume_b: wp.uint64, spacing_a: wp.vec3, spacing_b: wp.vec3,
-        ct_bone: float, ct_metal: float, swap: bool,
+def resample_ab(
+        image_b: wp.array3d(dtype=float), xform_a: wp.transform, volume_b: wp.uint64, roi_offset: wp.vec3,
+        origin_a: wp.vec3, origin_b: wp.vec3, spacing_a: wp.vec3, spacing_b: wp.vec3,
 ):
     i, j, k = wp.tid()
-    a = image_a[i, j, k]
 
-    pa = wp.cw_mul(spacing_a, wp.vec3(wp.float32(i), wp.float32(j), wp.float32(k)))
+    pa = wp.cw_mul(spacing_a, roi_offset + wp.vec3(wp.float32(i), wp.float32(j), wp.float32(k))) + origin_a
     pb = wp.transform_point(xform_a, pa)
 
-    uvw = wp.cw_div(pb, spacing_b)
+    uvw = wp.cw_div(pb - origin_b, spacing_b)
     b = wp.volume_sample_f(volume_b, uvw, wp.Volume.LINEAR)
 
     image_b[i, j, k] = b
 
-    if swap:
-        a, b = b, a
 
-    image_c[i, j, k] = b if b > ct_metal else wp.min(a, ct_metal)
+@wp.kernel
+def resample_obb(
+        image_obb: wp.array3d(dtype=wp.vec2), origin_obb: wp.vec3, spacing_obb: wp.vec3, xform_obb: wp.transform,
+        volume_a: wp.uint64, origin_a: wp.vec3, spacing_a: wp.vec3, xform_a: wp.transform,
+        volume_b: wp.uint64, origin_b: wp.vec3, spacing_b: wp.vec3, enable_b: bool,
+):
+    i, j, k = wp.tid()
+
+    p = origin_obb + wp.cw_mul(spacing_obb, wp.vec3(wp.float32(i), wp.float32(j), wp.float32(k)))
+
+    pa = wp.transform_point(xform_obb, p)
+    uvw = wp.cw_div(pa - origin_a, spacing_a)
+    a = wp.volume_sample_f(volume_a, uvw, wp.Volume.LINEAR)
+
+    if enable_b:
+        pb = wp.transform_point(xform_a, pa)
+        uvw = wp.cw_div(pb - origin_b, spacing_b)
+        b = wp.volume_sample_f(volume_b, uvw, wp.Volume.LINEAR)
+    else:
+        b = image_obb[i, j, k][1]
+
+    image_obb[i, j, k] = wp.vec2(wp.float32(a), wp.float32(b))
 
 
 @wp.kernel
@@ -351,4 +401,3 @@ def contact_drr(
         r, g, b = grey, grey, grey
 
     image_2[i, j] = wp.vec3ub(wp.uint8(r), wp.uint8(g), wp.uint8(b))
-

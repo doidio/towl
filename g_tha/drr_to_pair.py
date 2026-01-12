@@ -31,20 +31,18 @@ if (it := st.session_state.get('ud')) is None:
         dn = [_.object_name[:-1] for _ in client.list_objects('pair')]
         ud = [_.object_name[:-1] for _ in client.list_objects('drr') if _.object_name[:-1] not in dn]
 
-    if len(ud):
-        st.session_state['dn'] = dn
-        st.session_state['ud'] = ud
-        st.rerun()
-    else:
-        st.balloons()
-        st.success('全部完成')
-        st.stop()
+    st.session_state['dn'] = dn
+    st.session_state['ud'] = ud
+    st.rerun()
 
 elif (it := st.session_state.get('pid')) is None:
     dn = st.session_state['dn']
     ud = st.session_state['ud']
 
-    if st.button('下一个'):
+    st.progress(_ := len(dn) / (len(dn) + len(ud)), text=f'{100 * _:.2f}%')
+    st.metric(f'progress', f'{len(dn)} / {len(dn) + len(ud)} 病人', label_visibility='collapsed')
+
+    if len(ud) > 0 and st.button('下一个'):
         with st.spinner('下一个', show_time=True):  # noqa
             ud = st.session_state['pid_input'] = ud[0]
 
