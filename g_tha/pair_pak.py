@@ -1,4 +1,4 @@
-# uv run streamlit run pair_dataset.py --server.port 8503 -- --config config.toml
+# uv run streamlit run pair_pak.py --server.port 8503 -- --config config.toml
 
 import argparse
 import tempfile
@@ -38,6 +38,10 @@ if (it := st.session_state.get('init')) is None:
                 continue
 
             pid, rl, op, nii = _.object_name.split('/')
+
+            if op not in ('pre', 'post'):
+                continue
+
             prl = f'{pid}_{rl}'
             if prl not in pairs:
                 pairs[prl] = {'prl': prl}

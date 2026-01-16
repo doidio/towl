@@ -40,7 +40,7 @@ elif (it := st.session_state.get('pid')) is None:
     ud = st.session_state['ud']
 
     st.progress(_ := len(dn) / (len(dn) + len(ud)), text=f'{100 * _:.2f}%')
-    st.metric(f'progress', f'{len(dn)} / {len(dn) + len(ud)} 病人', label_visibility='collapsed')
+    st.metric(f'progress', f'{len(dn)} / {len(dn) + len(ud)} 个人', label_visibility='collapsed')
 
     if len(ud) > 0 and st.button('下一个'):
         with st.spinner('下一个', show_time=True):  # noqa

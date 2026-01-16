@@ -160,12 +160,15 @@ elif (it := st.session_state.get('roi')) is None:
 
                 # 提取股骨等值面
                 mesh = diff_dmc(wp.from_numpy(roi_image, wp.float32), np.zeros(3), spacing, ct_bone)
+
                 if mesh.is_empty:
                     st.error(['术前', '术后'][op] + f'子区不包含股骨')
                     st.stop()
 
-                mesh = max(mesh.split(), key=lambda _: _.area)
-                mesh = trimesh.smoothing.filter_taubin(mesh)
+                # 提取最大连通网格体，失败回退
+                _ = max(mesh.split(), key=lambda _: _.area)
+                if len(_.faces) > 0.5 * len(mesh.faces):
+                    mesh = trimesh.smoothing.filter_taubin(_)
                 bone_meshes.append(mesh)
 
     st.session_state['roi'] = roi_images, roi_bounds, sizes, spacings, origins, image_bgs, bone_meshes, metal_meshes
@@ -187,7 +190,7 @@ else:
         zl = [round(_.bounds[1][0] - _.bounds[0][0]) for _ in bone_meshes]
 
         d_proximal = st.number_input(
-            f'近端截除 (0 ~ {zl[1]:.0f} mm)', 0, _ := zl[1], pairs[prl].get('d_proximal', 15), step=5,
+            f'近端截除 (0 ~ {zl[1]:.0f} mm)', 0, zl[1], pairs[prl].get('d_proximal', min(zl[1], 15)), step=5,
             help='截除术后比术前多余的近端特征，或截除术后到大粗隆顶端', key='d_proximal',
         )
 
@@ -209,6 +212,10 @@ else:
                 post_mesh_outlier.remove_unreferenced_vertices()
             else:
                 post_mesh_outlier = None
+
+        if post_mesh.is_empty:
+            st.error('近端裁剪过多')
+            st.stop()
 
         zl.append(round(post_mesh.bounds[1][0] - post_mesh.bounds[0][0]))
         _min, _max = d_proximal, d_proximal + min(zl[0], zl[2])
@@ -241,6 +248,8 @@ else:
             if (n := min(int(np.sum(_ > 0)), 10000)) < 100:
                 st.error(f'采样点过少 {n}')
                 st.stop()
+            elif n < 10000:
+                st.warning(f'采样点较少 {n}')
 
             _ = _ / _.sum()
 
