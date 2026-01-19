@@ -8,24 +8,25 @@ from monai.data import DataLoader, PersistentDataset
 from monai.metrics import PSNRMetric, SSIMMetric
 from monai.networks.nets import VQVAE
 from monai.transforms import (
-    Compose, LoadImaged, EnsureChannelFirstd, ScaleIntensityRanged
+    Compose, LoadImaged, EnsureChannelFirstd, ScaleIntensityRanged, RandSpatialCropd
 )
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 if __name__ == '__main__':
     num_workers = 8
-    end_epoch = 1000
+    num_epochs = 1000
     batch_size = 1
     val_interval = 1
     model_type = 'small'
-    resume = True
+    resume = False
+    patch_size = (96,) * 3
 
     root = Path('.ds')
     task = 'post'
     cache_dir = root / 'cache'
     log_dir = root / 'logs'
-    ckpt_dir = root / 'checkpoints'
+    ckpt_dir = root / 'checkpoints' / 'vqvae'
 
     ct_range = (-200, 2800)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -46,6 +47,7 @@ if __name__ == '__main__':
         LoadImaged(keys=['image']),
         EnsureChannelFirstd(keys=['image'], channel_dim='no_channel'),
         ScaleIntensityRanged(keys=['image'], a_min=ct_range[0], a_max=ct_range[1], b_min=0.0, b_max=1.0, clip=True),
+        RandSpatialCropd(keys=['image'], roi_size=patch_size, random_size=False),
     ])
 
     val_transforms = Compose([
@@ -72,7 +74,7 @@ if __name__ == '__main__':
             in_channels=1,
             out_channels=1,
             channels=(32, 64),
-            num_res_layers=1,
+            num_res_layers=3,
             num_res_channels=(32, 64),
             downsample_parameters=((2, 4, 1, 1),) * 2,
             upsample_parameters=((2, 4, 1, 1, 0),) * 2,
@@ -101,7 +103,7 @@ if __name__ == '__main__':
     _ = log_dir / datetime.now().strftime('%Y%m%d_%H%M%S')
     writer = SummaryWriter(log_dir=_.as_posix())
 
-    resume_pt = (ckpt_dir / task / 'last.pt').resolve().absolute()
+    resume_pt = (ckpt_dir / f'{task}_last.pt').resolve().absolute()
     if resume and resume_pt.exists():
         print(f'Loading checkpoint from {resume_pt}...')
 
@@ -112,19 +114,19 @@ if __name__ == '__main__':
         start_epoch = checkpoint['epoch']
         best_val_loss = checkpoint.get('best_val_loss', float('inf'))
 
-        print(f"Resuming training from epoch {start_epoch + 1}, Best Val Loss: {best_val_loss:.6f}")
+        print(f'Resuming training from epoch {start_epoch + 1}, Best Val Loss: {best_val_loss:.6f}')
     else:
         start_epoch = 0
         best_val_loss = float('inf')
 
     # --- 训练循环 ---
     try:
-        for epoch in range(start_epoch, end_epoch):
+        for epoch in range(start_epoch, num_epochs):
             model.train()
             epoch_loss = 0
             step = 0
 
-            pbar = tqdm(train_loader, ncols=100, desc=f'Epoch {epoch + 1}/{end_epoch}')
+            pbar = tqdm(train_loader, ncols=100, desc=f'Epo {epoch + 1}/{num_epochs}')
 
             for batch in pbar:
                 step += 1
@@ -162,8 +164,10 @@ if __name__ == '__main__':
                 val_psnr_metric = PSNRMetric(max_val=1.0)
                 val_ssim_metric = SSIMMetric(data_range=1.0, spatial_dims=3)
 
+                val_pbar = tqdm(val_loader, ncols=100, desc=f'Val {epoch + 1}')
+
                 with torch.no_grad():
-                    for i, batch in enumerate(val_loader):
+                    for i, batch in enumerate(val_pbar):
                         images = batch['image'].to(device)
 
                         reconstruction, quantization_loss = model(images=images)
@@ -216,14 +220,14 @@ if __name__ == '__main__':
                 }
 
                 # 始终保存最新的
-                _ = ckpt_dir / task / 'last.pt'
+                _ = ckpt_dir / f'{task}_last.pt'
                 _.parent.mkdir(parents=True, exist_ok=True)
                 torch.save(checkpoint, _)
 
                 # 保存最好的
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
-                    _ = ckpt_dir / task / 'best.pt'
+                    _ = ckpt_dir / f'{task}_best.pt'
                     _.parent.mkdir(parents=True, exist_ok=True)
                     torch.save(checkpoint, _)
                     print(f'New best model saved at epoch {epoch + 1}')
