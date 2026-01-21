@@ -44,7 +44,7 @@ def main():
     # 权重参数 (参考教程与经验值)
     adv_weight = 0.01  # 对抗损失权重
     perceptual_weight = 0.002  # 感知损失权重
-    kl_weight = 1e-6  # KL正则化权重 (非常重要，过大会导致模糊，过小会导致Latent空间不连续)
+    kl_weight = 1e-6  # KL正则化权重，与L1重建权重博弈，使模型既能重建又能符合健康的正态分布
 
     # 路径配置
     root = Path('.ds')
@@ -56,8 +56,8 @@ def main():
     ct_range = (-200, 2800)
 
     # --- 1. 数据准备 (保持原逻辑) ---
-    train_files = [{'image': str(p)} for p in (root / task / 'train').glob('*.nii.gz')]
-    val_files = [{'image': str(p)} for p in (root / task / 'val').glob('*.nii.gz')]
+    train_files = [{'image': p.as_posix()} for p in (root / task / 'train').glob('*.nii.gz')]
+    val_files = [{'image': p.as_posix()} for p in (root / task / 'val').glob('*.nii.gz')]
     print(f'Train: {len(train_files)}, Val: {len(val_files)}')
 
     base_transforms = [

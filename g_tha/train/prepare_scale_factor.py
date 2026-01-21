@@ -28,7 +28,7 @@ def main():
     root = Path('.ds')
     task = 'post'
     cache_dir = root / 'cache'
-    ckpt_dir = root / 'checkpoints' / 'ae_kl'
+    load_pt = root / 'checkpoints' / 'autoencoder_best.pt'
 
     patch_size = (96,) * 3
     ct_range = (-200, 2800)
@@ -62,14 +62,10 @@ def main():
         use_checkpoint=use_checkpoint,
     ).to(device)
 
-    load_pt = (ckpt_dir / f'{task}_best.pt').resolve()
-
     try:
         print(f'Loading checkpoint from {load_pt}...')
         checkpoint = torch.load(load_pt, map_location=device)
         model.load_state_dict(checkpoint['state_dict'])
-        start_epoch = checkpoint['epoch']
-        print(f'Load from epoch {start_epoch}')
     except Exception:
         raise SystemExit(f'Failed to load checkpoint: {load_pt}') from None
 
@@ -97,7 +93,7 @@ def main():
 
     # Save scale factor
     checkpoint['scale_factor'] = scale_factor
-    torch.save(checkpoint, ckpt_dir / f'{task}_best.pt')
+    torch.save(checkpoint, load_pt)
 
     print(f'Recommended Scale Factor: {scale_factor}')
     # 后续训练 LDM 时： z = z * scale_factor
