@@ -95,13 +95,12 @@ def main():
     )]
 
     # 2. 数据准备 (所有 Rank 执行相同的 glob 以保证文件列表一致)
-    train_files = [{'image': p.as_posix()} for p in (dataset_root / 'pre' / 'train').glob('*.nii.gz')]
-    train_files += [{'image': p.as_posix()} for p in (dataset_root / 'post' / 'train').glob('*.nii.gz')]
-    val_files = [{'image': p.as_posix()} for p in (dataset_root / 'pre' / 'val').glob('*.nii.gz')]
-    val_files += [{'image': p.as_posix()} for p in (dataset_root / 'post' / 'val').glob('*.nii.gz')]
-
+    train_files = [{'image': p.as_posix()} for p in sorted((dataset_root / 'pre' / 'train').glob('*.nii.gz'))]
+    train_files += [{'image': p.as_posix()} for p in sorted((dataset_root / 'post' / 'train').glob('*.nii.gz'))]
+    val_files = [{'image': p.as_posix()} for p in sorted((dataset_root / 'pre' / 'val').glob('*.nii.gz'))]
+    val_files += [{'image': p.as_posix()} for p in sorted((dataset_root / 'post' / 'val').glob('*.nii.gz'))]
     if rank == 0:
-        print(f'Total Train Files: {len(train_files)}, Total Val Files: {len(val_files)}')
+        print(f'Train: {len(train_files)}, Val: {len(val_files)}')
 
     # 截断数据集 (逻辑必须在所有 Rank 上一致)
     train_total = min(train_limit, len(train_files))
@@ -257,10 +256,10 @@ def main():
 
     # 验证滑动窗口推理包装
     def encode_decode_mu(inputs):
-        # DDP 中需要调用 module
-        if isinstance(autoencoder, DDP):
-            return autoencoder.module.decode(autoencoder.module.encode(inputs)[0])
-        return autoencoder.decode(autoencoder.encode(inputs)[0])
+        return autoencoder(inputs)[0]
+        # if isinstance(autoencoder, DDP):
+        #     return autoencoder.module.decode(autoencoder.module.encode(inputs)[0])
+        # return autoencoder.decode(autoencoder.encode(inputs)[0])
 
     # 训练循环
     for epoch in range(start_epoch, num_epochs):
@@ -288,8 +287,7 @@ def main():
 
             optimizer_g.zero_grad(set_to_none=True)
 
-            dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
-            amp_ctx = autocast(device.type, dtype=dtype) if use_amp else nullcontext()
+            amp_ctx = autocast(device.type) if use_amp else nullcontext()
             with amp_ctx:
                 # 注意：DDP forward 会自动同步
                 if isinstance(autoencoder, DDP):
@@ -303,10 +301,23 @@ def main():
 
                 l1_loss = L1Loss(reconstruction.float(), images.float())
 
+                if torch.isnan(l1_loss):
+                    raise SystemExit(f'Rank {rank}: NaN in l1_loss')
+
                 per_loss = PerceptualLoss(reconstruction.float(), images.float())
+
+                if torch.isnan(per_loss):
+                    raise SystemExit(f'Rank {rank}: NaN in per_loss')
+
                 per_loss *= per_weight
 
-                kl_loss = 0.5 * torch.mean(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1)
+                # kl_loss = 0.5 * torch.mean(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1)
+                z_sigma_clamped = torch.clamp(z_sigma, min=1e-6, max=1e3)
+                kl_loss = 0.5 * torch.mean(z_mu.pow(2) + z_sigma_clamped.pow(2) - torch.log(z_sigma_clamped.pow(2)) - 1)
+
+                if torch.isnan(kl_loss):
+                    raise SystemExit(f'Rank {rank}: NaN in kl_loss')
+
                 kl_loss *= kl_weight
 
                 loss_g = l1_loss + per_loss + kl_loss
@@ -314,15 +325,14 @@ def main():
                 if not warmup:
                     out = discriminator(reconstruction.float())
                     adv_loss = AdversarialLoss(out, target_is_real=True, for_discriminator=False)
+
+                    if torch.isnan(adv_loss):
+                        raise SystemExit(f'Rank {rank}: NaN in adv_loss')
+
                     adv_loss *= adv_weight
                     loss_g += adv_loss
                 else:
                     adv_loss = torch.tensor(0.0, device=device)
-
-            if torch.isnan(loss_g):
-                # DDP 中需要小心退出，最好所有进程一起抛出
-                print(f'Rank {rank}: NaN in loss_g')
-                sys.exit(1)
 
             if use_amp:
                 scaler_g.scale(loss_g).backward()
@@ -413,23 +423,20 @@ def main():
                 val_pbar = val_loader
 
             with torch.no_grad():
-                dtype = torch.bfloat16 if torch.cuda.is_available() and torch.cuda.is_bf16_supported() else torch.float16
-                amp_ctx = autocast(device.type, dtype=dtype) if use_amp else nullcontext()
                 for i, batch in enumerate(val_pbar):
                     images = batch['image'].to(device, non_blocking=True)
 
-                    with amp_ctx:
-                        reconstruction = sliding_window_inference(
-                            inputs=images,
-                            roi_size=patch_size,
-                            sw_batch_size=sw_batch_size,
-                            predictor=encode_decode_mu,
-                            overlap=0.25,
-                            mode='gaussian',
-                            device=device,
-                            sw_device=device,
-                            progress=False,
-                        )
+                    reconstruction = sliding_window_inference(
+                        inputs=images,
+                        roi_size=patch_size,
+                        sw_batch_size=sw_batch_size,
+                        predictor=encode_decode_mu,
+                        overlap=0.25,
+                        mode='gaussian',
+                        device=device,
+                        sw_device=device,
+                        progress=False,
+                    )
 
                     l1 = L1Loss(reconstruction.float(), images.float())
                     local_l1_loss += l1

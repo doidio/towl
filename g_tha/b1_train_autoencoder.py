@@ -54,10 +54,10 @@ def main():
     )]
 
     # 数据集覆盖术前和术后
-    train_files = [{'image': p.as_posix()} for p in (dataset_root / 'pre' / 'train').glob('*.nii.gz')]
-    train_files += [{'image': p.as_posix()} for p in (dataset_root / 'post' / 'train').glob('*.nii.gz')]
-    val_files = [{'image': p.as_posix()} for p in (dataset_root / 'pre' / 'val').glob('*.nii.gz')]
-    val_files += [{'image': p.as_posix()} for p in (dataset_root / 'post' / 'val').glob('*.nii.gz')]
+    train_files = [{'image': p.as_posix()} for p in sorted((dataset_root / 'pre' / 'train').glob('*.nii.gz'))]
+    train_files += [{'image': p.as_posix()} for p in sorted((dataset_root / 'post' / 'train').glob('*.nii.gz'))]
+    val_files = [{'image': p.as_posix()} for p in sorted((dataset_root / 'pre' / 'val').glob('*.nii.gz'))]
+    val_files += [{'image': p.as_posix()} for p in sorted((dataset_root / 'post' / 'val').glob('*.nii.gz'))]
     print(f'Train: {len(train_files)}, Val: {len(val_files)}')
 
     train_total = min(train_limit, len(train_files))
@@ -136,7 +136,7 @@ def main():
 
     # 验证滑动窗口推理
     def encode_decode_mu(inputs):
-        return autoencoder.decode(autoencoder.encode(inputs)[0])
+        return autoencoder(inputs)[0]
 
     # 训练
     for epoch in range(start_epoch, num_epochs):
@@ -149,12 +149,9 @@ def main():
         epoch_loss_d = 0
         step = 0
 
-        pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{num_epochs - 1}', total=train_total)
+        pbar = tqdm(train_loader, desc=f'Epoch {epoch}/{num_epochs - 1}')
 
         for batch in pbar:
-            if step > train_total:
-                break
-
             step += 1
             images = batch['image'].to(device, non_blocking=True)
 
@@ -172,12 +169,25 @@ def main():
                 # L1 重建损失
                 l1_loss = L1Loss(reconstruction.float(), images.float())
 
+                if torch.isnan(l1_loss):
+                    raise SystemExit('NaN in l1_loss')
+
                 # 感知损失
                 per_loss = PerceptualLoss(reconstruction.float(), images.float())
+
+                if torch.isnan(per_loss):
+                    raise SystemExit('NaN in per_loss')
+
                 per_loss *= per_weight
 
                 # KL 正则化损失
-                kl_loss = 0.5 * torch.mean(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1)
+                # kl_loss = 0.5 * torch.mean(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1)
+                z_sigma_clamped = torch.clamp(z_sigma, min=1e-6, max=1e3)
+                kl_loss = 0.5 * torch.mean(z_mu.pow(2) + z_sigma_clamped.pow(2) - torch.log(z_sigma_clamped.pow(2)) - 1)
+
+                if torch.isnan(kl_loss):
+                    raise SystemExit('NaN in kl_loss')
+
                 kl_loss *= kl_weight
 
                 # 生成器损失
@@ -187,11 +197,12 @@ def main():
                 if not warmup:
                     out = discriminator(reconstruction.float())
                     adv_loss = AdversarialLoss(out, target_is_real=True, for_discriminator=False)
+
+                    if torch.isnan(adv_loss):
+                        raise SystemExit('NaN in adv_loss')
+
                     adv_loss *= adv_weight
                     loss_g += adv_loss
-
-            if torch.isnan(loss_g):
-                raise SystemExit('NaN in loss')
 
             if use_amp:
                 scaler_g.scale(loss_g).backward()
