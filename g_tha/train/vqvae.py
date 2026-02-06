@@ -44,15 +44,13 @@ if __name__ == '__main__':
 
     # 2. Transforms
     train_transforms = Compose([
-        LoadImaged(keys=['image']),
-        EnsureChannelFirstd(keys=['image'], channel_dim='no_channel'),
+        LoadImaged(keys=['image'], ensure_channel_first=True),
         ScaleIntensityRanged(keys=['image'], a_min=ct_range[0], a_max=ct_range[1], b_min=0.0, b_max=1.0, clip=True),
         RandSpatialCropd(keys=['image'], roi_size=patch_size, random_size=False),
     ])
 
     val_transforms = Compose([
-        LoadImaged(keys=['image']),
-        EnsureChannelFirstd(keys=['image'], channel_dim='no_channel'),
+        LoadImaged(keys=['image'], ensure_channel_first=True),
         ScaleIntensityRanged(keys=['image'], a_min=ct_range[0], a_max=ct_range[1], b_min=0.0, b_max=1.0, clip=True),
     ])
 

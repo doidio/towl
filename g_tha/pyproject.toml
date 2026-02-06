@@ -9,6 +9,7 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
     "chainner-ext>=0.3.10",
     "diso>=0.1.4",
+    "gdown>=5.2.1",
     "itk>=5.4.4.post1",
     "matplotlib>=3.10.7",
     "minio>=7.2.18",
