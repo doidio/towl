@@ -1,4 +1,5 @@
 import numpy as np
+import torch
 from monai.losses import PerceptualLoss
 from monai.networks.nets import AutoencoderKL, PatchDiscriminator
 from monai.transforms import (
@@ -19,7 +20,13 @@ class CTBoneNormalized(MapTransform):
         d = dict(data)
         for key in self.key_iterator(d):
             img = d[key]
-            mapped = np.interp(img, self.src_pts, self.dst_pts)
+            if isinstance(img, torch.Tensor):
+                img_np = img.detach().cpu().numpy()
+                mapped = np.interp(img_np, self.src_pts, self.dst_pts)
+                d[key] = torch.from_numpy(mapped).to(img.device) if isinstance(img, torch.Tensor) else mapped
+            else:
+                mapped = np.interp(img, self.src_pts, self.dst_pts)
+                d[key] = mapped.astype(np.float32)
             d[key] = mapped.astype(np.float32)
         return d
 
@@ -37,7 +44,6 @@ def autoencoder():
         latent_channels=4,  # 保持 4 通道，足够编码密度信息
         norm_num_groups=32,  # 归一化层，也会削弱 Patch Training 效果
         use_checkpoint=True,
-        use_flash_attention=True,
     )
 
 
@@ -82,3 +88,8 @@ def autoencoder_val_transforms():
         LoadImaged(keys=['image'], ensure_channel_first=True),
         CTBoneNormalized(keys=['image']),
     ]
+
+
+def autoencoder_encode_decode_mu(model, inputs):
+    """确定性编解码，用于验证阶段滑动窗口推理"""
+    return model.decode(model.encode(inputs)[0])

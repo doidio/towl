@@ -36,6 +36,10 @@ def process_split(files, out_dir, autoencoder, transforms, patch_size, use_amp, 
 
         item = {'image': file_path.as_posix()}
         data = transforms(item)
+
+        if isinstance(data['image'], np.ndarray):
+            data['image'] = torch.from_numpy(data['image'])
+
         images = data['image'].unsqueeze(0).to(device)
 
         with torch.no_grad():
@@ -74,8 +78,6 @@ def main():
 
     task = 'autoencoder'
     patch_size = cfg['train'][task]['patch_size']
-    ct_range = cfg['train'][task]['ct_range']
-    bone_range = cfg['train'][task]['bone_range']
     use_amp = cfg['train'][task]['use_amp']
 
     # 1. 加载模型
@@ -92,17 +94,17 @@ def main():
         raise SystemExit(f'Failed to load checkpoint: {e}')
 
     autoencoder.eval()
-    base_transforms = Compose(define.autoencoder_base_transforms(ct_range, bone_range))
+    base_transforms = Compose(define.autoencoder_val_transforms())
 
     # 2. 遍历所有数据集划分
     splits = [
-        # ('pre', 'train'),
-        # ('pre', 'val'),
-        # ('post', 'train'),
+        ('pre', 'train'),
+        ('pre', 'val'),
+        ('post', 'train'),
         ('post', 'val')
     ]
 
-    print('\n--- Starting Batch Latent Generation ---')
+    print('--- Starting Batch Latent Generation ---')
     for phase, split in splits:
         src_dir = dataset_root / phase / split
         dst_dir = latents_root / phase / split
@@ -113,7 +115,7 @@ def main():
 
         process_split(files, dst_dir, autoencoder, base_transforms, patch_size, use_amp, scale_factor)
 
-    print('\nAll latents prepared. You are ready for LDM training!')
+    print('All latents prepared. You are ready for LDM training!')
 
 
 if __name__ == '__main__':

@@ -134,10 +134,6 @@ def main():
         except Exception as e:
             print(f'Load failed: {e}. Starting from scratch.')
 
-    # 验证滑动窗口推理
-    def encode_decode_mu(inputs):
-        return autoencoder(inputs)[0]
-
     # 训练
     for epoch in range(start_epoch, num_epochs):
         warmup = epoch < warmup_epochs
@@ -172,14 +168,17 @@ def main():
                 if torch.isnan(l1_loss):
                     raise SystemExit('NaN in l1_loss')
 
-                # 感知损失
-                per_loss = PerceptualLoss(reconstruction.float(), images.float())
+            # 感知损失，退出AMP避免NaN，加微量噪声避免MedicalNet统计std=0导致NaN
+            img_float = images.float()
+            noise = torch.randn_like(img_float) * 1e-4
+            per_loss = PerceptualLoss(reconstruction.float() + noise, img_float + noise)
 
-                if torch.isnan(per_loss):
-                    raise SystemExit('NaN in per_loss')
+            if torch.isnan(per_loss):
+                raise SystemExit('NaN in per_loss')
 
-                per_loss *= per_weight
+            per_loss *= per_weight
 
+            with amp_ctx:
                 # KL 正则化损失
                 # kl_loss = 0.5 * torch.mean(z_mu.pow(2) + z_sigma.pow(2) - torch.log(z_sigma.pow(2)) - 1)
                 z_sigma_clamped = torch.clamp(z_sigma, min=1e-6, max=1e3)
@@ -295,7 +294,7 @@ def main():
                             inputs=images,
                             roi_size=patch_size,
                             sw_batch_size=sw_batch_size,
-                            predictor=encode_decode_mu,
+                            predictor=define.autoencoder_encode_decode_mu,
                             overlap=0.25,
                             mode='gaussian',
                             device=device,

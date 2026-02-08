@@ -4,7 +4,7 @@ from pathlib import Path
 
 import tomlkit
 import torch
-from monai.data import DataLoader, PersistentDataset
+from monai.data import DataLoader, Dataset
 from monai.transforms import Compose
 from torch.amp import autocast
 from tqdm import tqdm
@@ -29,7 +29,7 @@ def main():
 
     dataset_root = Path(cfg['dataset']['root'])
     train_root = Path(cfg['train']['root'])
-    cache_dir = train_root / 'cache'
+    # cache_dir = train_root / 'cache'
     ckpt_dir = train_root / 'checkpoints'
 
     task = 'autoencoder'
@@ -44,10 +44,9 @@ def main():
     train_files += [{'image': p.as_posix()} for p in (dataset_root / 'post' / 'train').glob('*.nii.gz')]
     print(f'Train: {len(train_files)}')
 
-    base_transforms = define.autoencoder_base_transforms(ct_range, bone_range)
-    train_transforms = Compose(base_transforms + define.autoencoder_train_transforms(patch_size))
+    train_transforms = Compose(define.autoencoder_train_transforms(patch_size, bone_range[0]))
 
-    train_ds = PersistentDataset(train_files, train_transforms, cache_dir)
+    train_ds = Dataset(train_files, train_transforms)
     train_loader = DataLoader(train_ds, batch_size=1, shuffle=True, num_workers=num_workers, pin_memory=True)
 
     autoencoder = define.autoencoder().to(device)
@@ -68,6 +67,9 @@ def main():
     count = 0
     print('Calculating Latent Scale Factor for LDM...')
 
+    sum_sq = 0.0
+    total_pixels = 0
+
     with torch.no_grad():
         amp_ctx = autocast(device.type) if use_amp else nullcontext()
         with amp_ctx:
@@ -78,7 +80,14 @@ def main():
                 running_std += z_mu.std().item()
                 count += 1
 
+                sum_sq += torch.sum(z_mu ** 2).item()
+                total_pixels += z_mu.numel()
+
     scale_factor = 1.0 / (running_std / count)
+    print('scale_factor', scale_factor)
+
+    global_std = (sum_sq / total_pixels) ** 0.5
+    scale_factor = 1.0 / global_std
 
     # Save scale factor
     checkpoint['scale_factor'] = scale_factor
