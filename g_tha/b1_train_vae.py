@@ -40,17 +40,11 @@ def main():
 
     task = 'vae'
     (
-        use_amp, resume,
-        num_workers, num_epochs, warmup_epochs, batch_size, val_interval, patch_size, sw_batch_size,
-        train_limit, val_limit,
-        adv_weight, per_weight, kl_weight,
-        lr_g, lr_d,
+        use_amp, resume, num_workers, num_epochs, warmup_epochs, batch_size, patch_size, sw_batch_size,
+        val_interval, val_limit, adv_weight, per_weight, kl_weight, lr_g, lr_d,
     ) = [cfg['train'][task][_] for _ in (
-        'use_amp', 'resume',
-        'num_workers', 'num_epochs', 'warmup_epochs', 'batch_size', 'val_interval', 'patch_size', 'sw_batch_size',
-        'train_limit', 'val_limit',
-        'adversarial_weight', 'perceptual_weight', 'kl_weight',
-        'lr_g', 'lr_d',
+        'use_amp', 'resume', 'num_workers', 'num_epochs', 'warmup_epochs', 'batch_size', 'patch_size', 'sw_batch_size',
+        'val_interval', 'val_limit', 'adversarial_weight', 'perceptual_weight', 'kl_weight', 'lr_g', 'lr_d',
     )]
 
     # 数据集覆盖术前和术后
@@ -60,10 +54,9 @@ def main():
     val_files += [{'image': p.as_posix()} for p in sorted((dataset_root / 'post' / 'val').glob('*.nii.gz'))]
     print(f'Train: {len(train_files)}, Val: {len(val_files)}')
 
-    train_total = min(train_limit, len(train_files))
     val_total = min(val_limit, len(val_files))
     val_files = val_files[::len(val_files) // (val_total - 1)]
-    print(f'Train limited: {train_total}, Val limited: {len(val_files)}')
+    print(f'Val limited: {len(val_files)}')
 
     train_transforms = Compose(define.vae_train_transforms(patch_size))
     val_transforms = Compose(define.vae_val_transforms())
@@ -71,7 +64,10 @@ def main():
     train_ds = Dataset(train_files, train_transforms)
     val_ds = Dataset(val_files, val_transforms) if len(val_files) else None
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    train_loader = DataLoader(
+        train_ds, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=True, persistent_workers=True,
+    )
     val_loader = DataLoader(val_ds, batch_size=1, num_workers=num_workers) if val_ds else None
 
     # 生成器 (VAE)
@@ -102,7 +98,7 @@ def main():
         scaler_d = None
 
     # 日志
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+    timestamp = datetime.now().strftime(f'{task}_%Y%m%d_%H%M%S')
     writer = SummaryWriter(log_dir=(log_dir / timestamp).as_posix())
 
     start_epoch = 0
@@ -159,7 +155,7 @@ def main():
 
             amp_ctx = autocast(device.type) if use_amp else nullcontext()
             with amp_ctx:
-                # 编码获取分布参数
+                # 编码获取分布参数，注意 MONAI 源码实现返回的是 sigma 不是 log var
                 z_mu, z_sigma = vae.encode(images)
 
                 # 解码
@@ -172,7 +168,7 @@ def main():
                 if torch.isnan(l1_loss):
                     raise SystemExit('NaN in l1_loss')
 
-            # 感知损失，退出AMP避免NaN，加微量噪声避免MedicalNet统计std=0导致NaN
+            # 感知损失，退出AMP避免NaN，加微量噪声避免MedicalNet统计std=0导致NaN，注意 MONAI 源码实现期望输入范围就是 [-1, 1]
             img_float = images.float()
             noise = torch.randn_like(img_float) * 1e-4
             per_loss = PerceptualLoss(reconstruction.float() + noise, img_float + noise)
@@ -316,16 +312,18 @@ def main():
 
                     # 可视化
                     if i == 0:
-                        image = images[0] * 0.5 + 0.5  # (-1, 1) -> (0, 1)
-                        recon = reconstruction[0] * 0.5 + 0.5
-                        diff = torch.abs(image - recon)
+                        def norm_vis(x):
+                            return torch.clamp(x * 0.5 + 0.5, 0, 1)
 
-                        # 取中间切片
-                        z_idx = image.shape[1] // 2  # [2, X, Y, Z]
+                        z_idx = images.shape[0] // 2
 
-                        writer.add_image('val/CT_Input', image[0, z_idx].unsqueeze(0), epoch)
-                        writer.add_image('val/CT_Recon', recon[0, z_idx].unsqueeze(0), epoch)
-                        writer.add_image('val/CT_Diff', diff[0, z_idx].unsqueeze(0), epoch)
+                        vis_input = images[z_idx, 0, 0]
+                        vis_recon = reconstruction[z_idx, 0, 0]
+                        vis_diff = torch.clamp(torch.abs(vis_input - vis_recon), 0, 1)
+
+                        writer.add_image('val/CT_Input', norm_vis(vis_input), epoch, dataformats='HW')
+                        writer.add_image('val/CT_Recon', norm_vis(vis_recon), epoch, dataformats='HW')
+                        writer.add_image('val/CT_Diff', vis_diff, epoch, dataformats='HW')
 
             val_l1_loss /= step
             psnr = PSNR.aggregate().item()
