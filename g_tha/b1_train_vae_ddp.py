@@ -1,4 +1,4 @@
-# PYTHONWARNINGS="ignore" uv run torchrun --nproc_per_node=2 b1_train_autoencoder_ddp.py --config config.toml
+# PYTHONWARNINGS="ignore" uv run torchrun --nproc_per_node=2 b1_train_vae_ddp.py --config config.toml
 
 import argparse
 import os
@@ -79,19 +79,19 @@ def main():
     log_dir = train_root / 'logs'
     ckpt_dir = train_root / 'checkpoints'
 
-    task = 'autoencoder'
+    task = 'vae'
     (
         use_amp, resume,
         num_workers, num_epochs, warmup_epochs, batch_size, val_interval, patch_size, sw_batch_size,
         train_limit, val_limit,
         adv_weight, per_weight, kl_weight,
-        ct_range, bone_range, lr_g, lr_d,
+        lr_g, lr_d,
     ) = [cfg['train'][task][_] for _ in (
         'use_amp', 'resume',
         'num_workers', 'num_epochs', 'warmup_epochs', 'batch_size', 'val_interval', 'patch_size', 'sw_batch_size',
         'train_limit', 'val_limit',
         'adversarial_weight', 'perceptual_weight', 'kl_weight',
-        'ct_range', 'bone_range', 'lr_g', 'lr_d',
+        'lr_g', 'lr_d',
     )]
 
     # 2. 数据准备 (所有 Rank 执行相同的 glob 以保证文件列表一致)
@@ -118,8 +118,8 @@ def main():
         print(f'Train limited: {len(train_files)}, Val limited: {len(val_files)}')
 
     # Transforms (需要确保 define.py 中的 bug 已修复)
-    train_transforms = Compose(define.autoencoder_train_transforms(patch_size, bone_range[0]))
-    val_transforms = Compose(define.autoencoder_val_transforms())
+    train_transforms = Compose(define.vae_train_transforms(patch_size))
+    val_transforms = Compose(define.vae_val_transforms())
 
     train_ds = Dataset(train_files, train_transforms)
     val_ds = Dataset(val_files, val_transforms) if len(val_files) else None
@@ -147,10 +147,10 @@ def main():
 
     # 4. 模型初始化与 DDP 封装
     # 生成器
-    autoencoder = define.autoencoder().to(device)
+    vae = define.vae().to(device)
     if dist.is_initialized():
-        autoencoder = nn.SyncBatchNorm.convert_sync_batchnorm(autoencoder)
-        autoencoder = DDP(autoencoder, device_ids=[local_rank], output_device=local_rank)
+        vae = nn.SyncBatchNorm.convert_sync_batchnorm(vae)
+        vae = DDP(vae, device_ids=[local_rank], output_device=local_rank)
 
     # 判别器
     discriminator = define.discriminator().to(device)
@@ -165,7 +165,7 @@ def main():
     PerceptualLoss = define.perceptual_loss().to(device)
 
     # 优化器
-    optimizer_g = torch.optim.Adam(autoencoder.parameters(), lr=lr_g, betas=(0.5, 0.9))
+    optimizer_g = torch.optim.Adam(vae.parameters(), lr=lr_g, betas=(0.5, 0.9))
     optimizer_d = torch.optim.Adam(discriminator.parameters(), lr=lr_d, betas=(0.5, 0.9))
 
     # 混合精度
@@ -199,13 +199,13 @@ def main():
                 # DDP 模型加载时期望有 module. 前缀。
 
                 # 这里简单处理：直接加载。如果报错，需要根据 key 进行 strip 或 add module.
-                # 假设保存时使用的是 autoencoder.state_dict() (包含或不包含 module 取决于保存方式)
-                # 推荐：保存时使用 autoencoder.module.state_dict()，这样加载时通用性更好。
+                # 假设保存时使用的是 vae.state_dict() (包含或不包含 module 取决于保存方式)
+                # 推荐：保存时使用 vae.module.state_dict()，这样加载时通用性更好。
                 # 下面的代码假设保存的是原始 state_dict (带不带module视情况而定)
 
                 # 尝试直接加载
                 try:
-                    autoencoder.load_state_dict(checkpoint['state_dict'])
+                    vae.load_state_dict(checkpoint['state_dict'])
                 except RuntimeError:
                     # 如果 key 不匹配 (多了或少了 module.)
                     new_state_dict = {}
@@ -216,17 +216,17 @@ def main():
                             new_state_dict[f'module.{k}'] = v  # 加上 module.
                     # 再次尝试，根据当前模型是否有 module 前缀决定
                     try:
-                        autoencoder.load_state_dict(new_state_dict)
+                        vae.load_state_dict(new_state_dict)
                     except:
                         # 最后的 fallback：如果是 DDP 模型，必须有 module.；如果不是，去掉。
-                        if isinstance(autoencoder, DDP):
+                        if isinstance(vae, DDP):
                             # 确保有 module.
                             final_dict = {f'module.{k}' if not k.startswith('module.') else k: v for k, v in
                                           checkpoint['state_dict'].items()}
                         else:
                             # 确保没有 module.
                             final_dict = {k.replace('module.', ''): v for k, v in checkpoint['state_dict'].items()}
-                        autoencoder.load_state_dict(final_dict)
+                        vae.load_state_dict(final_dict)
 
                 # 判别器同理
                 try:
@@ -256,10 +256,10 @@ def main():
 
     # 验证滑动窗口推理包装
     def encode_decode_mu(inputs):
-        return autoencoder(inputs)[0]
-        # if isinstance(autoencoder, DDP):
-        #     return autoencoder.module.decode(autoencoder.module.encode(inputs)[0])
-        # return autoencoder.decode(autoencoder.encode(inputs)[0])
+        return vae(inputs)[0]
+        # if isinstance(vae, DDP):
+        #     return vae.module.decode(vae.module.encode(inputs)[0])
+        # return vae.decode(vae.encode(inputs)[0])
 
     # 训练循环
     for epoch in range(start_epoch, num_epochs):
@@ -268,7 +268,7 @@ def main():
 
         warmup = epoch < warmup_epochs
 
-        autoencoder.train()
+        vae.train()
         discriminator.train()
 
         epoch_loss_g = 0
@@ -290,14 +290,14 @@ def main():
             amp_ctx = autocast(device.type) if use_amp else nullcontext()
             with amp_ctx:
                 # 注意：DDP forward 会自动同步
-                if isinstance(autoencoder, DDP):
-                    z_mu, z_sigma = autoencoder.module.encode(images)  # 显式调用 encode 避免 DDP forward 的困惑，或者在 forward 中实现
-                    z = autoencoder.module.sampling(z_mu, z_sigma)
-                    reconstruction = autoencoder.module.decode(z)
+                if isinstance(vae, DDP):
+                    z_mu, z_sigma = vae.module.encode(images)  # 显式调用 encode 避免 DDP forward 的困惑，或者在 forward 中实现
+                    z = vae.module.sampling(z_mu, z_sigma)
+                    reconstruction = vae.module.decode(z)
                 else:
-                    z_mu, z_sigma = autoencoder.encode(images)
-                    z = autoencoder.sampling(z_mu, z_sigma)
-                    reconstruction = autoencoder.decode(z)
+                    z_mu, z_sigma = vae.encode(images)
+                    z = vae.sampling(z_mu, z_sigma)
+                    reconstruction = vae.decode(z)
 
                 l1_loss = L1Loss(reconstruction.float(), images.float())
 
@@ -338,12 +338,12 @@ def main():
                 scaler_g.scale(loss_g).backward()
                 scaler_g.unscale_(optimizer_g)
                 # DDP 下 clip_grad_norm 依然有效
-                torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
                 scaler_g.step(optimizer_g)
                 scaler_g.update()
             else:
                 loss_g.backward()
-                torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
                 optimizer_g.step()
 
             # 判别器训练
@@ -405,7 +405,7 @@ def main():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            autoencoder.eval()
+            vae.eval()
 
             # 本地累积
             local_l1_loss = torch.tensor(0.0, device=device)
@@ -487,8 +487,8 @@ def main():
 
                 print(f'Val Epoch {epoch}: L1={val_l1_val:.5f} | PSNR={psnr_val:.4f} | SSIM={ssim_val:.4f}')
 
-                # 保存模型 (建议保存 autoencoder.module)
-                to_save_ae = autoencoder.module if isinstance(autoencoder, DDP) else autoencoder
+                # 保存模型 (建议保存 vae.module)
+                to_save_ae = vae.module if isinstance(vae, DDP) else vae
                 to_save_disc = discriminator.module if isinstance(discriminator, DDP) else discriminator
 
                 checkpoint = {

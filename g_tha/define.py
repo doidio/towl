@@ -5,13 +5,14 @@ from monai.networks.nets import AutoencoderKL, PatchDiscriminator
 from monai.transforms import (
     LoadImaged, MapTransform, RandCropByPosNegLabeld, ThresholdIntensityd, CopyItemsd, DeleteItemsd)
 
+bone_range = [150.0, 650.0]
 
 class CTBoneNormalized(MapTransform):
     """基于线性分段函数的 CT 值映射变换 (Linear Piecewise Mapping)"""
 
     def __init__(self, keys, reverse=False, allow_missing_keys=False):
         super().__init__(keys, allow_missing_keys)
-        self.src_pts = [150.0, 650.0, 1500.0, 3000.0]  # 源域的关键点，HU 值
+        self.src_pts = [*bone_range, 1500.0, 3000.0]  # 源域的关键点，HU 值
         self.dst_pts = [-1.0, 0.0, 0.5, 1.0]  # 目标域的关键点，归一化后的值
         if reverse:
             self.src_pts, self.dst_pts = self.dst_pts, self.src_pts
@@ -31,7 +32,7 @@ class CTBoneNormalized(MapTransform):
         return d
 
 
-def autoencoder():
+def vae():
     return AutoencoderKL(
         spatial_dims=3,
         in_channels=1,
@@ -66,11 +67,11 @@ def perceptual_loss():
     )
 
 
-def autoencoder_train_transforms(patch_size, label_threshold):
+def vae_train_transforms(patch_size):
     return [
         LoadImaged(keys=['image'], ensure_channel_first=True),
         CopyItemsd(keys=['image'], times=1, names=['label']),
-        ThresholdIntensityd(keys=['label'], threshold=label_threshold, above=True, cval=0),
+        ThresholdIntensityd(keys=['label'], threshold=bone_range[0], above=True, cval=0),
         RandCropByPosNegLabeld(
             keys=['image'],
             label_key='label',
@@ -83,13 +84,9 @@ def autoencoder_train_transforms(patch_size, label_threshold):
     ]
 
 
-def autoencoder_val_transforms():
+def vae_val_transforms():
     return [
         LoadImaged(keys=['image'], ensure_channel_first=True),
         CTBoneNormalized(keys=['image']),
     ]
 
-
-def autoencoder_encode_decode_mu(model, inputs):
-    """确定性编解码，用于验证阶段滑动窗口推理"""
-    return model.decode(model.encode(inputs)[0])

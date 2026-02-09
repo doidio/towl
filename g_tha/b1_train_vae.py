@@ -38,19 +38,19 @@ def main():
     log_dir = train_root / 'logs'
     ckpt_dir = train_root / 'checkpoints'
 
-    task = 'autoencoder'
+    task = 'vae'
     (
         use_amp, resume,
         num_workers, num_epochs, warmup_epochs, batch_size, val_interval, patch_size, sw_batch_size,
         train_limit, val_limit,
         adv_weight, per_weight, kl_weight,
-        ct_range, bone_range, lr_g, lr_d,
+        lr_g, lr_d,
     ) = [cfg['train'][task][_] for _ in (
         'use_amp', 'resume',
         'num_workers', 'num_epochs', 'warmup_epochs', 'batch_size', 'val_interval', 'patch_size', 'sw_batch_size',
         'train_limit', 'val_limit',
         'adversarial_weight', 'perceptual_weight', 'kl_weight',
-        'ct_range', 'bone_range', 'lr_g', 'lr_d',
+        'lr_g', 'lr_d',
     )]
 
     # 数据集覆盖术前和术后
@@ -65,8 +65,8 @@ def main():
     val_files = val_files[::len(val_files) // (val_total - 1)]
     print(f'Train limited: {train_total}, Val limited: {len(val_files)}')
 
-    train_transforms = Compose(define.autoencoder_train_transforms(patch_size, bone_range[0]))
-    val_transforms = Compose(define.autoencoder_val_transforms())
+    train_transforms = Compose(define.vae_train_transforms(patch_size))
+    val_transforms = Compose(define.vae_val_transforms())
 
     train_ds = Dataset(train_files, train_transforms)
     val_ds = Dataset(val_files, val_transforms) if len(val_files) else None
@@ -74,8 +74,8 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=1, num_workers=num_workers) if val_ds else None
 
-    # 生成器 (AutoencoderKL)
-    autoencoder = define.autoencoder().to(device)
+    # 生成器 (VAE)
+    vae = define.vae().to(device)
 
     # 判别器 (PatchGAN)
     discriminator = define.discriminator().to(device)
@@ -90,7 +90,7 @@ def main():
     PerceptualLoss = define.perceptual_loss().to(device)
 
     # 优化器
-    optimizer_g = torch.optim.Adam(autoencoder.parameters(), lr=lr_g, betas=(0.5, 0.9))
+    optimizer_g = torch.optim.Adam(vae.parameters(), lr=lr_g, betas=(0.5, 0.9))
     optimizer_d = torch.optim.Adam(discriminator.parameters(), lr=lr_d, betas=(0.5, 0.9))
 
     # 混合精度 Scaler
@@ -119,7 +119,7 @@ def main():
             print(f'Loading checkpoint from {load_pt}...')
             checkpoint = torch.load(load_pt, map_location=device)
 
-            autoencoder.load_state_dict(checkpoint['state_dict'])
+            vae.load_state_dict(checkpoint['state_dict'])
             discriminator.load_state_dict(checkpoint['discriminator'])
             optimizer_g.load_state_dict(checkpoint['optimizer_g'])
             optimizer_d.load_state_dict(checkpoint['optimizer_d'])
@@ -134,11 +134,15 @@ def main():
         except Exception as e:
             print(f'Load failed: {e}. Starting from scratch.')
 
+    # 验证滑动窗口推理，确定性编解码
+    def encode_decode_mu(inputs):
+        return vae.decode(vae.encode(inputs)[0])
+
     # 训练
     for epoch in range(start_epoch, num_epochs):
         warmup = epoch < warmup_epochs
 
-        autoencoder.train()
+        vae.train()
         discriminator.train()
 
         epoch_loss_g = 0
@@ -156,11 +160,11 @@ def main():
             amp_ctx = autocast(device.type) if use_amp else nullcontext()
             with amp_ctx:
                 # 编码获取分布参数
-                z_mu, z_sigma = autoencoder.encode(images)
+                z_mu, z_sigma = vae.encode(images)
 
                 # 解码
-                z = autoencoder.sampling(z_mu, z_sigma)
-                reconstruction = autoencoder.decode(z)
+                z = vae.sampling(z_mu, z_sigma)
+                reconstruction = vae.decode(z)
 
                 # L1 重建损失
                 l1_loss = L1Loss(reconstruction.float(), images.float())
@@ -206,12 +210,12 @@ def main():
             if use_amp:
                 scaler_g.scale(loss_g).backward()
                 scaler_g.unscale_(optimizer_g)
-                torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
                 scaler_g.step(optimizer_g)
                 scaler_g.update()
             else:
                 loss_g.backward()
-                torch.nn.utils.clip_grad_norm_(autoencoder.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_(vae.parameters(), max_norm=1.0)
                 optimizer_g.step()
 
             # 预热后训练判别器
@@ -275,7 +279,7 @@ def main():
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-            autoencoder.eval()
+            vae.eval()
             val_l1_loss = 0
             PSNR = PSNRMetric(max_val=2.0)
             SSIM = SSIMMetric(data_range=2.0, spatial_dims=3)
@@ -294,7 +298,7 @@ def main():
                             inputs=images,
                             roi_size=patch_size,
                             sw_batch_size=sw_batch_size,
-                            predictor=define.autoencoder_encode_decode_mu,
+                            predictor=encode_decode_mu,
                             overlap=0.25,
                             mode='gaussian',
                             device=device,
@@ -338,7 +342,7 @@ def main():
             # 保存
             checkpoint = {
                 'epoch': epoch,
-                'state_dict': autoencoder.state_dict(),
+                'state_dict': vae.state_dict(),
                 'discriminator': discriminator.state_dict(),
                 'optimizer_g': optimizer_g.state_dict(),
                 'optimizer_d': optimizer_d.state_dict(),

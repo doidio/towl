@@ -32,11 +32,11 @@ def main():
     # cache_dir = train_root / 'cache'
     ckpt_dir = train_root / 'checkpoints'
 
-    task = 'autoencoder'
+    task = 'vae'
     (
-        use_amp, num_workers, patch_size, ct_range, bone_range,
+        use_amp, num_workers, patch_size,
     ) = [cfg['train'][task][_] for _ in (
-        'use_amp', 'num_workers', 'patch_size', 'ct_range', 'bone_range',
+        'use_amp', 'num_workers', 'patch_size',
     )]
     load_pt = ckpt_dir / f'{task}_best.pt'
 
@@ -44,24 +44,24 @@ def main():
     train_files += [{'image': p.as_posix()} for p in (dataset_root / 'post' / 'train').glob('*.nii.gz')]
     print(f'Train: {len(train_files)}')
 
-    train_transforms = Compose(define.autoencoder_train_transforms(patch_size, bone_range[0]))
+    train_transforms = Compose(define.vae_train_transforms(patch_size))
 
     train_ds = Dataset(train_files, train_transforms)
     train_loader = DataLoader(train_ds, batch_size=1, shuffle=True, num_workers=num_workers, pin_memory=True)
 
-    autoencoder = define.autoencoder().to(device)
+    vae = define.vae().to(device)
 
     try:
         print(f'Loading checkpoint from {load_pt}...')
         checkpoint = torch.load(load_pt, map_location=device)
-        autoencoder.load_state_dict(checkpoint['state_dict'])
+        vae.load_state_dict(checkpoint['state_dict'])
     except Exception:
         raise SystemExit(f'Failed to load checkpoint: {load_pt}') from None
 
     for _ in ('epoch', 'best_val_ssim', 'val_l1', 'val_psnr', 'val_ssim', 'scale_factor'):
         print(_, checkpoint.get(_))
 
-    autoencoder.eval()
+    vae.eval()
 
     running_std = 0.0
     count = 0
@@ -76,7 +76,7 @@ def main():
             for batch in tqdm(train_loader):
                 images = batch['image'].to(device)
                 # 获取 latent 分布
-                z_mu, _ = autoencoder.encode(images)
+                z_mu, _ = vae.encode(images)
                 running_std += z_mu.std().item()
                 count += 1
 

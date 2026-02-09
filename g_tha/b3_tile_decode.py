@@ -1,5 +1,35 @@
+"""
+验证 3D VAE 在不同推理模式下的重建质量，确立 Latent Diffusion 的数据预处理方案。
+
+核心目的:
+1. 验证 [Latent Space 拼接] 与 [Image Space 拼接] 的数学等价性，确保 LDM 训练数据的可靠性。
+2. 通过对比 [整图推理] 与 [滑动窗口]，量化 "归一化层分布漂移 (Distribution Shift)" 对 3D 医学图像重建的破坏性影响。
+
+包含三种推理模式：
+--------------------------------------------------------------------------------
+1. [Mode A] Image Space Sliding Window (基准 / Baseline):
+   - 方式: 常规的 sliding_window_inference。
+   - 意义: 代表模型在理想状态下的最佳重建能力。
+
+2. [Mode B] Latent Space Sliding Window (拟采用方案 / Proposed):
+   - 方式: 模拟 LDM 流程。先编码存为 Latent -> 读取 -> 缩放 -> 在 Latent 空间做滑动窗口解码。
+   - 意义: 如果 Mode B ≈ Mode A，说明我们可以放心地把 TB 级 CT 数据压缩为 GB 级 Latent 供 LDM 训练。
+
+3. [Mode C] Full Image Direct Inference (对照组 / Control):
+   - 方式: 强制将整张 3D 卷一次性送入网络 (CPU 运行)。
+   - 意义: 用于反证滑动窗口的必要性。
+
+预期结果 (Expected Outcome):
+--------------------------------------------------------------------------------
+1. Mode A ≈ Mode B: L1 误差差异极小 (例如 < 1e-5)。这证明 Latent 压缩策略是无损的（相对于模型能力而言）。
+2. Mode C >> Mode A: 整图推理误差巨大 (例如 > 0.1)。
+3. Center L1 Analysis: 即使剔除边缘，Mode C 的中心误差依然很高。
+   -> 结论: 误差源于 Patch 训练导致的归一化统计量偏移，而非卷积边界效应 (Padding)。
+"""
+
 import argparse
 from pathlib import Path
+
 import numpy as np
 import tomlkit
 import torch
@@ -7,6 +37,7 @@ import torch.nn.functional as F
 from monai.inferers import sliding_window_inference
 from monai.transforms import Compose, SaveImage, DivisiblePad
 from torch.amp import autocast
+
 import define
 
 try:
@@ -17,29 +48,18 @@ except ImportError:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def decode_with_sliding_window(z, autoencoder, scale_factor, patch_size, original_shape, overlap=0.25):
+def decode_with_sliding_window(z, vae, scale_factor, patch_size, original_shape, overlap=0.25):
     """
     Mode B 的核心：在潜在空间进行滑动窗口解码
     """
-    # 1. 还原 Scale
     z_unscaled = z / scale_factor
-
-    # 2. 计算对齐后的空间尺寸 (Latent Space Spatial Dim * 4)
-    # 模型是4倍下采样，所以 Latent 的每个像素对应 4 个原图像素
     aligned_shape = [s * 4 for s in z.shape[2:]]
-
-    # 3. 上采样 Trick: [B, 4, D, H, W] -> [B, 4, 4D, 4H, 4W]
     z_upsampled = F.interpolate(z_unscaled, size=aligned_shape, mode='nearest')
 
-    # 4. 定义适配器
     def decode_predictor_wrapper(z_up_patch):
-        # Input: [B, 4, 128, 128, 128] (伪装成 Image 大小的 Latent Patch)
-        # Downsample back to latent size: 128 -> 32 (除以4)
         z_patch = F.interpolate(z_up_patch, scale_factor=0.25, mode='nearest')
-        # Decode: [B, 4, 32, 32, 32] -> [B, 1, 128, 128, 128]
-        return autoencoder.decode(z_patch)
+        return vae.decode(z_patch)
 
-    # 5. 滑动窗口解码
     recon_aligned = sliding_window_inference(
         inputs=z_upsampled,
         roi_size=patch_size,
@@ -51,13 +71,38 @@ def decode_with_sliding_window(z, autoencoder, scale_factor, patch_size, origina
         progress=True
     )
 
-    # 6. 恢复原始尺寸 (处理 padding 或 rounding 带来的微小差异)
     if recon_aligned.shape[2:] != original_shape:
         final_img = F.interpolate(recon_aligned, size=original_shape, mode='trilinear', align_corners=False)
     else:
         final_img = recon_aligned
 
     return final_img
+
+
+def compute_metrics_with_margin(pred, target, margin=32):
+    """
+    同时计算全局误差和中心区域误差（剔除边缘效应）
+    Args:
+        margin: 剔除边缘的像素数 (32像素足以覆盖深层卷积的感受野边界)
+    """
+    l1_func = torch.nn.L1Loss()
+
+    # 1. 全局 L1
+    global_l1 = l1_func(pred, target).item()
+
+    # 2. 中心 L1 (剔除边界)
+    # 检查尺寸是否足够裁剪
+    d, h, w = pred.shape[2:]
+    if d > 2 * margin and h > 2 * margin and w > 2 * margin:
+        pred_center = pred[..., margin:-margin, margin:-margin, margin:-margin]
+        target_center = target[..., margin:-margin, margin:-margin, margin:-margin]
+        center_l1 = l1_func(pred_center, target_center).item()
+        valid_center = True
+    else:
+        center_l1 = global_l1  # 尺寸太小，无法裁剪，退化为全局
+        valid_center = False
+
+    return global_l1, center_l1, valid_center
 
 
 def main():
@@ -72,65 +117,62 @@ def main():
     ckpt_dir = train_root / 'checkpoints'
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    task = 'autoencoder'
+    task = 'vae'
     patch_size = cfg['train'][task]['patch_size']
     use_amp = cfg['train'][task]['use_amp']
 
     print(f"Main computation device: {device}")
-    autoencoder = define.autoencoder().to(device)
+    vae = define.vae().to(device)
     load_pt = ckpt_dir / f'{task}_best.pt'
 
     try:
         print(f'Loading checkpoint from {load_pt}...')
         checkpoint = torch.load(load_pt, map_location=device)
-        autoencoder.load_state_dict(checkpoint['state_dict'])
+        vae.load_state_dict(checkpoint['state_dict'])
         scale_factor = checkpoint.get('scale_factor', 1.0)
         print(f'Loaded Scale Factor: {scale_factor}')
     except Exception as e:
         raise SystemExit(f'Failed to load checkpoint: {e}')
 
-    autoencoder.eval()
-    l1_loss_func = torch.nn.L1Loss()
+    vae.eval()
 
+    # 优先选取之前那个有问题的样本，或者第一个
     pre_files = list((dataset_root / 'post' / 'train').glob('*.nii.gz'))
     if not pre_files:
         print("No files found.")
         return
-
-    # 选取一个样本进行详细测试
-    sample_file = pre_files[1]
+    sample_file = pre_files[1] if len(pre_files) > 1 else pre_files[0]
     print(f'Target Sample: {sample_file.name}')
 
-    base_transforms = Compose(define.autoencoder_val_transforms())
+    base_transforms = Compose(define.vae_val_transforms())
 
-    # 准备 Saver
+    # Savers
     saver_a = SaveImage(output_dir=output_dir, output_postfix='mode_a', separate_folder=False, print_log=False)
     saver_b = SaveImage(output_dir=output_dir, output_postfix='mode_b', separate_folder=False, print_log=False)
     saver_c = SaveImage(output_dir=output_dir, output_postfix='mode_c_full', separate_folder=False, print_log=False)
 
-    # 预测器定义
     def encode_decode_predictor(inputs):
-        z_mu, _ = autoencoder.encode(inputs)
-        return autoencoder.decode(z_mu)
+        z_mu, _ = vae.encode(inputs)
+        return vae.decode(z_mu)
 
     def encode_predictor(inputs):
-        return autoencoder.encode(inputs)[0]
+        return vae.encode(inputs)[0]
 
     # 加载数据
     data = base_transforms({'image': sample_file.as_posix()})
-
-    # 处理 numpy -> tensor
     if isinstance(data['image'], np.ndarray):
         data['image'] = torch.from_numpy(data['image'])
 
-    images = data['image'].unsqueeze(0).to(device)  # [1, 1, D, H, W]
+    images = data['image'].unsqueeze(0).to(device)
     images_cpu = images.cpu()
     original_shape = images.shape[2:]
-
     print(f"\nOriginal Shape: {original_shape}")
 
+    # 用于记录结果
+    results = {}
+
     # =========================================================
-    # Mode A: Image Space Stitching (Baseline) - GPU
+    # Mode A: Image Space Stitching
     # =========================================================
     print("\n[Mode A] Running Image Space Sliding Window (GPU)...")
     with torch.no_grad():
@@ -146,18 +188,19 @@ def main():
                 device=device,
                 progress=True
             )
-    l1_a = l1_loss_func(recon_a.cpu(), images_cpu).item()
+
+    g_l1, c_l1, _ = compute_metrics_with_margin(recon_a.cpu(), images_cpu, margin=32)
+    results['A'] = {'global': g_l1, 'center': c_l1}
     saver_a(recon_a.cpu()[0, 0:1], meta_data=data.get('image_meta_dict'))
-    print(f'>> Mode A L1: {l1_a:.6f}')
+    print(f'>> Mode A | Global L1: {g_l1:.6f} | Center L1: {c_l1:.6f}')
 
     # =========================================================
-    # Mode B: Latent Space Stitching (Simulation of LDM) - GPU
+    # Mode B: Latent Space Stitching
     # =========================================================
     print("\n[Mode B] Running Latent Space Pipeline (GPU)...")
     with torch.no_grad():
         amp_ctx = autocast(device.type) if use_amp else torch.no_grad()
         with amp_ctx:
-            # 1. Get Full Latent
             z_mu = sliding_window_inference(
                 inputs=images,
                 roi_size=patch_size,
@@ -168,85 +211,81 @@ def main():
                 device=device,
                 progress=True
             )
-            # 2. Scale
             z = z_mu * scale_factor
+            recon_b = decode_with_sliding_window(z, vae, scale_factor, patch_size, original_shape, overlap=0.25)
 
-            # 3. Simulate Storage
-            z_loaded = z
-
-            # 4. Decode with tiling
-            recon_b = decode_with_sliding_window(
-                z_loaded,
-                autoencoder,
-                scale_factor,
-                patch_size=patch_size,
-                original_shape=original_shape,
-                overlap=0.25
-            )
-
-    l1_b = l1_loss_func(recon_b.cpu(), images_cpu).item()
+    g_l1, c_l1, _ = compute_metrics_with_margin(recon_b.cpu(), images_cpu, margin=32)
+    results['B'] = {'global': g_l1, 'center': c_l1}
     saver_b(recon_b.cpu()[0, 0:1], meta_data=data.get('image_meta_dict'))
-    print(f'>> Mode B L1: {l1_b:.6f}')
+    print(f'>> Mode B | Global L1: {g_l1:.6f} | Center L1: {c_l1:.6f}')
 
     # =========================================================
-    # Mode C: Full Image Direct Inference (Gold Standard) - CPU
+    # Mode C: Full Image Direct Inference
     # =========================================================
-    print("\n[Mode C] Running Full Image Direct Inference on CPU (Gold Standard)...")
-    print(">> Moving model to CPU and clearing GPU cache...")
-
-    # 1. Move everything to CPU
+    print("\n[Mode C] Running Full Image Direct Inference on CPU...")
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    autoencoder = autoencoder.cpu()
+    vae = vae.cpu()
     images_in_cpu = images.cpu()
 
     try:
         with torch.no_grad():
-            # CPU 不需要 AMP，也不支持 CUDA 的 autocast，直接跑 float32
-            # 1. Pad to be divisible by 4
             padder = DivisiblePad(k=4)
-            images_padded = padder(images_in_cpu[0]).unsqueeze(0)  # Keep on CPU
+            images_padded = padder(images_in_cpu[0]).unsqueeze(0)
 
-            # 2. Direct Forward (No tiling)
-            # 这里的 autoencoder 已经在 CPU 上了
-            z_mu_full, _ = autoencoder.encode(images_padded)
-            recon_c_padded = autoencoder.decode(z_mu_full)
-
-            # 3. Inverse Pad (Crop back)
+            z_mu_full, _ = vae.encode(images_padded)
+            recon_c_padded = vae.decode(z_mu_full)
             recon_c = padder.inverse(recon_c_padded[0]).unsqueeze(0)
 
-        l1_c = l1_loss_func(recon_c, images_cpu).item()
+        g_l1, c_l1, valid_c = compute_metrics_with_margin(recon_c, images_cpu, margin=32)
+        results['C'] = {'global': g_l1, 'center': c_l1}
         saver_c(recon_c[0, 0:1], meta_data=data.get('image_meta_dict'))
-        print(f'>> Mode C L1: {l1_c:.6f}')
+        print(f'>> Mode C | Global L1: {g_l1:.6f} | Center L1: {c_l1:.6f}')
 
-        # Move model back to GPU just in case (good practice)
-        autoencoder = autoencoder.to(device)
+        vae = vae.to(device)  # Put back
 
     except Exception as e:
-        print(f">> Mode C Failed with error: {e}")
-        l1_c = None
+        print(f">> Mode C Failed: {e}")
+        results['C'] = None
 
     # =========================================================
-    # Final Comparison
+    # Comparison Analysis
     # =========================================================
-    print("\n--- Final Report ---")
-    print(f"Mode A (Image Tile) : {l1_a:.6f}")
-    print(f"Mode B (Latent Tile): {l1_b:.6f}")
-    if l1_c is not None:
-        print(f"Mode C (Full Direct): {l1_c:.6f}")
+    print("\n" + "=" * 50)
+    print("      BOUNDARY EFFECT ANALYSIS (Margin=32px)")
+    print("=" * 50)
+    print(f"{'Mode':<12} | {'Global L1':<12} | {'Center L1':<12} | {'Edge Impact'}")
+    print("-" * 50)
 
-        diff_ac = abs(l1_a - l1_c)
-        diff_bc = abs(l1_b - l1_c)
-
-        print(f"\nGap A vs C (Tiling Error) : {diff_ac:.6f}")
-        print(f"Gap B vs C (Latent Error) : {diff_bc:.6f}")
-
-        if diff_ac < 0.01:  # 放宽一点点标准，因为 CPU/GPU 浮点精度可能略有差异
-            print(">> Tiling strategy is EXCELLENT (Consistent with full inference).")
+    for key, name in [('A', 'Image Tile'), ('B', 'Latent Tile'), ('C', 'Full Direct')]:
+        if results[key]:
+            g = results[key]['global']
+            c = results[key]['center']
+            # Edge Impact: 主要是看中心误差是否比全局误差显著更低
+            # 如果 Center << Global，说明边缘误差很大
+            impact = "Low" if abs(g - c) < 0.01 else "High"
+            print(f"{name:<12} | {g:.6f}       | {c:.6f}       | {impact}")
         else:
-            print(">> Tiling introduces visible divergence.")
-    else:
-        print(">> Could not compare with Mode C.")
+            print(f"{name:<12} | {'FAILED':<12} | {'FAILED':<12} | -")
+
+    print("-" * 50)
+
+    if results['C']:
+        diff_global = results['C']['global'] - results['A']['global']
+        diff_center = results['C']['center'] - results['A']['center']
+
+        print(f"\nAnalysis of Mode C Failure:")
+        print(f"1. Global Error Increase: {diff_global:.6f}")
+        print(f"2. Center Error Increase: {diff_center:.6f}")
+
+        if diff_center > 0.05:
+            print("\n[CONCLUSION]: Center Error is HIGH.")
+            print("The model fails even in the center of the image.")
+            print("-> Root cause is DISTRIBUTION SHIFT (Normalization), NOT boundary padding.")
+        else:
+            print("\n[CONCLUSION]: Center Error is LOW.")
+            print("The error is concentrated at the edges.")
+            print("-> Root cause is PADDING ARTIFACTS.")
 
 
 if __name__ == '__main__':
