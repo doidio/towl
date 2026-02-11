@@ -71,7 +71,7 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=1, num_workers=num_workers) if val_ds else None
 
     # 生成器 (VAE)
-    vae = define.vae().to(device)
+    vae = define.vae_kl().to(device)
 
     # 判别器 (PatchGAN)
     discriminator = define.discriminator().to(device)
@@ -315,10 +315,10 @@ def main():
                         def norm_vis(x):
                             return torch.clamp(x * 0.5 + 0.5, 0, 1)
 
-                        z_idx = images.shape[0] // 2
+                        z_idx = images.shape[2] // 2  # [B, C, D, H, W]
 
-                        vis_input = images[z_idx, 0, 0]
-                        vis_recon = reconstruction[z_idx, 0, 0]
+                        vis_input = images[0, 0, z_idx]
+                        vis_recon = reconstruction[0, 0, z_idx]
                         vis_diff = torch.clamp(torch.abs(vis_input - vis_recon), 0, 1)
 
                         writer.add_image('val/CT_Input', norm_vis(vis_input), epoch, dataformats='HW')

@@ -38,7 +38,7 @@ def main():
     patch_size = cfg['train'][task]['patch_size']
     use_amp = cfg['train'][task]['use_amp']
 
-    vae = define.vae().to(device)
+    vae = define.vae_kl().to(device)
     load_pt = ckpt_dir / f'{task}_best.pt'
 
     try:

@@ -1,3 +1,6 @@
+from copy import deepcopy
+
+import monai
 import numpy as np
 import torch
 from monai.losses import PerceptualLoss
@@ -62,7 +65,10 @@ class CTBoneNormalized(MapTransform):
         return d
 
 
-def vae():
+vae_downsample = 4
+
+
+def vae_kl():
     return AutoencoderKL(
         spatial_dims=3,
         in_channels=1,
@@ -121,6 +127,9 @@ def vae_val_transforms():
     ]
 
 
+correction_factor = 2.782069290990221 / 2.1347848462840897
+
+
 class LoadLatentConditiond(MapTransform):
     """读取 .npy 文件 latent 数据 [8, D, H, W] float16"""
 
@@ -129,18 +138,17 @@ class LoadLatentConditiond(MapTransform):
 
     def __call__(self, data):
         d = dict(data)
-        for key in self.key_iterator(d):
-            # 加载 npy
-            data_npy = np.load(d[key])  # [8, D, H, W]
+        # 加载 npy
+        data_npy = np.load(d['image']) * correction_factor  # [8, D, H, W]
 
-            # 转换为 Tensor
-            if isinstance(data_npy, np.ndarray):
-                data_tensor = torch.from_numpy(data_npy).float()
-            else:
-                data_tensor = data_npy.float()
+        # 转换为 Tensor
+        if isinstance(data_npy, np.ndarray):
+            data_tensor = torch.from_numpy(data_npy).float()
+        else:
+            data_tensor = data_npy.float()
 
-            d['image'] = data_tensor[0:4]  # 术后
-            d['condition'] = data_tensor[4:8]  # 术前
+        d['image'] = data_tensor[0:4]  # 术后
+        d['condition'] = data_tensor[4:8]  # 术前
 
         return d
 
@@ -156,17 +164,101 @@ def ldm_unet():
         spatial_dims=3,
         in_channels=8,
         out_channels=4,
-        num_res_blocks=(2, 2, 2),
-        channels=(64, 128, 256),
-        attention_levels=(False, True, True),  # 启用自注意力学习解剖方位关系
+        num_res_blocks=(2, 2, 2, 2),
+        channels=(64, 128, 256, 512),
+        attention_levels=(False, False, True, True),  # 启用自注意力学习解剖方位关系
         norm_num_groups=32,
-        with_conditioning=False,  # 通道拼接方式禁用交叉注意力
+        with_conditioning=False,  # TODO 交叉注意力注入全局条件
+        use_flash_attention=True,
     )
 
 
 def scheduler_ddpm():
     return DDPMScheduler(
         num_train_timesteps=1000,
-        schedule='linear_beta',
+        schedule='scaled_linear_beta',
         prediction_type='epsilon',
+        beta_start=0.00085,  # LDM 标准参数
+        beta_end=0.012,  # LDM 标准参数
     )
+
+
+def sliding_window_decode(z_unscaled, vae, patch_size, sw_batch_size, overlap=0.25):
+    """
+    针对 LDM 的 Tiled VAE Decoding。
+    z: [B, C, D, H, W] (Latent)
+    patch_size: Image Space 的 patch size (如 [128, 128, 128])
+    """
+    original_shape = [s * vae_downsample for s in z_unscaled.shape[2:]]
+
+    # 构造伪上采样输入，配合 sliding_window_inference
+    z_upsampled = torch.nn.functional.interpolate(z_unscaled, size=original_shape, mode='nearest')
+
+    # 定义 Predictor 先缩小回 Latent Size，再 Decode
+    def decode_predictor_wrapper(z_up_patch):
+        # input: [B, C, roi_x, roi_y, roi_z] (Image Space Size)
+        # downsample back to latent size
+        z_patch = torch.nn.functional.interpolate(z_up_patch, scale_factor=1.0 / vae_downsample, mode='nearest')
+        return vae.decode(z_patch)
+
+    # 5. 滑动窗口推理
+    recon_aligned = monai.inferers.sliding_window_inference(
+        inputs=z_upsampled,
+        roi_size=patch_size,
+        sw_batch_size=sw_batch_size,
+        predictor=decode_predictor_wrapper,
+        overlap=overlap,
+        mode='gaussian',
+        device=z_unscaled.device,
+        progress=False,
+    )
+
+    return recon_aligned
+
+
+class EMA:
+    """指数移动平均 (Exponential Moving Average) 用于稳定扩散模型的生成质量"""
+
+    def __init__(self, model, decay):
+        self.decay = decay
+        self.shadow = {}
+        self.original = {}
+
+        # 注册模型参数到 shadow 字典
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+
+    def update(self, model):
+        """在每个训练 step 后更新 EMA 权重"""
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                self.shadow[name].mul_(self.decay).add_(param.data, alpha=1.0 - self.decay)
+
+    def store(self, model):
+        """暂存当前模型的真实权重 (验证前调用)"""
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.original[name] = param.data.clone()
+
+    def copy_to(self, model):
+        """将 EMA 权重应用到模型 (验证时调用)"""
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                assert name in self.shadow
+                param.data.copy_(self.shadow[name])
+
+    def restore(self, model):
+        """恢复模型的真实权重 (验证后调用，继续训练)"""
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                assert name in self.original
+                param.data.copy_(self.original[name])
+        self.original = {}
+
+    def state_dict(self):
+        return self.shadow
+
+    def load_state_dict(self, state_dict):
+        self.shadow = deepcopy(state_dict)

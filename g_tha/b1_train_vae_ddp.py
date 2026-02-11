@@ -147,7 +147,7 @@ def main():
 
     # 4. 模型初始化与 DDP 封装
     # 生成器
-    vae = define.vae().to(device)
+    vae = define.vae_kl().to(device)
     if dist.is_initialized():
         vae = nn.SyncBatchNorm.convert_sync_batchnorm(vae)
         vae = DDP(vae, device_ids=[local_rank], output_device=local_rank)

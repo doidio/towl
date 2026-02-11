@@ -48,7 +48,7 @@ except ImportError:
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def decode_with_sliding_window(z, vae, scale_factor, patch_size, original_shape, overlap=0.25):
+def sliding_window_decode(z, vae, scale_factor, patch_size, original_shape, overlap=0.25):
     """
     Mode B 的核心：在潜在空间进行滑动窗口解码
     """
@@ -122,7 +122,7 @@ def main():
     use_amp = cfg['train'][task]['use_amp']
 
     print(f"Main computation device: {device}")
-    vae = define.vae().to(device)
+    vae = define.vae_kl().to(device)
     load_pt = ckpt_dir / f'{task}_best.pt'
 
     try:
@@ -212,7 +212,7 @@ def main():
                 progress=True
             )
             z = z_mu * scale_factor
-            recon_b = decode_with_sliding_window(z, vae, scale_factor, patch_size, original_shape, overlap=0.25)
+            recon_b = sliding_window_decode(z, vae, scale_factor, patch_size, original_shape, overlap=0.25)
 
     g_l1, c_l1, _ = compute_metrics_with_margin(recon_b.cpu(), images_cpu, margin=32)
     results['B'] = {'global': g_l1, 'center': c_l1}
