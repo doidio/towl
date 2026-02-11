@@ -107,6 +107,7 @@ def main():
             ema = define.EMA(ldm, decay=ema_rate)
 
         print(f'Load from epoch {start_epoch}, best_val_loss {best_val_loss}')
+        start_epoch += 1
 
     timestamp = datetime.now().strftime(f'{task}_%Y%m%d_%H%M%S')
     writer = SummaryWriter(log_dir=(log_dir / timestamp).as_posix())
@@ -306,6 +307,8 @@ def main():
                 ckpt['best_val_loss'] = best_val_loss
                 torch.save(ckpt, ckpt_dir / f'{task}_best.pt')
                 print('New best model saved!')
+
+        torch.cuda.empty_cache()
 
     writer.close()
     print('Training Completed.')
