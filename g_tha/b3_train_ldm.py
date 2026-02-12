@@ -37,11 +37,11 @@ def main():
 
     task = 'ldm'
     (
-        use_amp, resume, num_workers, num_epochs, val_interval, val_limit, val_vae,
-        batch_size, sw_batch_size, lr, ema_rate, gradient_accumulation_steps,
+        use_amp, resume, num_workers, num_epochs, val_interval, val_limit,
+        batch_size, sw_batch_size, lr, gradient_accumulation_steps,
     ) = [cfg['train'][task][_] for _ in (
-        'use_amp', 'resume', 'num_workers', 'num_epochs', 'val_interval', 'val_limit', 'val_vae',
-        'batch_size', 'sw_batch_size', 'lr', 'ema_rate', 'gradient_accumulation_steps',
+        'use_amp', 'resume', 'num_workers', 'num_epochs', 'val_interval', 'val_limit',
+        'batch_size', 'sw_batch_size', 'lr', 'gradient_accumulation_steps',
     )]
 
     patch_size = cfg['train']['vae']['patch_size']
@@ -55,6 +55,10 @@ def main():
     val_files = val_files[::len(val_files) // (val_total - 1)]
     print(f'Val limited: {len(val_files)}')
 
+    # 单样本过拟合测试
+    # train_files = train_files[:2] * 50
+    # val_files = train_files[:2]
+
     transforms = Compose(define.ldm_transforms())
 
     train_ds = Dataset(data=train_files, transform=transforms)
@@ -67,7 +71,6 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=1, num_workers=num_workers)
 
     ldm = define.ldm_unet().to(device)
-    ema = define.EMA(ldm, decay=ema_rate)
 
     scheduler = define.scheduler_ddpm()
     num_train_timesteps = scheduler.num_train_timesteps
@@ -75,16 +78,16 @@ def main():
     optimizer = torch.optim.AdamW(ldm.parameters(), lr=lr, weight_decay=1e-5)
     scaler = GradScaler() if use_amp else None
 
-    vae, scale_factor = None, None
-    if val_vae and (vae_ckpt_path := ckpt_dir / 'vae_best.pt').exists():
-        print(f'Loading VAE from {vae_ckpt_path.resolve()}')
-        vae_ckpt = torch.load(vae_ckpt_path, map_location=device)
-        if 'scale_factor' in vae_ckpt:
-            vae = define.vae_kl().to(device)
-            vae.load_state_dict(vae_ckpt['state_dict'])
-            vae.eval()
-            scale_factor = vae_ckpt['scale_factor']
-            print(f'Scale Factor: {scale_factor}')
+    vae_ckpt_path = ckpt_dir / 'vae_best.pt'
+
+    print(f'Loading VAE from {vae_ckpt_path.resolve()}')
+    vae_ckpt = torch.load(vae_ckpt_path, map_location=device)
+
+    vae = define.vae_kl().to(device)
+    vae.load_state_dict(vae_ckpt['state_dict'])
+    vae.eval()
+    scale_factor = vae_ckpt['scale_factor']
+    print(f'Scale Factor: {scale_factor}')
 
     start_epoch = 0
     best_val_loss = float('inf')
@@ -95,16 +98,14 @@ def main():
         ckpt = torch.load(ldm_ckpt_path, map_location=device)
         ldm.load_state_dict(ckpt['state_dict'])
         optimizer.load_state_dict(ckpt['optimizer'])
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
+
         start_epoch = ckpt['epoch']
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
 
         if use_amp and 'scaler' in ckpt:
             scaler.load_state_dict(ckpt['scaler'])
-
-        if 'ema_state_dict' in ckpt:
-            ema.load_state_dict(ckpt['ema_state_dict'])
-        else:
-            ema = define.EMA(ldm, decay=ema_rate)
 
         print(f'Load from epoch {start_epoch}, best_val_loss {best_val_loss}')
         start_epoch += 1
@@ -132,16 +133,14 @@ def main():
 
         for batch in pbar:
             step += 1
-            image = batch['image'].to(device)
-            cond = batch['condition'].to(device)
+            image = batch['image'].to(device) * scale_factor
+            cond = batch['condition'].to(device) * scale_factor
 
-            # 以角点4x4块作背景参照，增加前景Loss权重
-            bg_ref = image[..., 0, 0, 0].detach().view(image.shape[0], image.shape[1], 1, 1, 1)
-            dist_to_bg = torch.abs(image - bg_ref).sum(dim=1, keepdim=True)
-            mask = (dist_to_bg > 0.1).float().detach()
-            mask = torch.nn.functional.max_pool3d(mask, kernel_size=3, stride=1, padding=1)
-
-            optimizer.zero_grad(set_to_none=True)
+            # TODO 骨与假体界面附近Loss加权
+            # bg_ref = image[..., 0, 0, 0].detach().view(image.shape[0], image.shape[1], 1, 1, 1)
+            # dist_to_bg = torch.abs(image - bg_ref).sum(dim=1, keepdim=True)
+            # mask = (dist_to_bg > 0.1).float().detach()
+            # mask = torch.nn.functional.max_pool3d(mask, kernel_size=3, stride=1, padding=1)
 
             with amp_ctx:
                 # 采样时间步 t
@@ -160,29 +159,33 @@ def main():
                 noise_pred = ldm(x=input_tensor, timesteps=timesteps)
 
                 # 计算损失
-                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction='none')
-                loss = 0.2 * loss.mean() + 0.8 * (loss * mask).sum() / (mask.sum() + 1e-6)
+                # loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction='none')
+                # loss = 0.1 * loss.mean() + 0.9 * (loss * mask).sum() / (mask.sum() + 1e-6)
+                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
                 loss = loss / gradient_accumulation_steps
 
             if use_amp:
                 scaler.scale(loss).backward()
 
-                if (step + 1) % gradient_accumulation_steps == 0:
+                if step % gradient_accumulation_steps == 0:
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(ldm.parameters(), 1.0)
                     scaler.step(optimizer)
                     scaler.update()
+
+                    optimizer.zero_grad(set_to_none=True)
             else:
                 loss.backward()
 
-                if (step + 1) % gradient_accumulation_steps == 0:
+                if step % gradient_accumulation_steps == 0:
                     torch.nn.utils.clip_grad_norm_(ldm.parameters(), 1.0)
                     optimizer.step()
 
-            ema.update(ldm)
+                    optimizer.zero_grad(set_to_none=True)
+
             epoch_loss += loss.item()
 
-            if step % 10 == 0:
+            if step % 1 == 0:
                 global_step = epoch * len(train_loader) + step
                 writer.add_scalar('train/loss', loss.item() * gradient_accumulation_steps, global_step)
 
@@ -192,17 +195,14 @@ def main():
 
         # 验证与采样
         if epoch % val_interval == 0:
-            ema.store(ldm)
-            ema.copy_to(ldm)
-
             ldm.eval()
             val_loss = 0
             val_steps = 0
 
             with torch.no_grad():
-                for i, batch in enumerate(val_bar := tqdm(val_loader, desc='Val', leave=False)):
-                    image = batch['image'].to(device)
-                    cond = batch['condition'].to(device)
+                for i, batch in enumerate(val_bar := tqdm(val_loader, desc='Val')):
+                    image = batch['image'].to(device) * scale_factor
+                    cond = batch['condition'].to(device) * scale_factor
 
                     # 采样时间步 t
                     timesteps = torch.randint(0, num_train_timesteps, (image.shape[0],), device=device).long()
@@ -256,16 +256,13 @@ def main():
                         with amp_ctx:
                             decoded = []
                             for idx, img in enumerate((sample_image, image, cond)):
-                                img /= scale_factor  # Latent 训练时被 Scale 过了，解码前要除回去
-                                decoded.append(define.sliding_window_decode(img, vae, patch_size, sw_batch_size))
+                                decoded.append(define.sliding_window_decode(
+                                    img / scale_factor, vae, patch_size, sw_batch_size,
+                                ))
 
                                 name = ['Generated', 'GroundTruth', 'Condition'][idx]
                                 name = f'val_epoch_{epoch:03d}_{name}.nii.gz'
                                 saver(decoded[-1][0], meta_data={'filename_or_obj': name})
-
-                            # recon = vae.decode(sample_image / scale_factor)
-                            # gt = vae.decode(image / scale_factor)
-                            # cond_vis = vae.decode(cond / scale_factor)
 
                         recon, gt, cond_vis = decoded
 
@@ -284,9 +281,7 @@ def main():
 
             avg_val_loss = val_loss / val_steps
             writer.add_scalar('val/loss', avg_val_loss, epoch)
-            print(f'Val Loss (EMA): {avg_val_loss:.5f}')
-
-            ema.restore(ldm)
+            print(f'Val Loss: {avg_val_loss:.5f}')
 
             # 保存模型
             ckpt = {
@@ -294,19 +289,19 @@ def main():
                 'state_dict': ldm.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'best_val_loss': best_val_loss,
-                'ema_state_dict': ema.state_dict(),
             }
             if use_amp:
                 ckpt['scaler'] = scaler.state_dict()
 
             ckpt_dir.mkdir(parents=True, exist_ok=True)
-            torch.save(ckpt, ckpt_dir / f'{task}_last.pt')
 
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
                 ckpt['best_val_loss'] = best_val_loss
                 torch.save(ckpt, ckpt_dir / f'{task}_best.pt')
                 print('New best model saved!')
+
+            torch.save(ckpt, ckpt_dir / f'{task}_last.pt')
 
         torch.cuda.empty_cache()
 

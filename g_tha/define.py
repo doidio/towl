@@ -128,7 +128,7 @@ def vae_val_transforms():
 
 
 # TODO 重新生成 latents 之后删除
-correction_factor = 2.782069290990221 / 2.1347848462840897
+correction_factor = 2.7397111917484103 / 2.1347848462840897
 
 
 class LoadLatentConditiond(MapTransform):

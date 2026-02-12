@@ -102,7 +102,6 @@ def main():
                             device=device,
                             progress=False,
                         )
-                        z *= scale_factor
 
                 z = z.cpu().numpy()
                 z_post_pre.append(z)
@@ -113,6 +112,7 @@ def main():
                 warnings.warn(f'Shape mismatch for {filename} Post {z_post.shape} Pre {z_pre.shape}. Skipping.')
                 continue
 
+            # TODO 在像素空间计算一个Mask通道标记出骨与假体界面，4倍下采样，为LDM训练Loss加权作准备
             # 通道拼接，[0:4]术后[4:8]术前，使用 float16 节省空间 Latent 精度足够
             z_cat = np.concatenate((z_post[0], z_pre[0]), axis=0).astype(np.float16)
             np.save(save_path, z_cat)
