@@ -48,5 +48,5 @@ val_interval = 1
 val_limit = 50
 batch_size = 2
 sw_batch_size = 12  # 滑动窗口并发数
-lr = 1e-5
+lr = 1e-4
 gradient_accumulation_steps = 4  # 梯度累积

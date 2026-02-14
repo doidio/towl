@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from monai.losses import PerceptualLoss
 from monai.networks.nets import AutoencoderKL, PatchDiscriminator, DiffusionModelUNet
-from monai.networks.schedulers import DDPMScheduler
+from monai.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.transforms import (
     LoadImaged, MapTransform, RandCropByPosNegLabeld, ThresholdIntensityd, CopyItemsd, DeleteItemsd,
 )
@@ -127,10 +127,6 @@ def vae_val_transforms():
     ]
 
 
-# TODO 重新生成 latents 之后删除
-correction_factor = 2.7397111917484103 / 2.1347848462840897
-
-
 class LoadLatentConditiond(MapTransform):
     """读取 .npy 文件 latent 数据 [8, D, H, W] float16"""
 
@@ -140,7 +136,7 @@ class LoadLatentConditiond(MapTransform):
     def __call__(self, data):
         d = dict(data)
         # 加载 npy
-        data_npy = np.load(d['image']) * correction_factor  # [8, D, H, W]
+        data_npy = np.load(d['image'])
 
         # 转换为 Tensor
         if isinstance(data_npy, np.ndarray):
@@ -181,6 +177,14 @@ def scheduler_ddpm():
         prediction_type='epsilon',
         beta_start=0.00085,  # LDM 标准参数
         beta_end=0.012,  # LDM 标准参数
+    )
+
+def scheduler_ddim():
+    return DDIMScheduler(
+        num_train_timesteps=1000,
+        schedule='scaled_linear_beta',
+        beta_start=0.00085, beta_end=0.012,
+        prediction_type='epsilon', clip_sample=False,
     )
 
 

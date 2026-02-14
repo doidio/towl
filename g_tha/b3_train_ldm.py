@@ -6,7 +6,6 @@ from pathlib import Path
 import tomlkit
 import torch
 from monai.data import DataLoader, Dataset
-from monai.networks.schedulers import DDIMScheduler
 from monai.transforms import Compose, SaveImage
 from torch.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
@@ -44,7 +43,7 @@ def main():
         'batch_size', 'sw_batch_size', 'lr', 'gradient_accumulation_steps',
     )]
 
-    patch_size = cfg['train']['vae']['patch_size']
+    # patch_size = cfg['train']['vae']['patch_size']
 
     # 压缩编码后的 latent
     train_files = [{'image': p.as_posix()} for p in sorted((train_root / 'latents' / 'train').glob('*.npy'))]
@@ -83,9 +82,9 @@ def main():
     print(f'Loading VAE from {vae_ckpt_path.resolve()}')
     vae_ckpt = torch.load(vae_ckpt_path, map_location=device)
 
-    vae = define.vae_kl().to(device)
+    vae = define.vae_kl().to('cpu')
     vae.load_state_dict(vae_ckpt['state_dict'])
-    vae.eval()
+    vae.eval().float()
     scale_factor = vae_ckpt['scale_factor']
     print(f'Scale Factor: {scale_factor}')
 
@@ -119,8 +118,21 @@ def main():
         output_ext='.nii.gz',
         separate_folder=False,
         print_log=False,
-        resample=False
+        resample=False,
     )
+
+    def decode_cpu(z, name):
+        # decoded.append(define.sliding_window_decode(
+        #     img / scale_factor, vae, patch_size, sw_batch_size,
+        # ))
+        z = (z / scale_factor).detach().cpu().float()
+
+        with torch.no_grad():
+            z = vae.decode(z)
+
+        name = f'val_epoch_{epoch:03d}_{name}.nii.gz'
+        saver(z[0], meta_data={'filename_or_obj': name})
+        return z
 
     amp_ctx = autocast(device.type) if use_amp else nullcontext()
 
@@ -158,6 +170,19 @@ def main():
                 # 预测噪声
                 noise_pred = ldm(x=input_tensor, timesteps=timesteps)
 
+                # 获取预测噪声的标准差 (Std) 和最大值 (Max)
+                pred_std = noise_pred.std().item()
+                pred_max = noise_pred.max().item()
+
+                # 获取目标噪声的标准差 (理论上应该是 1.0)
+                target_std = noise.std().item()
+
+                if epoch > 0:
+                    if pred_std < 0.05:
+                        print(f'心跳极弱！梯度消失 NoisePredStd={pred_std:.4f}<{pred_max:.4f}, {target_std}==1.0')
+                    elif pred_std > 2.0:
+                        print(f'心跳过速！梯度爆炸 NoisePredStd={pred_std:.4f}<{pred_max:.4f}, {target_std}==1.0')
+
                 # 计算损失
                 # loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction='none')
                 # loss = 0.1 * loss.mean() + 0.9 * (loss * mask).sum() / (mask.sum() + 1e-6)
@@ -188,6 +213,7 @@ def main():
             if step % 1 == 0:
                 global_step = epoch * len(train_loader) + step
                 writer.add_scalar('train/loss', loss.item() * gradient_accumulation_steps, global_step)
+                writer.add_scalar('train/pred_std', pred_std, global_step)
 
             pbar.set_postfix({'MSE': f'{loss.item() * gradient_accumulation_steps:.4f}'})
 
@@ -226,58 +252,48 @@ def main():
 
                     # 可视化：仅第一个 Batch 的第一个样本
                     if i == 0 and vae is not None:
-                        val_scheduler = DDIMScheduler(
-                            num_train_timesteps=1000,
-                            schedule='scaled_linear_beta',
-                            beta_start=0.00085,
-                            beta_end=0.012,
-                            prediction_type='epsilon',
-                            clip_sample=False,  # Latent 空间通常不 clip
-                        )
+                        val_scheduler = define.scheduler_ddim()
                         val_scheduler.set_timesteps(num_inference_steps=50, device=device)
 
-                        # 从纯噪声开始采样
-                        sample_image = torch.randn_like(image)
+                        generator = torch.Generator(device=device).manual_seed(42)  # 固定随机种子
+                        generated = torch.randn(image.shape, device=device, generator=generator)
+                        # generated = torch.randn_like(image)
 
                         for t in val_scheduler.timesteps:
                             val_bar.set_postfix({'DDIM': t.item()})
 
                             # 拼接条件 (Condition)
-                            model_input = torch.cat([sample_image, cond], dim=1)
+                            model_input = torch.cat([generated, cond], dim=1)
 
                             with torch.no_grad():
                                 # 预测噪声
                                 model_output = ldm(model_input, t[None].to(device))
 
                             # 更新 Latent，注意这里用 val_scheduler.step
-                            sample_image, _ = val_scheduler.step(model_output, t, sample_image)
+                            generated, _ = val_scheduler.step(model_output, t, generated)
 
                         # 解码显示 (Latent -> Image)
                         with amp_ctx:
-                            decoded = []
-                            for idx, img in enumerate((sample_image, image, cond)):
-                                decoded.append(define.sliding_window_decode(
-                                    img / scale_factor, vae, patch_size, sw_batch_size,
-                                ))
+                            vis_generated = decode_cpu(generated, 'Generated')
 
-                                name = ['Generated', 'GroundTruth', 'Condition'][idx]
-                                name = f'val_epoch_{epoch:03d}_{name}.nii.gz'
-                                saver(decoded[-1][0], meta_data={'filename_or_obj': name})
-
-                        recon, gt, cond_vis = decoded
+                            if epoch == 0:
+                                vis_gt = decode_cpu(image, 'GroundTruth')
+                                vis_cond = decode_cpu(cond, 'Condition')
 
                         def norm_vis(x):
-                            return torch.clamp(x * 0.5 + 0.5, 0, 1)
+                            x_min, x_max = x.min(), x.max()
+                            return (x - x_min) / (x_max - x_min + 1e-5)
 
-                        z_idx = recon.shape[2] // 2  # [B, C, D, H, W]
+                        z_idx = vis_generated.shape[2] // 2  # [B, C, D, H, W]
 
-                        vis_cond = cond_vis[0, 0, z_idx]
-                        vis_recon = recon[0, 0, z_idx]
-                        vis_gt = gt[0, 0, z_idx]
+                        vis_generated = vis_generated[0, 0, z_idx]
+                        writer.add_image('val/Generated', norm_vis(vis_generated), epoch, dataformats='HW')
 
-                        writer.add_image('val/Condition', norm_vis(vis_cond), epoch, dataformats='HW')
-                        writer.add_image('val/Generated', norm_vis(vis_recon), epoch, dataformats='HW')
-                        writer.add_image('val/GroundTruth', norm_vis(vis_gt), epoch, dataformats='HW')
+                        if epoch == 0:
+                            vis_cond = vis_cond[0, 0, z_idx]
+                            vis_gt = vis_gt[0, 0, z_idx]
+                            writer.add_image('val/Condition', norm_vis(vis_cond), epoch, dataformats='HW')
+                            writer.add_image('val/GroundTruth', norm_vis(vis_gt), epoch, dataformats='HW')
 
             avg_val_loss = val_loss / val_steps
             writer.add_scalar('val/loss', avg_val_loss, epoch)
