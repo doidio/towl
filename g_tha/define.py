@@ -163,7 +163,7 @@ def ldm_unet():
         out_channels=4,
         num_res_blocks=(2, 2, 2),
         channels=(64, 128, 256),
-        attention_levels=(False, True, True),  # 启用自注意力学习解剖方位关系
+        attention_levels=(False, False, True),  # 启用自注意力学习解剖方位关系
         norm_num_groups=32,
         with_conditioning=False,  # TODO 交叉注意力注入全局条件
         use_flash_attention=True,

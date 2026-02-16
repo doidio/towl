@@ -151,6 +151,10 @@ def main():
             image = batch['image'].to(device) * scale_factor
             cond = batch['condition'].to(device) * scale_factor
 
+            # CFG Condition Dropout
+            if torch.rand(1) < 0.15:
+                cond = torch.zeros_like(cond)
+
             # TODO 骨与假体界面附近Loss加权
             # bg_ref = image[..., 0, 0, 0].detach().view(image.shape[0], image.shape[1], 1, 1, 1)
             # dist_to_bg = torch.abs(image - bg_ref).sum(dim=1, keepdim=True)
@@ -178,11 +182,11 @@ def main():
                 # loss = 0.1 * loss.mean() + 0.9 * (loss * mask).sum() / (mask.sum() + 1e-6)
 
                 # 权重：背景=1.0，金属=6.0
-                # weights = 1.0 + 5.0 * (torch.abs(image) > 1.5).float()
-                # loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction='none')
-                # loss = (loss * weights).mean()
+                weights = 1.0 + 5.0 * (torch.abs(image) > 1.5).float()
+                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction='none')
+                loss = (loss * weights).mean()
 
-                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
+                # loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
                 loss = loss / gradient_accumulation_steps
 
             if use_amp:
@@ -258,14 +262,23 @@ def main():
                             val_bar.set_postfix({'DDIM': t.item()})
 
                             # 拼接条件 (Condition)
-                            model_input = torch.cat([generated, cond], dim=1)
+                            latent_input = torch.cat([generated] * 2)
+
+                            # 构造条件部分：前半部分是 cond，后半部分是 zeros
+                            uncond = torch.zeros_like(cond)
+                            cond_input = torch.cat([cond, uncond])
+
+                            model_input = torch.cat([latent_input, cond_input], dim=1)
 
                             with torch.no_grad():
-                                # 预测噪声
-                                model_output = ldm(model_input, t[None].to(device))
+                                t_input = t[None].to(device).repeat(2)
+                                noise_pred_batch = ldm(model_input, t_input)
 
-                            # 更新 Latent，注意这里用 val_scheduler.step
-                            generated, _ = val_scheduler.step(model_output, t, generated)
+                            noise_cond, noise_uncond = noise_pred_batch.chunk(2)
+                            noise_pred = noise_uncond + 3.0 * (noise_cond - noise_uncond)
+
+                            # 更新 Latent
+                            generated, _ = val_scheduler.step(noise_pred, t, generated)
 
                         # 解码显示 (Latent -> Image)
                         with amp_ctx:
