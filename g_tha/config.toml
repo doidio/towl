@@ -24,7 +24,7 @@ root = '.train'
 
 [train.vae]
 use_amp = true  # 混合精度
-resume = true
+resume = false
 num_workers = 2
 num_epochs = 500
 warmup_epochs = 10  # 预热轮次数量
@@ -41,7 +41,7 @@ kl_weight = 0.03  # KL正则化权重，与L1重建权重博弈，使模型既�
 
 [train.ldm]
 use_amp = true  # 混合精度
-resume = true
+resume = false
 num_workers = 2
 num_epochs = 1000
 val_interval = 1

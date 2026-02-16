@@ -161,9 +161,9 @@ def ldm_unet():
         spatial_dims=3,
         in_channels=8,
         out_channels=4,
-        num_res_blocks=(2, 2, 2, 2),
-        channels=(64, 128, 256, 512),
-        attention_levels=(False, False, True, True),  # 启用自注意力学习解剖方位关系
+        num_res_blocks=(2, 2, 2),
+        channels=(64, 128, 256),
+        attention_levels=(False, True, True),  # 启用自注意力学习解剖方位关系
         norm_num_groups=32,
         with_conditioning=False,  # TODO 交叉注意力注入全局条件
         use_flash_attention=True,
@@ -175,16 +175,19 @@ def scheduler_ddpm():
         num_train_timesteps=1000,
         schedule='scaled_linear_beta',
         prediction_type='epsilon',
-        beta_start=0.00085,  # LDM 标准参数
-        beta_end=0.012,  # LDM 标准参数
+        # beta_start=0.00085,  # LDM 标准参数
+        # beta_end=0.012,  # LDM 标准参数
     )
+
 
 def scheduler_ddim():
     return DDIMScheduler(
         num_train_timesteps=1000,
         schedule='scaled_linear_beta',
-        beta_start=0.00085, beta_end=0.012,
-        prediction_type='epsilon', clip_sample=False,
+        prediction_type='epsilon',
+        # beta_start=0.00085,
+        # beta_end=0.012,
+        clip_sample=False,
     )
 
 

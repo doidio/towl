@@ -109,9 +109,12 @@ def main():
         print(f'Load from epoch {start_epoch}, best_val_loss {best_val_loss}')
         start_epoch += 1
 
-    timestamp = datetime.now().strftime(f'{task}_%Y%m%d_%H%M%S')
-    writer = SummaryWriter(log_dir=(log_dir / timestamp).as_posix())
+    suffix = datetime.now().strftime(f'{task}_%Y%m%d_%H%M%S')
+    if resume:
+        suffix += '_resume'
+    log_dir = log_dir / suffix
 
+    writer = SummaryWriter(log_dir=log_dir.as_posix())
     saver = SaveImage(
         output_dir=log_dir,
         output_postfix='',
@@ -170,22 +173,15 @@ def main():
                 # 预测噪声
                 noise_pred = ldm(x=input_tensor, timesteps=timesteps)
 
-                # 获取预测噪声的标准差 (Std) 和最大值 (Max)
-                pred_std = noise_pred.std().item()
-                pred_max = noise_pred.max().item()
-
-                # 获取目标噪声的标准差 (理论上应该是 1.0)
-                target_std = noise.std().item()
-
-                if epoch > 0:
-                    if pred_std < 0.05:
-                        print(f'心跳极弱！梯度消失 NoisePredStd={pred_std:.4f}<{pred_max:.4f}, {target_std}==1.0')
-                    elif pred_std > 2.0:
-                        print(f'心跳过速！梯度爆炸 NoisePredStd={pred_std:.4f}<{pred_max:.4f}, {target_std}==1.0')
-
                 # 计算损失
                 # loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction='none')
                 # loss = 0.1 * loss.mean() + 0.9 * (loss * mask).sum() / (mask.sum() + 1e-6)
+
+                # 权重：背景=1.0，金属=6.0
+                # weights = 1.0 + 5.0 * (torch.abs(image) > 1.5).float()
+                # loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction='none')
+                # loss = (loss * weights).mean()
+
                 loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
                 loss = loss / gradient_accumulation_steps
 
@@ -210,10 +206,9 @@ def main():
 
             epoch_loss += loss.item()
 
-            if step % 1 == 0:
+            if step % 10 == 0:
                 global_step = epoch * len(train_loader) + step
                 writer.add_scalar('train/loss', loss.item() * gradient_accumulation_steps, global_step)
-                writer.add_scalar('train/pred_std', pred_std, global_step)
 
             pbar.set_postfix({'MSE': f'{loss.item() * gradient_accumulation_steps:.4f}'})
 
@@ -253,7 +248,7 @@ def main():
                     # 可视化：仅第一个 Batch 的第一个样本
                     if i == 0 and vae is not None:
                         val_scheduler = define.scheduler_ddim()
-                        val_scheduler.set_timesteps(num_inference_steps=50, device=device)
+                        val_scheduler.set_timesteps(num_inference_steps=200, device=device)
 
                         generator = torch.Generator(device=device).manual_seed(42)  # 固定随机种子
                         generated = torch.randn(image.shape, device=device, generator=generator)
