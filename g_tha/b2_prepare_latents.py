@@ -90,7 +90,7 @@ def main():
 
                 images = batch.unsqueeze(0).to(device)
 
-                with (torch.no_grad()):
+                with torch.no_grad():
                     with autocast(device.type) if use_amp else nullcontext():
                         z = sliding_window_inference(
                             inputs=images,

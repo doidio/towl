@@ -210,7 +210,7 @@ def main():
 
             epoch_loss += loss.item()
 
-            if step % 10 == 0:
+            if step % 1 == 0:
                 global_step = epoch * len(train_loader) + step
                 writer.add_scalar('train/loss', loss.item() * gradient_accumulation_steps, global_step)
 
@@ -275,10 +275,11 @@ def main():
                                 noise_pred_batch = ldm(model_input, t_input)
 
                             noise_cond, noise_uncond = noise_pred_batch.chunk(2)
-                            noise_pred = noise_uncond + 3.0 * (noise_cond - noise_uncond)
+                            noise_pred = noise_uncond + 7.0 * (noise_cond - noise_uncond)
 
                             # 更新 Latent
-                            generated, _ = val_scheduler.step(noise_pred, t, generated)
+                            with torch.no_grad():
+                                generated, _ = val_scheduler.step(noise_pred, t, generated)
 
                         # 解码显示 (Latent -> Image)
                         with amp_ctx:
@@ -326,6 +327,7 @@ def main():
                 print('New best model saved!')
 
             torch.save(ckpt, ckpt_dir / f'{task}_last.pt')
+            torch.save(ckpt, ckpt_dir / f'{task}_epoch_{epoch}.pt')
 
         torch.cuda.empty_cache()
 
