@@ -108,7 +108,9 @@ def main():
 
             self.src_pts = [*bone_range, 1500.0, 3000.0]
             self.dst_pts = [-1.0, 0.0, 0.5, 1.0]
-            if reverse:
+
+            self.reverse = reverse
+            if self.reverse:
                 self.src_pts, self.dst_pts = self.dst_pts, self.src_pts
 
         def __call__(self, data):
@@ -126,9 +128,12 @@ def main():
                 xp = torch.tensor(self.src_pts, device=img_t.device, dtype=img_t.dtype)
                 fp = torch.tensor(self.dst_pts, device=img_t.device, dtype=img_t.dtype)
 
-                x_clamped = torch.clamp(img_t, min=xp[0], max=xp[-1])
+                if self.reverse:
+                    x_input = img_t
+                else:
+                    x_input = torch.clamp(img_t, min=xp[0], max=xp[-1])
 
-                indices = torch.searchsorted(xp, x_clamped, right=True)
+                indices = torch.searchsorted(xp, x_input, right=True)
                 indices = torch.clamp(indices, 1, len(xp) - 1)
 
                 idx0 = indices - 1
@@ -139,7 +144,7 @@ def main():
                 y0 = fp[idx0]
                 y1 = fp[idx1]
 
-                res = y0 + (x_clamped - x0) * (y1 - y0) / (x1 - x0)
+                res = y0 + (x_input - x0) * (y1 - y0) / (x1 - x0)
 
                 if is_numpy:
                     d[key] = res.cpu().numpy().astype(np.float32)
