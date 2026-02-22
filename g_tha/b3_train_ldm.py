@@ -327,7 +327,7 @@ def main():
                 print('New best model saved!')
 
             torch.save(ckpt, ckpt_dir / f'{task}_last.pt')
-            torch.save(ckpt, ckpt_dir / f'{task}_epoch_{epoch}.pt')
+            # torch.save(ckpt, ckpt_dir / f'{task}_epoch_{epoch}.pt')
 
         torch.cuda.empty_cache()
 

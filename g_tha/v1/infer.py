@@ -97,7 +97,11 @@ def main():
 
     # 获取 latent space 的缩放因子 (用于保持 latent 分布的标准差接近 1)
     scale_factor = _['scale_factor']
-    print(f'VAE Scale:\t {scale_factor}')
+    print(f'VAE Epoch:\t', _['epoch'])
+    print(f'    L1:  \t', _['val_l1'])
+    print(f'    PSNR:\t', _['val_psnr'])
+    print(f'    SSIM:\t', _['val_ssim'])
+    print(f'    Scale:\t', _['scale_factor'])
 
     # --------------------------------------------------------------------------
     # 3. 加载 LDM 模型 (DiffusionModelUNet)
@@ -127,6 +131,8 @@ def main():
 
     # 加载权重
     _ = torch.load(ldm_path, map_location=device)
+    print(f'LDM Epoch:\t', _['epoch'])
+
     ldm.load_state_dict(_['state_dict'])
     ldm.eval().float()
 
@@ -289,9 +295,6 @@ def main():
         # DDIM 更新步
         with torch.no_grad():
             generated, _ = scheduler.step(noise_pred, t, generated)
-
-    mi, ma = generated.min(), generated.max()
-    print(mi.item(), ma.item())
 
     # 反向缩放 latent
     generated = generated / scale_factor
