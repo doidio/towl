@@ -13,7 +13,7 @@ from PIL import Image
 from minio import Minio, S3Error
 from tqdm import tqdm
 
-from kernel import diff_dmc, resample_obb, fast_drr
+from kernel import diff_dmc, resample_roi, fast_drr
 
 
 def main(config: str, prl: str, pair: dict):
@@ -121,22 +121,21 @@ def main(config: str, prl: str, pair: dict):
     bounds = mesh.bounds
     center = (bounds[0] + bounds[1]) / 2.0
     extents = bounds[1] - bounds[0]
-    extents += 20.0
     
     roi_size = np.ceil(extents / roi_spacing).astype(int)
     roi_size = np.ceil(roi_size / 64.0).astype(int) * 64
-    
-    obb_xform = np.identity(4)
-    obb_xform[:3, 3] = center
+
+    roi_xform = np.identity(4)
+    roi_xform[:3, 3] = center
 
     origin = -0.5 * roi_spacing * roi_size
 
-    obb_xform = wp.transform_from_matrix(wp.mat44(obb_xform))
+    roi_xform = wp.transform_from_matrix(wp.mat44(roi_xform))
     volumes = [wp.Volume.load_from_numpy(ct_images[_], bg_value=image_bgs[_]) for _ in range(2)]
 
     image_obb = wp.full((*roi_size,), wp.vec2(image_bgs[1], image_bgs[0]), wp.vec2)
-    wp.launch(resample_obb, image_obb.shape, [
-        image_obb, origin, roi_spacing, obb_xform,
+    wp.launch(resample_roi, image_obb.shape, [
+        image_obb, origin, roi_spacing, roi_xform,
         volumes[1].id, origins[1], spacings[1], sizes[1],
         volumes[0].id, origins[0], spacings[0], sizes[0],
         post_xform if post_xform is not None else wp.transform_identity(), post_xform is not None,
