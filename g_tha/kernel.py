@@ -302,16 +302,16 @@ def resample_ab(
 
 @wp.kernel
 def resample_roi(
-        image_roi: wp.array3d(dtype=wp.vec3), origin_obb: wp.vec3, spacing_obb: wp.vec3, xform_obb: wp.transform,
+        image_roi: wp.array3d(dtype=wp.vec3), origin_obb: wp.vec3, spacing_obb: wp.vec3, xform_roi: wp.transform,
         volume_a: wp.uint64, origin_a: wp.vec3, spacing_a: wp.vec3, size_a: wp.vec3,
         volume_b: wp.uint64, origin_b: wp.vec3, spacing_b: wp.vec3, size_b: wp.vec3,
-        xform_a: wp.transform, mesh: wp.uint64
+        xform_a: wp.transform, mesh: wp.uint64,
 ):
     i, j, k = wp.tid()
 
     p = origin_obb + wp.cw_mul(spacing_obb, wp.vec3(wp.float32(i), wp.float32(j), wp.float32(k)))
 
-    pa = wp.transform_point(xform_obb, p)
+    pa = wp.transform_point(xform_roi, p)
     uvw_a = wp.cw_div(pa - origin_a, spacing_a)
     a = wp.volume_sample_f(volume_a, uvw_a, wp.Volume.LINEAR)
 
@@ -338,10 +338,10 @@ def resample_roi(
         tsdf = wp.clamp(dist, -5.0, 5.0)
 
     if inbox_a and inbox_b:
-        image_roi[i, j, k] = wp.vec3(wp.float32(a), wp.float32(b), tsdf)
+        image_roi[i, j, k] = wp.vec3(wp.float32(a), wp.float32(b), wp.float32(tsdf))
     else:
         ab = wp.min(wp.float32(a), wp.float32(b))
-        image_roi[i, j, k] = wp.vec3(ab, ab, tsdf)
+        image_roi[i, j, k] = wp.vec3(ab, ab, wp.float32(tsdf))
 
 
 @wp.kernel
