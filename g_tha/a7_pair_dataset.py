@@ -175,8 +175,8 @@ def main(config: str, prl: str, pair: dict):
     # 构建 Warp Mesh 用于距离场查询
     wp_mesh = wp.Mesh(wp.array(mesh.vertices, dtype=wp.vec3), wp.array(mesh.faces.flatten(), dtype=wp.int32))
 
-    # 初始化输出的三通道图像张量 (通道0: 术后, 通道1: 术前, 通道2: TSDF)
-    image_roi = wp.full((*roi_size,), wp.vec3(image_bgs[1], image_bgs[0], wp.float32(-5.0)), wp.vec3)
+    # 初始化输出的三通道图像张量 (通道0: 术后, 通道1: 术前, 通道2: SDF)
+    image_roi = wp.full((*roi_size,), wp.vec3(image_bgs[1], image_bgs[0], wp.float32(-10000.0)), wp.vec3)
 
     # 调用 Warp kernel 进行 GPU 加速的重采样
     wp.launch(resample_roi, image_roi.shape, [
@@ -186,12 +186,12 @@ def main(config: str, prl: str, pair: dict):
         post_xform, wp_mesh.id,
     ])
 
-    # 将结果转回 numpy 数组并分离术前、术后和 TSDF 通道
+    # 将结果转回 numpy 数组并分离术前、术后和 SDF 通道
     image_roi_np = image_roi.numpy()
-    image_a, image_b, image_tsdf = image_roi_np[..., 1], image_roi_np[..., 0], image_roi_np[..., 2]
+    image_a, image_b, image_sdf = image_roi_np[..., 1], image_roi_np[..., 0], image_roi_np[..., 2]
 
-    # 保存重采样后的术前、术后和 TSDF 图像为 NIfTI 格式
-    for op, image in (('pre', image_a), ('post', image_b), ('tsdf', image_tsdf)):
+    # 保存重采样后的术前、术后和 SDF 图像为 NIfTI 格式
+    for op, image in (('pre', image_a), ('post', image_b), ('tsdf', image_sdf)):
         f = dataset_root / op / subdir / f'{prl}.nii.gz'
         f.parent.mkdir(parents=True, exist_ok=True)
 
@@ -201,9 +201,14 @@ def main(config: str, prl: str, pair: dict):
 
     # 生成用于可视化的 2D 投影快照 (DRR - Digitally Reconstructed Radiograph)
     snapshot = []
+    sdf_preview = np.clip(image_sdf, -5.0, 5.0)
     for ax in (1, 2):  # 分别在冠状面和矢状面生成投影
-        stack = [fast_drr(image_a, ax), fast_drr(image_b, ax)]
-        img = np.hstack(stack)  # 水平拼接术前和术后投影
+        stack = [
+            fast_drr(image_a, ax), 
+            fast_drr(image_b, ax),
+            fast_drr(sdf_preview, ax, th=(-5.0, 5.0), mode='max')
+        ]
+        img = np.hstack(stack)  # 水平拼接术前、术后和SDF投影
         snapshot.append(img)
 
     # 垂直翻转并拼接两个视角的投影

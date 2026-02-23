@@ -327,21 +327,21 @@ def resample_roi(
                0 <= uvw_b[1] <= size_b[1] - 1.0 and
                0 <= uvw_b[2] <= size_b[2] - 1.0)
 
-    # 计算 TSDF (Truncated Signed Distance Field)
-    tsdf = float(-5.0)
+    # 计算 SDF (Signed Distance Field)
+    sdf = float(-10000.0)
     # 使用较大的 max_dist 确保能查询到表面，Warp 的 BVH 查询很快
     query = wp.mesh_query_point_sign_normal(mesh, pa, 1e4)
     if query.result:
         closest = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
         # query.sign 在网格外部为正，内部为负。需求是内为正，外为负，所以取反
         dist = -query.sign * wp.length(pa - closest)
-        tsdf = wp.clamp(dist, -5.0, 5.0)
+        sdf = dist
 
     if inbox_a and inbox_b:
-        image_roi[i, j, k] = wp.vec3(wp.float32(a), wp.float32(b), wp.float32(tsdf))
+        image_roi[i, j, k] = wp.vec3(wp.float32(a), wp.float32(b), wp.float32(sdf))
     else:
         ab = wp.min(wp.float32(a), wp.float32(b))
-        image_roi[i, j, k] = wp.vec3(ab, ab, wp.float32(tsdf))
+        image_roi[i, j, k] = wp.vec3(ab, ab, wp.float32(sdf))
 
 
 @wp.kernel
