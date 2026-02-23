@@ -22,7 +22,6 @@ def main(config: str, prl: str, pair: dict):
     client = Minio(**cfg['minio']['client'])
 
     ct_metal = cfg['ct']['metal']
-    roi_size = cfg['ct']['roi']['size']
     roi_spacing = np.ones(3) * cfg['ct']['roi']['spacing']
 
     dataset_root = Path(str(cfg['dataset']['root']))
@@ -100,23 +99,19 @@ def main(config: str, prl: str, pair: dict):
     else:
         raise RuntimeError('')
 
-    # 改为直接用CT方位，尺寸不必统一只需整除64，合理吗？AI?
-    obb = mesh.bounding_box_oriented
-    _ = mesh.copy()
-    _.apply_transform(np.linalg.inv(obb.transform))
-    extents = _.bounds[1] - _.bounds[0]
-    x = np.argmax(extents)
+    # 直接使用CT方位（AABB），动态计算尺寸，训练时再进行crop
+    bounds = mesh.bounds
+    center = (bounds[0] + bounds[1]) / 2.0
+    extents = bounds[1] - bounds[0]
+    
+    # 增加一点 padding 避免贴边 (例如每边增加 10mm)
+    padding = 20.0 
+    extents += padding
+    
+    roi_size = np.ceil(extents / roi_spacing).astype(int)
 
-    obb_xform = obb.transform.copy()
-    indices = [(x + i) % 3 for i in range(3)]
-    obb_xform[:3, :3] = obb.transform[:3, :3][:, indices]
-
-    if obb_xform[0, 0] < 0:
-        obb_xform[:3, 0] *= -1
-        obb_xform[:3, 2] *= -1
-    if obb_xform[1, 1] < 0:
-        obb_xform[:3, 1] *= -1
-        obb_xform[:3, 2] *= -1
+    aabb_xform = np.identity(4)
+    aabb_xform[:3, 3] = center
 
     if 'post_xform_global' in pair:
         post_xform = wp.transform(*pair['post_xform_global'])
@@ -139,12 +134,12 @@ def main(config: str, prl: str, pair: dict):
 
     origin = -0.5 * roi_spacing * roi_size
 
-    obb_xform = wp.transform_from_matrix(wp.mat44(obb_xform))
+    aabb_xform = wp.transform_from_matrix(wp.mat44(aabb_xform))
     volumes = [wp.Volume.load_from_numpy(ct_images[_], bg_value=image_bgs[_]) for _ in range(2)]
 
     image_obb = wp.full((*roi_size,), wp.vec2(image_bgs[1], image_bgs[0]), wp.vec2)
     wp.launch(resample_obb, image_obb.shape, [
-        image_obb, origin, roi_spacing, obb_xform,
+        image_obb, origin, roi_spacing, aabb_xform,
         volumes[1].id, origins[1], spacings[1], sizes[1],
         volumes[0].id, origins[0], spacings[0], sizes[0],
         post_xform if post_xform is not None else wp.transform_identity(), post_xform is not None,
