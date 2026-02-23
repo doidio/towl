@@ -100,7 +100,7 @@ def main(config: str, prl: str, pair: dict):
     else:
         raise RuntimeError('')
 
-    # TODO 下次改为就用CT方位，尺寸不必统一只需整除64
+    # 改为直接用CT方位，尺寸不必统一只需整除64，合理吗？AI?
     obb = mesh.bounding_box_oriented
     _ = mesh.copy()
     _.apply_transform(np.linalg.inv(obb.transform))
