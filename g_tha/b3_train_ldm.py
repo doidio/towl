@@ -113,8 +113,8 @@ def main():
     if resume:
         suffix += '_resume'
     log_dir = log_dir / suffix
-
     writer = SummaryWriter(log_dir=log_dir.as_posix())
+
     saver = SaveImage(
         output_dir=log_dir,
         output_postfix='',

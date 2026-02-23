@@ -7,7 +7,7 @@ from monai.losses import PerceptualLoss
 from monai.networks.nets import AutoencoderKL, PatchDiscriminator, DiffusionModelUNet
 from monai.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.transforms import (
-    LoadImaged, MapTransform, RandCropByPosNegLabeld, ThresholdIntensityd, CopyItemsd, DeleteItemsd,
+    LoadImaged, MapTransform, RandCropByPosNegLabeld, ThresholdIntensityd, CopyItemsd, DeleteItemsd, SpatialPadd,
 )
 
 bone_range = [150.0, 650.0]
@@ -19,8 +19,8 @@ class CTBoneNormalized(MapTransform):
     def __init__(self, keys, reverse=False, allow_missing_keys=False):
         super().__init__(keys, allow_missing_keys)
 
-        self.src_pts = [*bone_range, 1500.0, 3000.0]
-        self.dst_pts = [-1.0, 0.0, 0.5, 1.0]
+        self.src_pts = [*bone_range,]
+        self.dst_pts = [-1.0, 1.0]
         if reverse:
             self.src_pts, self.dst_pts = self.dst_pts, self.src_pts
 
@@ -103,28 +103,55 @@ def perceptual_loss():
     )
 
 
-def vae_train_transforms(patch_size):
-    return [
-        LoadImaged(keys=['image'], ensure_channel_first=True),
-        CopyItemsd(keys=['image'], times=1, names=['label']),
-        ThresholdIntensityd(keys=['label'], threshold=bone_range[0], above=True, cval=0),
-        RandCropByPosNegLabeld(
-            keys=['image'],
-            label_key='label',
-            spatial_size=patch_size,
-            pos=2, neg=1,
-            num_samples=1,
-        ),
-        DeleteItemsd(keys=['label']),
-        CTBoneNormalized(keys=['image']),
-    ]
+def vae_train_transforms(subtask, patch_size):
+    if subtask in ('pre', ):
+        return [
+            LoadImaged(keys=['image'], ensure_channel_first=True),
+            SpatialPadd(keys=['image'], spatial_size=patch_size),
+            CopyItemsd(keys=['image'], times=1, names=['label']),
+            ThresholdIntensityd(keys=['label'], threshold=bone_range[0], above=True, cval=0),
+            RandCropByPosNegLabeld(
+                keys=['image'],
+                label_key='label',
+                spatial_size=patch_size,
+                pos=2, neg=1,
+                num_samples=1,
+            ),
+            DeleteItemsd(keys=['label']),
+            CTBoneNormalized(keys=['image']),
+        ]
+    elif subtask in ('metal', ):
+        return [
+            LoadImaged(keys=['image'], ensure_channel_first=True),
+            SpatialPadd(keys=['image'], spatial_size=patch_size),
+            CopyItemsd(keys=['image'], times=1, names=['label']),
+            ThresholdIntensityd(keys=['label'], threshold=-0.95, above=True, cval=0),
+            RandCropByPosNegLabeld(
+                keys=['image'],
+                label_key='label',
+                spatial_size=patch_size,
+                pos=2, neg=1,
+                num_samples=1,
+            ),
+            DeleteItemsd(keys=['label']),
+        ]
+    else:
+        raise SystemError(f'Unknown VAE subtask {subtask}')
 
 
-def vae_val_transforms():
-    return [
-        LoadImaged(keys=['image'], ensure_channel_first=True),
-        CTBoneNormalized(keys=['image']),
-    ]
+
+def vae_val_transforms(subtask):
+    if subtask in ('pre', ):
+        return [
+            LoadImaged(keys=['image'], ensure_channel_first=True),
+            CTBoneNormalized(keys=['image']),
+        ]
+    elif subtask in ('metal', ):
+        return [
+            LoadImaged(keys=['image'], ensure_channel_first=True),
+        ]
+    else:
+        raise SystemError(f'Unknown VAE subtask {subtask}')
 
 
 class LoadLatentConditiond(MapTransform):

@@ -26,7 +26,7 @@ def main(config: str, prl: str, pair: dict):
     """
     # 加载 TOML 配置文件
     cfg_path = Path(config)
-    cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
+    cfg = tomlkit.loads(cfg_path.read_text('utf-8')).unwrap()
 
     # 初始化 Minio 客户端，用于从对象存储中读取数据
     client = Minio(**cfg['minio']['client'])
@@ -34,6 +34,7 @@ def main(config: str, prl: str, pair: dict):
     # 获取金属的 CT 阈值和目标 ROI 的体素间距 (spacing)
     ct_metal = cfg['ct']['metal']
     roi_spacing = np.ones(3) * cfg['ct']['roi']['spacing']
+    sdf_t = float(cfg['ct']['roi']['sdf_t'])
 
     # 设置数据集输出根目录
     dataset_root = Path(str(cfg['dataset']['root']))
@@ -123,6 +124,7 @@ def main(config: str, prl: str, pair: dict):
             key=lambda _: np.linalg.norm(_.bounds[1] - _.bounds[0]), reverse=True,
         ))
         mesh: trimesh.Trimesh = ls[0]
+        mesh.fix_normals()
     else:
         raise RuntimeError('No metal implant found in the post-op image.')
 
@@ -154,6 +156,7 @@ def main(config: str, prl: str, pair: dict):
     bounds = mesh.bounds
     center = (bounds[0] + bounds[1]) / 2.0
     extents = bounds[1] - bounds[0]
+    extents += sdf_t * 2.0
 
     # 根据物理范围计算体素尺寸
     roi_size = np.ceil(extents / roi_spacing).astype(int)
@@ -175,19 +178,18 @@ def main(config: str, prl: str, pair: dict):
     # 构建 Warp Mesh 用于距离场查询
     wp_mesh = wp.Mesh(wp.array(mesh.vertices, dtype=wp.vec3), wp.array(mesh.faces.flatten(), dtype=wp.int32))
 
-    # 初始化输出的三通道图像张量 (通道0: 术后, 通道1: 术前, 通道2: SDF)
-    # 修正：在 Python 空间直接使用 -10000.0 替代 wp.float32(-10000.0)
-    image_roi = wp.full((*roi_size,), wp.vec3(image_bgs[1], image_bgs[0], -10000.0), wp.vec3)
-
     # 计算最大距离 (ROI 对角线长度)
-    max_dist = float(np.linalg.norm(roi_size * roi_spacing))
+    max_dist = wp.float32(np.linalg.norm(roi_size * roi_spacing))
+
+    # 初始化输出的三通道图像张量 (通道0: 术后, 通道1: 术前, 通道2: SDF)
+    image_roi = wp.full((*roi_size,), wp.vec3(image_bgs[1], image_bgs[0], wp.float32(-1.0)), wp.vec3)
 
     # 调用 Warp kernel 进行 GPU 加速的重采样
     wp.launch(resample_roi, image_roi.shape, [
         image_roi, origin, roi_spacing, roi_xform,
         volumes[1].id, origins[1], spacings[1], sizes[1],
         volumes[0].id, origins[0], spacings[0], sizes[0],
-        post_xform, wp_mesh.id, max_dist,
+        post_xform, wp_mesh.id, sdf_t, max_dist,
     ])
 
     # 将结果转回 numpy 数组并分离术前、术后和 SDF 通道
@@ -195,7 +197,7 @@ def main(config: str, prl: str, pair: dict):
     image_a, image_b, image_sdf = image_roi_np[..., 1], image_roi_np[..., 0], image_roi_np[..., 2]
 
     # 保存重采样后的术前、术后和 SDF 图像为 NIfTI 格式
-    for op, image in (('pre', image_a), ('post', image_b), ('tsdf', image_sdf)):
+    for op, image in (('pre', image_a), ('post', image_b), ('metal', image_sdf)):
         f = dataset_root / op / subdir / f'{prl}.nii.gz'
         f.parent.mkdir(parents=True, exist_ok=True)
 
@@ -205,12 +207,12 @@ def main(config: str, prl: str, pair: dict):
 
     # 生成用于可视化的 2D 投影快照 (DRR - Digitally Reconstructed Radiograph)
     snapshot = []
-    sdf_preview = np.clip(image_sdf, -5.0, 5.0)
+    sdf_preview = np.clip(image_sdf, -sdf_t, sdf_t)
     for ax in (1, 2):  # 分别在冠状面和矢状面生成投影
         stack = [
             fast_drr(image_a, ax), 
             fast_drr(image_b, ax),
-            fast_drr(sdf_preview, ax, th=(-5.0, 5.0), mode='max')
+            fast_drr(sdf_preview, ax, th=(-1.0, 1.0), mode='max')
         ]
         img = np.hstack(stack)  # 水平拼接术前、术后和SDF投影
         snapshot.append(img)
@@ -264,7 +266,7 @@ def launch():
     for prl in pairs:
         try:
             # 获取配准元数据
-            data = client.get_object('pair', '/'.join([prl.replace('_', '/'), 'align.toml'])).data
+            data = client.get_object('pair', '/'.join([prl.replace('_', '/'), 'align.toml'])).read()
             data = tomlkit.loads(data.decode('utf-8'))
 
             pairs[prl].update(data)

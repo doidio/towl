@@ -175,3 +175,10 @@ cython_debug/
 g_tha/.train/
 uv.lock
 .python-version
+.aider*
+g_tha/dataset_v1/
+g_tha/train_v1/
+*.pt
+*.nii.gz
+g_tha/dataset/
+g_tha/train/
