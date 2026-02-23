@@ -118,7 +118,16 @@ def main(config: str, prl: str, pair: dict):
     else:
         raise RuntimeError('')
 
-    # 根据mesh包围盒计算roi_size AI!
+    bounds = mesh.bounds
+    center = (bounds[0] + bounds[1]) / 2.0
+    extents = bounds[1] - bounds[0]
+    extents += 20.0
+    
+    roi_size = np.ceil(extents / roi_spacing).astype(int)
+    roi_size = np.ceil(roi_size / 64.0).astype(int) * 64
+    
+    obb_xform = np.identity(4)
+    obb_xform[:3, 3] = center
 
     origin = -0.5 * roi_spacing * roi_size
 
