@@ -175,11 +175,11 @@ def main(config: str, prl: str, pair: dict):
     # 构建 Warp Mesh 用于距离场查询
     wp_mesh = wp.Mesh(wp.array(mesh.vertices, dtype=wp.vec3), wp.array(mesh.faces.flatten(), dtype=wp.int32))
 
-    # 初始化输出的三通道图像张量 (通道0: 术后, 通道1: 术前, 通道2: SDF)
-    image_roi = wp.full((*roi_size,), wp.vec3(image_bgs[1], image_bgs[0], wp.float32(-10000.0)), wp.vec3)
-
     # 计算最大距离 (ROI 对角线长度)
     max_dist = float(np.linalg.norm(roi_size * roi_spacing))
+
+    # 初始化输出的三通道图像张量 (通道0: 术后, 通道1: 术前, 通道2: SDF)
+    image_roi = wp.full((*roi_size,), wp.vec3(image_bgs[1], image_bgs[0], wp.float32(-max_dist)), wp.vec3)
 
     # 调用 Warp kernel 进行 GPU 加速的重采样
     wp.launch(resample_roi, image_roi.shape, [
