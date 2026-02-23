@@ -27,7 +27,7 @@ def main(config: str, prl: str, pair: dict):
     # 加载 TOML 配置文件
     cfg_path = Path(config)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
-    
+
     # 初始化 Minio 客户端，用于从对象存储中读取数据
     client = Minio(**cfg['minio']['client'])
 
@@ -154,7 +154,7 @@ def main(config: str, prl: str, pair: dict):
     bounds = mesh.bounds
     center = (bounds[0] + bounds[1]) / 2.0
     extents = bounds[1] - bounds[0]
-    
+
     # 根据物理范围计算体素尺寸
     roi_size = np.ceil(extents / roi_spacing).astype(int)
     # 向上取整到 64 的倍数，以适配后续深度学习网络（如 U-Net/VAE）的多次下采样要求
@@ -168,26 +168,25 @@ def main(config: str, prl: str, pair: dict):
     origin = -0.5 * roi_spacing * roi_size
 
     roi_xform = wp.transform_from_matrix(wp.mat44(roi_xform))
-    
+
     # 将 numpy 数组加载为 Warp 的 Volume 对象，以便在 GPU 上进行高效重采样
     volumes = [wp.Volume.load_from_numpy(ct_images[_], bg_value=image_bgs[_]) for _ in range(2)]
 
     # 初始化输出的双通道图像张量 (通道0: 术后, 通道1: 术前)
-    image_obb = wp.full((*roi_size,), wp.vec2(image_bgs[1], image_bgs[0]), wp.vec2)
-    
+    image_roi = wp.full((*roi_size,), wp.vec2(image_bgs[1], image_bgs[0]), wp.vec2)
+
     # 调用 Warp kernel 进行 GPU 加速的重采样
-    wp.launch(resample_roi, image_obb.shape, [
-        image_obb, origin, roi_spacing, roi_xform,
+    wp.launch(resample_roi, image_roi.shape, [
+        image_roi, origin, roi_spacing, roi_xform,
         volumes[1].id, origins[1], spacings[1], sizes[1],
         volumes[0].id, origins[0], spacings[0], sizes[0],
-        post_xform if post_xform is not None else wp.transform_identity(), post_xform is not None,
+        post_xform,
     ])
-    
-    # 将结果转回 numpy 数组并分离术前和术后通道
-    image_obb = image_obb.numpy()
-    image_a, image_b = image_obb[:, :, :, 1], image_obb[:, :, :, 0]
 
-    # save
+    # 将结果转回 numpy 数组并分离术前和术后通道
+    image_roi = image_roi.numpy()
+    image_a, image_b = image_roi[:, :, :, 1], image_roi[:, :, :, 0]
+
     # 保存重采样后的术前和术后图像为 NIfTI 格式
     for op, image in (('pre', image_a), ('post', image_b)):
         f = dataset_root / op / subdir / f'{prl}.nii.gz'
@@ -199,9 +198,9 @@ def main(config: str, prl: str, pair: dict):
 
     # 生成用于可视化的 2D 投影快照 (DRR - Digitally Reconstructed Radiograph)
     snapshot = []
-    for ax in (1, 2): # 分别在冠状面和矢状面生成投影
+    for ax in (1, 2):  # 分别在冠状面和矢状面生成投影
         stack = [fast_drr(image_a, ax), fast_drr(image_b, ax)]
-        img = np.hstack(stack) # 水平拼接术前和术后投影
+        img = np.hstack(stack)  # 水平拼接术前和术后投影
         snapshot.append(img)
 
     # 垂直翻转并拼接两个视角的投影
@@ -213,12 +212,12 @@ def main(config: str, prl: str, pair: dict):
 
     # 显式释放内存和显存资源
     del volumes
-    del image_obb
+    del image_roi
     del ct_images
 
     import gc
     gc.collect()
-    time.sleep(0.5) # 短暂休眠以确保资源释放完毕
+    time.sleep(0.5)  # 短暂休眠以确保资源释放完毕
 
 
 def launch():
