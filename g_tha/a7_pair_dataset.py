@@ -99,20 +99,6 @@ def main(config: str, prl: str, pair: dict):
     else:
         raise RuntimeError('')
 
-    # 直接使用CT方位（AABB），动态计算尺寸，训练时再进行crop
-    bounds = mesh.bounds
-    center = (bounds[0] + bounds[1]) / 2.0
-    extents = bounds[1] - bounds[0]
-    
-    # 增加一点 padding 避免贴边 (例如每边增加 10mm)
-    padding = 20.0 
-    extents += padding
-    
-    roi_size = np.ceil(extents / roi_spacing).astype(int)
-
-    aabb_xform = np.identity(4)
-    aabb_xform[:3, 3] = center
-
     if 'post_xform_global' in pair:
         post_xform = wp.transform(*pair['post_xform_global'])
     elif 'post_xform' in pair:
@@ -132,14 +118,16 @@ def main(config: str, prl: str, pair: dict):
     else:
         raise RuntimeError('')
 
+    # 根据mesh包围盒计算roi_size AI!
+
     origin = -0.5 * roi_spacing * roi_size
 
-    aabb_xform = wp.transform_from_matrix(wp.mat44(aabb_xform))
+    obb_xform = wp.transform_from_matrix(wp.mat44(obb_xform))
     volumes = [wp.Volume.load_from_numpy(ct_images[_], bg_value=image_bgs[_]) for _ in range(2)]
 
     image_obb = wp.full((*roi_size,), wp.vec2(image_bgs[1], image_bgs[0]), wp.vec2)
     wp.launch(resample_obb, image_obb.shape, [
-        image_obb, origin, roi_spacing, aabb_xform,
+        image_obb, origin, roi_spacing, obb_xform,
         volumes[1].id, origins[1], spacings[1], sizes[1],
         volumes[0].id, origins[0], spacings[0], sizes[0],
         post_xform if post_xform is not None else wp.transform_identity(), post_xform is not None,
