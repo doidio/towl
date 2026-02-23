@@ -178,12 +178,15 @@ def main(config: str, prl: str, pair: dict):
     # 初始化输出的三通道图像张量 (通道0: 术后, 通道1: 术前, 通道2: SDF)
     image_roi = wp.full((*roi_size,), wp.vec3(image_bgs[1], image_bgs[0], wp.float32(-10000.0)), wp.vec3)
 
+    # 计算最大距离 (ROI 对角线长度)
+    max_dist = float(np.linalg.norm(roi_size * roi_spacing))
+
     # 调用 Warp kernel 进行 GPU 加速的重采样
     wp.launch(resample_roi, image_roi.shape, [
         image_roi, origin, roi_spacing, roi_xform,
         volumes[1].id, origins[1], spacings[1], sizes[1],
         volumes[0].id, origins[0], spacings[0], sizes[0],
-        post_xform, wp_mesh.id,
+        post_xform, wp_mesh.id, max_dist,
     ])
 
     # 将结果转回 numpy 数组并分离术前、术后和 SDF 通道

@@ -305,7 +305,7 @@ def resample_roi(
         image_roi: wp.array3d(dtype=wp.vec3), origin_obb: wp.vec3, spacing_obb: wp.vec3, xform_roi: wp.transform,
         volume_a: wp.uint64, origin_a: wp.vec3, spacing_a: wp.vec3, size_a: wp.vec3,
         volume_b: wp.uint64, origin_b: wp.vec3, spacing_b: wp.vec3, size_b: wp.vec3,
-        xform_a: wp.transform, mesh: wp.uint64,
+        xform_a: wp.transform, mesh: wp.uint64, max_dist: float,
 ):
     i, j, k = wp.tid()
 
@@ -329,8 +329,8 @@ def resample_roi(
 
     # 计算 SDF (Signed Distance Field)
     sdf = float(-10000.0)
-    # 使用较大的 max_dist 确保能查询到表面，Warp 的 BVH 查询很快
-    query = wp.mesh_query_point_sign_normal(mesh, pa, 1e4)
+    # 使用传入的 max_dist 确保能查询到表面
+    query = wp.mesh_query_point_sign_normal(mesh, pa, max_dist)
     if query.result:
         closest = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
         # query.sign 在网格外部为正，内部为负。需求是内为正，外为负，所以取反
