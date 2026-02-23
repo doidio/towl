@@ -172,23 +172,28 @@ def main(config: str, prl: str, pair: dict):
     # 将 numpy 数组加载为 Warp 的 Volume 对象，以便在 GPU 上进行高效重采样
     volumes = [wp.Volume.load_from_numpy(ct_images[_], bg_value=image_bgs[_]) for _ in range(2)]
 
-    # 初始化输出的双通道图像张量 (通道0: 术后, 通道1: 术前)
-    image_roi = wp.full((*roi_size,), wp.vec2(image_bgs[1], image_bgs[0]), wp.vec2)
+    # 构建 Warp Mesh 用于距离场查询
+    wp_verts = wp.array(mesh.vertices, dtype=wp.vec3)
+    wp_faces = wp.array(mesh.faces.flatten(), dtype=wp.int32)
+    wp_mesh = wp.Mesh(wp_verts, wp_faces)
+
+    # 初始化输出的三通道图像张量 (通道0: 术后, 通道1: 术前, 通道2: TSDF)
+    image_roi = wp.full((*roi_size,), wp.vec3(image_bgs[1], image_bgs[0], -5.0), wp.vec3)
 
     # 调用 Warp kernel 进行 GPU 加速的重采样
     wp.launch(resample_roi, image_roi.shape, [
         image_roi, origin, roi_spacing, roi_xform,
         volumes[1].id, origins[1], spacings[1], sizes[1],
         volumes[0].id, origins[0], spacings[0], sizes[0],
-        post_xform,
+        post_xform, wp_mesh.id
     ])
 
-    # 将结果转回 numpy 数组并分离术前和术后通道
-    image_roi = image_roi.numpy()
-    image_a, image_b = image_roi[:, :, :, 1], image_roi[:, :, :, 0]
+    # 将结果转回 numpy 数组并分离术前、术后和 TSDF 通道
+    image_roi_np = image_roi.numpy()
+    image_a, image_b, image_tsdf = image_roi_np[:, :, :, 1], image_roi_np[:, :, :, 0], image_roi_np[:, :, :, 2]
 
-    # 保存重采样后的术前和术后图像为 NIfTI 格式
-    for op, image in (('pre', image_a), ('post', image_b)):
+    # 保存重采样后的术前、术后和 TSDF 图像为 NIfTI 格式
+    for op, image in (('pre', image_a), ('post', image_b), ('tsdf', image_tsdf)):
         f = dataset_root / op / subdir / f'{prl}.nii.gz'
         f.parent.mkdir(parents=True, exist_ok=True)
 
