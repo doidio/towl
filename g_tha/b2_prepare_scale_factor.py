@@ -22,6 +22,7 @@ except ImportError:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
+    parser.add_argument('--batch_size', default=36, type=int)
     args = parser.parse_args()
 
     cfg_path = Path(args.config)
@@ -34,22 +35,24 @@ def main():
 
     task = 'vae'
     (
-        use_amp, num_workers, patch_size,
+        subtask, use_amp, num_workers, patch_size,
     ) = [cfg['train'][task][_] for _ in (
-        'use_amp', 'num_workers', 'patch_size',
+        'subtask', 'use_amp', 'num_workers', 'patch_size',
     )]
-    load_pt = ckpt_dir / f'{task}_best.pt'
+    subtask = str(subtask)
+    patch_size = list(patch_size)
 
-    train_files = [{'image': p.as_posix()} for p in (dataset_root / 'pre' / 'train').glob('*.nii.gz')]
-    train_files += [{'image': p.as_posix()} for p in (dataset_root / 'post' / 'train').glob('*.nii.gz')]
+    load_pt = ckpt_dir / f'{task}_{subtask}_best.pt'
+
+    train_files = [{'image': p.as_posix()} for p in sorted((dataset_root / subtask / 'train').glob('*.nii.gz'))]
     print(f'Train: {len(train_files)}')
 
-    train_transforms = Compose(define.vae_train_transforms(patch_size))
+    train_transforms = Compose(define.vae_train_transforms(subtask, patch_size))
 
     train_ds = Dataset(train_files, train_transforms)
     train_loader = DataLoader(
-        train_ds, batch_size=32, shuffle=True, num_workers=8, pin_memory=True, persistent_workers=True,
-        prefetch_factor=2,
+        train_ds, batch_size=args.batch_size, shuffle=True, num_workers=num_workers,
+        pin_memory=True, persistent_workers=True,
     )
 
     vae = define.vae_kl().to(device)
@@ -61,7 +64,7 @@ def main():
     except Exception:
         raise SystemExit(f'Failed to load checkpoint: {load_pt}') from None
 
-    for _ in ('epoch', 'best_val_ssim', 'val_l1', 'val_psnr', 'val_ssim', 'scale_factor'):
+    for _ in ('epoch', 'best_val_psnr', 'best_val_ssim', 'val_l1', 'val_psnr', 'val_ssim', 'scale_factor'):
         print(_, checkpoint.get(_))
 
     vae.eval()
@@ -69,9 +72,9 @@ def main():
     print('Calculating Robust Latent Scale Factor...')
 
     # 用于计算全局 Mean 和 Std 的统计量
-    channel_sum = torch.zeros(4, device=device)
-    channel_squared_sum = torch.zeros(4, device=device)
-    num_pixels = 0
+    global_sum = 0.0
+    global_squared_sum = 0.0
+    total_elements = 0
 
     with torch.no_grad():
         amp_ctx = autocast(device.type) if use_amp else nullcontext()
@@ -81,37 +84,29 @@ def main():
 
                 # 编码获取 Latent Mean
                 z_mu, _ = vae.encode(images)
+                z_flat = z_mu.detach().float()
 
-                # [可选] 简单的背景过滤：只统计非背景区域
-                # 假设背景在 Latent 空间的值接近 0 或某个常数
-                # 这里我们使用简单的阈值策略，或者你可以保留全图计算但使用正确的全局公式
-                # mask = (torch.abs(z_mu) > 0.01).any(dim=1, keepdim=True)
-                # if mask.sum() == 0: continue
-                # z_mu = z_mu * mask # 这不仅是过滤，需要只选择 mask 区域，比较复杂，暂且用全局公式修复
+                # 累加所有元素的和与平方和。转为 double 提取 item 彻底避免溢出
+                global_sum += z_flat.sum().cpu().double().item()
+                global_squared_sum += (z_flat ** 2).sum().cpu().double().item()
+                total_elements += z_flat.numel()
 
-                # 累加统计量 (按通道或全局均可，这里做全局统计)
-                # 展平除 Batch/Channel 外的维度
-                z_flat = z_mu.detach()
+    # 计算全体 Latent 元素的全局 Mean 和 Std
+    global_mean = global_sum / total_elements
+    global_var = (global_squared_sum / total_elements) - (global_mean ** 2)
+    global_std = global_var ** 0.5
 
-                channel_sum += torch.sum(z_flat, dim=(0, 2, 3, 4))
-                channel_squared_sum += torch.sum(z_flat ** 2, dim=(0, 2, 3, 4))
-                num_pixels += (z_flat.numel() / z_flat.shape[1])  # 像素总数 (Batch * D * H * W)
-
-    # 计算真实的全局 Mean 和 Std
-    # Var[X] = E[X^2] - (E[X])^2
-    global_mean = channel_sum / num_pixels
-    global_var = (channel_squared_sum / num_pixels) - (global_mean ** 2)
-    global_std = torch.sqrt(global_var).mean()  # 对4个通道的 std 求平均
-
-    scale_factor = 1.0 / global_std.item()
+    # Stable Diffusion / LDM 标准 Scale Factor 计算：1 / 全局标准差
+    scale_factor = 1.0 / global_std
 
     # Save scale factor
     checkpoint['scale_factor'] = scale_factor
+    checkpoint['global_mean'] = global_mean
     torch.save(checkpoint, load_pt)
 
-    print(f'Global Mean per channel: {global_mean.cpu().numpy()}')
-    print(f'Global Std per channel: {torch.sqrt(global_var).cpu().numpy()}')
-    print(f'Final Robust Scale Factor: {scale_factor}')
+    print(f'Global Mean (All): {global_mean:.6f}')
+    print(f'Global Std (All): {global_std:.6f}')
+    print(f'Final Robust Scale Factor: {scale_factor:.6f}')
 
     return scale_factor
 

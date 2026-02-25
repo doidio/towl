@@ -1,3 +1,7 @@
+# 与传统的、依赖于“先验掩码”来强迫空间注意力的 3D Inpainting 不同（而这种掩码在现实临床部署中是无法预知的），显式窄带 TSDF 表达方式本身就是一
+# 种固有的注意力机制。通过在远场（值被截断为 -1 或 1 的区域）将梯度归零，我们自然地将神经网络的容量坍缩到最关键的骨-假体界面上。这消除了对“先知
+# 掩码”的需求，确保模型的预测能力完全专注于亚像素级别的几何匹配，从而使其成为端到端手术规划中稳健且可直接部署的方案。
+
 import argparse
 from contextlib import nullcontext
 from datetime import datetime
@@ -37,13 +41,13 @@ def main():
     task = 'ldm'
     (
         use_amp, resume, num_workers, num_epochs, val_interval, val_limit,
-        batch_size, sw_batch_size, lr, gradient_accumulation_steps,
+        batch_size, sw_batch_size, lr, gradient_accumulation_steps, ema_decay, cfg,
     ) = [cfg['train'][task][_] for _ in (
         'use_amp', 'resume', 'num_workers', 'num_epochs', 'val_interval', 'val_limit',
-        'batch_size', 'sw_batch_size', 'lr', 'gradient_accumulation_steps',
+        'batch_size', 'sw_batch_size', 'lr', 'gradient_accumulation_steps', 'ema_decay', 'cfg',
     )]
 
-    # patch_size = cfg['train']['vae']['patch_size']
+    patch_size = list(cfg['train']['vae']['patch_size'])
 
     # 压缩编码后的 latent
     train_files = [{'image': p.as_posix()} for p in sorted((train_root / 'latents' / 'train').glob('*.npy'))]
@@ -54,11 +58,28 @@ def main():
     val_files = val_files[::len(val_files) // (val_total - 1)]
     print(f'Val limited: {len(val_files)}')
 
-    # 单样本过拟合测试
-    # train_files = train_files[:2] * 50
-    # val_files = train_files[:2]
+    def load_vae(subtask):
+        ckpt_path = ckpt_dir / f'vae_{subtask}_best.pt'
+        print(f'Loading VAE from {ckpt_path.resolve()}')
+        loaded = torch.load(ckpt_path, map_location=device, weights_only=True)
+        vae_model = define.vae_kl().to(device)
+        vae_model.load_state_dict(loaded['state_dict'])
+        vae_model.eval().float()
+        sf = loaded['scale_factor']
+        mean = loaded.get('global_mean', 0.0)
+        print(f'Scale Factor ({subtask}): {sf:.6f}, Mean: {mean:.6f}')
+        return vae_model, sf, mean
 
-    transforms = Compose(define.ldm_transforms())
+    vae_metal, sf_metal, mean_metal = load_vae('metal')
+    vae_pre, sf_pre, mean_pre = load_vae('pre')
+
+    # Scale Latent with Scale Factor dynamically
+    def scale_latent(data):
+        data['image'] = (data['image'] - mean_metal) * sf_metal
+        data['condition'] = (data['condition'] - mean_pre) * sf_pre
+        return data
+
+    transforms = Compose(define.ldm_transforms() + [scale_latent])
 
     train_ds = Dataset(data=train_files, transform=transforms)
     val_ds = Dataset(data=val_files, transform=transforms)
@@ -70,23 +91,13 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=1, num_workers=num_workers)
 
     ldm = define.ldm_unet().to(device)
+    ema = define.EMA(ldm, decay=ema_decay)
 
     scheduler = define.scheduler_ddpm()
     num_train_timesteps = scheduler.num_train_timesteps
 
     optimizer = torch.optim.AdamW(ldm.parameters(), lr=lr, weight_decay=1e-5)
     scaler = GradScaler() if use_amp else None
-
-    vae_ckpt_path = ckpt_dir / 'vae_best.pt'
-
-    print(f'Loading VAE from {vae_ckpt_path.resolve()}')
-    vae_ckpt = torch.load(vae_ckpt_path, map_location=device)
-
-    vae = define.vae_kl().to('cpu')
-    vae.load_state_dict(vae_ckpt['state_dict'])
-    vae.eval().float()
-    scale_factor = vae_ckpt['scale_factor']
-    print(f'Scale Factor: {scale_factor}')
 
     start_epoch = 0
     best_val_loss = float('inf')
@@ -99,6 +110,9 @@ def main():
         optimizer.load_state_dict(ckpt['optimizer'])
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
+
+        if 'ema_state' in ckpt:
+            ema.load_state_dict(ckpt['ema_state'])
 
         start_epoch = ckpt['epoch']
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
@@ -124,18 +138,21 @@ def main():
         resample=False,
     )
 
-    def decode_cpu(z, name):
-        # decoded.append(define.sliding_window_decode(
-        #     img / scale_factor, vae, patch_size, sw_batch_size,
-        # ))
-        z = (z / scale_factor).detach().cpu().float()
+    def decode_gpu(z, name, vae_model, sf, mean):
+        # 使用分块 GPU 推理，避免大图解码 OOM
+        z = (z / sf + mean).detach().to(device).float()
 
         with torch.no_grad():
-            z = vae.decode(z)
+            recon = define.vae_decode_tiled(
+                z=z,
+                vae=vae_model,
+                patch_size=patch_size,
+                sw_batch_size=sw_batch_size,
+            )
 
         name = f'val_epoch_{epoch:03d}_{name}.nii.gz'
-        saver(z[0], meta_data={'filename_or_obj': name})
-        return z
+        saver(recon[0].cpu(), meta_data={'filename_or_obj': name})
+        return recon.cpu()
 
     amp_ctx = autocast(device.type) if use_amp else nullcontext()
 
@@ -148,18 +165,12 @@ def main():
 
         for batch in pbar:
             step += 1
-            image = batch['image'].to(device) * scale_factor
-            cond = batch['condition'].to(device) * scale_factor
+            image = batch['image'].to(device)
+            cond = batch['condition'].to(device)
 
             # CFG Condition Dropout
             if torch.rand(1) < 0.15:
                 cond = torch.zeros_like(cond)
-
-            # TODO 骨与假体界面附近Loss加权
-            # bg_ref = image[..., 0, 0, 0].detach().view(image.shape[0], image.shape[1], 1, 1, 1)
-            # dist_to_bg = torch.abs(image - bg_ref).sum(dim=1, keepdim=True)
-            # mask = (dist_to_bg > 0.1).float().detach()
-            # mask = torch.nn.functional.max_pool3d(mask, kernel_size=3, stride=1, padding=1)
 
             with amp_ctx:
                 # 采样时间步 t
@@ -178,15 +189,7 @@ def main():
                 noise_pred = ldm(x=input_tensor, timesteps=timesteps)
 
                 # 计算损失
-                # loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction='none')
-                # loss = 0.1 * loss.mean() + 0.9 * (loss * mask).sum() / (mask.sum() + 1e-6)
-
-                # 权重：背景=1.0，金属=6.0
-                weights = 1.0 + 5.0 * (torch.abs(image) > 1.5).float()
-                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction='none')
-                loss = (loss * weights).mean()
-
-                # loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
+                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
                 loss = loss / gradient_accumulation_steps
 
             if use_amp:
@@ -199,6 +202,7 @@ def main():
                     scaler.update()
 
                     optimizer.zero_grad(set_to_none=True)
+                    ema.update(ldm)
             else:
                 loss.backward()
 
@@ -207,6 +211,7 @@ def main():
                     optimizer.step()
 
                     optimizer.zero_grad(set_to_none=True)
+                    ema.update(ldm)
 
             epoch_loss += loss.item()
 
@@ -221,13 +226,16 @@ def main():
         # 验证与采样
         if epoch % val_interval == 0:
             ldm.eval()
+            ema.store(ldm)
+            ema.copy_to(ldm)
+
             val_loss = 0
             val_steps = 0
 
             with torch.no_grad():
                 for i, batch in enumerate(val_bar := tqdm(val_loader, desc='Val')):
-                    image = batch['image'].to(device) * scale_factor
-                    cond = batch['condition'].to(device) * scale_factor
+                    image = batch['image'].to(device)
+                    cond = batch['condition'].to(device)
 
                     # 采样时间步 t
                     timesteps = torch.randint(0, num_train_timesteps, (image.shape[0],), device=device).long()
@@ -250,7 +258,7 @@ def main():
                     val_steps += 1
 
                     # 可视化：仅第一个 Batch 的第一个样本
-                    if i == 0 and vae is not None:
+                    if i == 0:
                         val_scheduler = define.scheduler_ddim()
                         val_scheduler.set_timesteps(num_inference_steps=200, device=device)
 
@@ -275,7 +283,7 @@ def main():
                                 noise_pred_batch = ldm(model_input, t_input)
 
                             noise_cond, noise_uncond = noise_pred_batch.chunk(2)
-                            noise_pred = noise_uncond + 7.0 * (noise_cond - noise_uncond)
+                            noise_pred = noise_uncond + cfg * (noise_cond - noise_uncond)
 
                             # 更新 Latent
                             with torch.no_grad():
@@ -283,11 +291,11 @@ def main():
 
                         # 解码显示 (Latent -> Image)
                         with amp_ctx:
-                            vis_generated = decode_cpu(generated, 'Generated')
+                            vis_generated = decode_gpu(generated, 'Generated', vae_metal, sf_metal, mean_metal)
 
                             if epoch == 0:
-                                vis_gt = decode_cpu(image, 'GroundTruth')
-                                vis_cond = decode_cpu(cond, 'Condition')
+                                vis_gt = decode_gpu(image, 'GroundTruth', vae_metal, sf_metal, mean_metal)
+                                vis_cond = decode_gpu(cond, 'Condition', vae_pre, sf_pre, mean_pre)
 
                         def norm_vis(x):
                             x_min, x_max = x.min(), x.max()
@@ -304,6 +312,7 @@ def main():
                             writer.add_image('val/Condition', norm_vis(vis_cond), epoch, dataformats='HW')
                             writer.add_image('val/GroundTruth', norm_vis(vis_gt), epoch, dataformats='HW')
 
+            ema.restore(ldm)
             avg_val_loss = val_loss / val_steps
             writer.add_scalar('val/loss', avg_val_loss, epoch)
             print(f'Val Loss: {avg_val_loss:.5f}')
@@ -312,6 +321,7 @@ def main():
             ckpt = {
                 'epoch': epoch,
                 'state_dict': ldm.state_dict(),
+                'ema_state': ema.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'best_val_loss': best_val_loss,
             }

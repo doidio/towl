@@ -23,22 +23,22 @@ root = 'dataset'
 root = 'train'
 
 [train.vae]
-subtask = 'metal'
+subtask = 'pre'
 use_amp = true  # 混合精度
 resume = false
-num_workers = 2
+num_workers = 8
 num_epochs = 500
-warmup_epochs = 5  # 预热轮次数量
+warmup_epochs = 2  # 预热轮次数量
 val_interval = 1
 val_limit = 50
 batch_size = 6
 patch_size = [128, 128, 128]  # 特征尺寸，感受野，滑动窗口尺寸
 sw_batch_size = 12  # 滑动窗口并发数
-lr_g = 1e-5  # 生成器LR
-lr_d = 5e-5  # 判别器LR通常略大
-adversarial_weight = 0.02  # 对抗损失权重
-perceptual_weight = 0.3  # 感知损失权重
-eikonal_weight = 0.1  # 程函方程损失权重 (仅用于 Metal TSDF)
+lr_g = 1e-4  # 生成器LR
+lr_d = 2e-4  # 判别器LR通常略大
+adversarial_weight = 0.05  # 对抗损失权重
+perceptual_weight = 0.3  # 感知损失权重 (仅用于 pre/post CT)
+eikonal_weight = 0.15  # 程函方程损失权重 (仅用于 metal TSDF)
 kl_weight = 0.03  # KL正则化权重，与L1重建权重博弈，使模型既能重建又能符合健康的正态分布
 
 [train.ldm]
@@ -48,7 +48,9 @@ num_workers = 2
 num_epochs = 1000
 val_interval = 1
 val_limit = 50
-batch_size = 2
+batch_size = 1
 sw_batch_size = 12  # 滑动窗口并发数
 lr = 1e-4
-gradient_accumulation_steps = 4  # 梯度累积
+gradient_accumulation_steps = 8  # 梯度累积
+ema_decay = 0.9999  # 指数移动平均衰减率
+cfg = 3.0  # 引导权重

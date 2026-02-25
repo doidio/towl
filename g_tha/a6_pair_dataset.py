@@ -207,12 +207,11 @@ def main(config: str, prl: str, pair: dict):
 
     # 生成用于可视化的 2D 投影快照 (DRR - Digitally Reconstructed Radiograph)
     snapshot = []
-    sdf_preview = np.clip(image_sdf, -sdf_t, sdf_t)
     for ax in (1, 2):  # 分别在冠状面和矢状面生成投影
         stack = [
             fast_drr(image_a, ax), 
             fast_drr(image_b, ax),
-            fast_drr(sdf_preview, ax, th=(-1.0, 1.0), mode='max')
+            fast_drr(image_sdf, ax, th=(-1.0, 1.0), mode='max')
         ]
         img = np.hstack(stack)  # 水平拼接术前、术后和SDF投影
         snapshot.append(img)

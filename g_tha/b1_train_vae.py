@@ -3,8 +3,10 @@ from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import tomlkit
 import torch
+from PIL import Image
 from monai.data import DataLoader, Dataset
 from monai.inferers import sliding_window_inference
 from monai.losses import PatchAdversarialLoss
@@ -124,6 +126,7 @@ def main():
 
     start_epoch = 0
     best_val_ssim = -1.0
+    best_val_psnr = -1.0
 
     # 继续训练
     if resume:
@@ -147,7 +150,9 @@ def main():
 
             start_epoch = checkpoint['epoch'] + 1
             best_val_ssim = checkpoint.get('best_val_ssim', -1.0)
-            print(f'Load from epoch {start_epoch}, best_val_ssim {best_val_ssim}')
+            best_val_psnr = checkpoint.get('best_val_psnr', -1.0)
+            print(
+                f'Load from epoch {start_epoch} best_val_psnr {best_val_psnr:.4f} best_val_ssim {best_val_ssim:.4f}')
         except Exception as e:
             print(f'Load failed: {e}. Starting from scratch.')
 
@@ -219,7 +224,9 @@ def main():
                 if torch.isnan(kl_loss):
                     raise SystemExit('NaN in kl_loss')
 
-                kl_loss = kl_loss * kl_weight
+                # Warmup 期间降低 KL 权重，优先保证重建精度
+                current_kl_weight = kl_weight  # * 0.1 if warmup else kl_weight
+                kl_loss = kl_loss * current_kl_weight
 
                 # 生成器损失
                 loss_g += kl_loss
@@ -376,6 +383,17 @@ def main():
                         writer.add_image('val/Recon', norm_vis(vis_recon), epoch, dataformats='HW')
                         writer.add_image('val/Diff', vis_diff, epoch, dataformats='HW')
 
+                        val_vis_dir = log_dir / 'val'
+                        val_vis_dir.mkdir(parents=True, exist_ok=True)
+
+                        input_np = (norm_vis(vis_input).cpu().numpy() * 255).astype(np.uint8)
+                        recon_np = (norm_vis(vis_recon).cpu().numpy() * 255).astype(np.uint8)
+                        diff_np = (vis_diff.cpu().numpy() * 255).astype(np.uint8)
+
+                        Image.fromarray(input_np).save(val_vis_dir / f'{epoch:04d}_input.png')
+                        Image.fromarray(recon_np).save(val_vis_dir / f'{epoch:04d}_recon.png')
+                        Image.fromarray(diff_np).save(val_vis_dir / f'{epoch:04d}_diff.png')
+
             val_l1_loss /= val_step
             psnr = psnr_metric.aggregate().item()
             ssim = ssim_metric.aggregate().item()
@@ -399,6 +417,7 @@ def main():
                 'val_psnr': psnr,
                 'val_ssim': ssim,
                 'best_val_ssim': best_val_ssim,
+                'best_val_psnr': best_val_psnr,
             }
 
             if use_amp:
@@ -407,11 +426,22 @@ def main():
 
             ckpt_dir.mkdir(parents=True, exist_ok=True)
 
+            is_best = False
+            if psnr > best_val_psnr:
+                best_val_psnr = psnr
+                checkpoint['best_val_psnr'] = best_val_psnr
+                if subtask in ('metal',):
+                    is_best = True
+
             if ssim > best_val_ssim:
                 best_val_ssim = ssim
                 checkpoint['best_val_ssim'] = best_val_ssim
+                if subtask in ('pre',):
+                    is_best = True
+
+            if is_best:
                 torch.save(checkpoint, ckpt_dir / f'{task}_{subtask}_best.pt')
-                print('New best model saved!')
+                print(f'New best model saved!')
 
             torch.save(checkpoint, ckpt_dir / f'{task}_{subtask}_last.pt')
 

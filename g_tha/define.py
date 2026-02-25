@@ -10,17 +10,29 @@ from monai.transforms import (
     LoadImaged, MapTransform, RandCropByPosNegLabeld, ThresholdIntensityd, CopyItemsd, DeleteItemsd, SpatialPadd,
 )
 
-bone_range = [150.0, 650.0]
+bone_min = 150.0
 
 
 class CTBoneNormalized(MapTransform):
-    """基于线性分段函数的 CT 值映射变换 (Linear Piecewise Mapping)"""
+    """
+    基于线性分段函数的 CT 值映射变换 (Linear Piecewise Mapping)
+
+    1. 剔除无效背景: 将低于 bone_min (如 150 HU) 的软组织、脂肪和空气全部截断映射为 -1.0。
+       这清除了大部分无用的背景噪声，强制 VAE 将所有网络容量 (Capacity) 集中在骨骼特征上，
+       并为后续 LDM 留下大面积“零方差”区域，极大地降低了生成难度。
+    2. 放大松质骨纹理 ([-1.0, 0.0]): 将 [150, 650] 的狭窄区间拉伸到了网络输入空间的一半。
+       松质骨(骨小梁)是临床最关注且网络最难生成的精细纹理，这样分配算力能让特征学习得最锐利。
+    3. 压缩皮质骨阶跃 ([0.0, 1.0]): 致密皮质骨的 CT 值往往在 1150 甚至局部突破 2000。
+       如果将 1150 强行截断到 1.0，会导致严重的振铃效应 (Gibbs Artifacts)，MSE 惩罚极高。
+       将 1150~3000 非线性压缩到 [0.5, 1.0] 的窄区间内，既保留了硬骨相对密度的层次感，
+       又在数值上极大地“宽容”了高密度区域的 L1/MSE 重建误差，防止其在训练中反向吞噬松质骨的纹理细节。
+    """
 
     def __init__(self, keys, reverse=False, allow_missing_keys=False):
         super().__init__(keys, allow_missing_keys)
 
-        self.src_pts = [*bone_range,]
-        self.dst_pts = [-1.0, 1.0]
+        self.src_pts = [bone_min, 650.0, 1150.0, 3000.0]
+        self.dst_pts = [-1.0, 0.0, 0.5, 1.0]
         if reverse:
             self.src_pts, self.dst_pts = self.dst_pts, self.src_pts
 
@@ -104,12 +116,12 @@ def perceptual_loss():
 
 
 def vae_train_transforms(subtask, patch_size):
-    if subtask in ('pre', ):
+    if subtask in ('pre',):
         return [
             LoadImaged(keys=['image'], ensure_channel_first=True),
-            SpatialPadd(keys=['image'], spatial_size=patch_size),
+            SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=-1024),
             CopyItemsd(keys=['image'], times=1, names=['label']),
-            ThresholdIntensityd(keys=['label'], threshold=bone_range[0], above=True, cval=0),
+            ThresholdIntensityd(keys=['label'], threshold=bone_min, above=True, cval=0),
             RandCropByPosNegLabeld(
                 keys=['image'],
                 label_key='label',
@@ -120,10 +132,10 @@ def vae_train_transforms(subtask, patch_size):
             DeleteItemsd(keys=['label']),
             CTBoneNormalized(keys=['image']),
         ]
-    elif subtask in ('metal', ):
+    elif subtask in ('metal',):
         return [
             LoadImaged(keys=['image'], ensure_channel_first=True),
-            SpatialPadd(keys=['image'], spatial_size=patch_size),
+            SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=-1.0),
             CopyItemsd(keys=['image'], times=1, names=['label']),
             ThresholdIntensityd(keys=['label'], threshold=-0.95, above=True, cval=0),
             RandCropByPosNegLabeld(
@@ -139,14 +151,13 @@ def vae_train_transforms(subtask, patch_size):
         raise SystemError(f'Unknown VAE subtask {subtask}')
 
 
-
 def vae_val_transforms(subtask):
-    if subtask in ('pre', ):
+    if subtask in ('pre',):
         return [
             LoadImaged(keys=['image'], ensure_channel_first=True),
             CTBoneNormalized(keys=['image']),
         ]
-    elif subtask in ('metal', ):
+    elif subtask in ('metal',):
         return [
             LoadImaged(keys=['image'], ensure_channel_first=True),
         ]
@@ -218,37 +229,31 @@ def scheduler_ddim():
     )
 
 
-def sliding_window_decode(z_unscaled, vae, patch_size, sw_batch_size, overlap=0.25):
+def vae_decode_tiled(z, vae, patch_size, sw_batch_size, overlap=0.25):
     """
-    针对 LDM 的 Tiled VAE Decoding。
+    针对 LDM 的 Tiled VAE Decoding，直接在 Latent 空间进行滑动窗口。
     z: [B, C, D, H, W] (Latent)
-    patch_size: Image Space 的 patch size (如 [128, 128, 128])
+    patch_size: 图像空间的 ROI Size (例如 [128, 128, 128])
     """
-    original_shape = [s * vae_downsample for s in z_unscaled.shape[2:]]
+    # 计算 Latent 空间的 ROI Size
+    latent_roi_size = [s // vae_downsample for s in patch_size]
 
-    # 构造伪上采样输入，配合 sliding_window_inference
-    z_upsampled = torch.nn.functional.interpolate(z_unscaled, size=original_shape, mode='nearest')
-
-    # 定义 Predictor 先缩小回 Latent Size，再 Decode
-    def decode_predictor_wrapper(z_up_patch):
-        # input: [B, C, roi_x, roi_y, roi_z] (Image Space Size)
-        # downsample back to latent size
-        z_patch = torch.nn.functional.interpolate(z_up_patch, scale_factor=1.0 / vae_downsample, mode='nearest')
-        return vae.decode(z_patch)
+    def decode_predictor(latent_patch):
+        return vae.decode(latent_patch)
 
     # 5. 滑动窗口推理
-    recon_aligned = monai.inferers.sliding_window_inference(
-        inputs=z_upsampled,
-        roi_size=patch_size,
+    recon = monai.inferers.sliding_window_inference(
+        inputs=z,
+        roi_size=latent_roi_size,
         sw_batch_size=sw_batch_size,
-        predictor=decode_predictor_wrapper,
+        predictor=decode_predictor,
         overlap=overlap,
         mode='gaussian',
-        device=z_unscaled.device,
+        device=z.device,
         progress=False,
     )
 
-    return recon_aligned
+    return recon
 
 
 class EMA:

@@ -24,7 +24,7 @@ except ImportError:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
-    parser.add_argument('--sw_batch_size', default=36)
+    parser.add_argument('--sw_batch_size', default=12)
     args = parser.parse_args()
 
     cfg = tomlkit.loads(Path(args.config).read_text('utf-8')).unwrap()
@@ -38,38 +38,49 @@ def main():
     patch_size = cfg['train'][task]['patch_size']
     use_amp = cfg['train'][task]['use_amp']
 
-    vae = define.vae_kl().to(device)
-    load_pt = ckpt_dir / f'{task}_best.pt'
+    def load_vae(subtask):
+        vae_model = define.vae_kl().to(device)
+        load_pt = ckpt_dir / f'{task}_{subtask}_best.pt'
 
-    try:
         print(f'Loading checkpoint from {load_pt}...')
-        checkpoint = torch.load(load_pt, map_location=device)
-        vae.load_state_dict(checkpoint['state_dict'])
+        try:
+            checkpoint = torch.load(load_pt, map_location=device, weights_only=True)
+            vae_model.load_state_dict(checkpoint['state_dict'])
 
-        if 'scale_factor' in checkpoint:
-            scale_factor = checkpoint['scale_factor']
-            print(f'Scale Factor: {scale_factor}')
-        else:
-            raise SystemExit(f'Scale factor not prepared')
-    except Exception as e:
-        raise SystemExit(f'Failed to load checkpoint: {e}')
+            if 'scale_factor' in checkpoint:
+                scale_factor = checkpoint['scale_factor']
+                global_mean = checkpoint.get('global_mean', 0.0)
+                print(f'Scale Factor ({subtask}): {scale_factor:.6f}, Mean: {global_mean:.6f}')
+            else:
+                raise SystemExit(f'Scale factor not prepared for {subtask}')
 
-    vae.eval()
-    transforms = Compose(define.vae_val_transforms())
+            vae_model.eval()
+            return vae_model, scale_factor, global_mean
+        except Exception as e:
+            raise SystemExit(f'Failed to load {subtask} checkpoint: {e}')
 
-    def encode_predictor(inputs):
-        return vae.encode(inputs)[0]
+    vae_metal, sf_metal, mean_metal = load_vae('metal')
+    vae_pre, sf_pre, mean_pre = load_vae('pre')
+
+    transforms_metal = Compose(define.vae_val_transforms('metal'))
+    transforms_pre = Compose(define.vae_val_transforms('pre'))
+
+    def encode_predictor(model):
+        def _predictor(inputs: torch.Tensor) -> torch.Tensor:
+            return model.encode(inputs)[0]
+
+        return _predictor
 
     for subdir in ['train', 'val']:
-        post_dir = dataset_root / 'post' / subdir
+        metal_dir = dataset_root / 'metal' / subdir
         pre_dir = dataset_root / 'pre' / subdir
         out_dir = latents_root / subdir
 
         out_dir.mkdir(parents=True, exist_ok=True)
-        post_files = sorted(list(post_dir.glob('*.nii.gz')))
+        metal_files = sorted(list(metal_dir.glob('*.nii.gz')))
 
-        for post_path in tqdm(post_files, desc=subdir):
-            filename = post_path.name
+        for metal_path in tqdm(metal_files, desc=subdir):
+            filename = metal_path.name
             pre_path = pre_dir / filename
 
             if not pre_path.exists():
@@ -81,8 +92,11 @@ def main():
             if save_path.exists():
                 continue
 
-            z_post_pre = []
-            for path in (post_path, pre_path):
+            z_metal_pre = []
+            for path, vae, sf, mean, transforms in [
+                (metal_path, vae_metal, sf_metal, mean_metal, transforms_metal),
+                (pre_path, vae_pre, sf_pre, mean_pre, transforms_pre)
+            ]:
                 batch = transforms({'image': path.as_posix()})['image']
 
                 if isinstance(batch, np.ndarray):
@@ -91,30 +105,32 @@ def main():
                 images = batch.unsqueeze(0).to(device)
 
                 with torch.no_grad():
-                    with autocast(device.type) if use_amp else nullcontext():
+                    amp_ctx = autocast(device.type) if use_amp else nullcontext()
+                    with amp_ctx:
                         z = sliding_window_inference(
                             inputs=images,
                             roi_size=patch_size,
                             sw_batch_size=args.sw_batch_size,
-                            predictor=encode_predictor,
+                            predictor=encode_predictor(vae),
                             overlap=0.25,
                             mode='gaussian',
                             device=device,
+                            sw_device=device,
                             progress=False,
                         )
 
+                # 不应用 scale factor，保持原始 latent 存盘
                 z = z.cpu().numpy()
-                z_post_pre.append(z)
+                z_metal_pre.append(z)
 
-            z_post, z_pre = z_post_pre
+            z_metal, z_pre = z_metal_pre
 
-            if z_post.shape != z_pre.shape:
-                warnings.warn(f'Shape mismatch for {filename} Post {z_post.shape} Pre {z_pre.shape}. Skipping.')
+            if z_metal.shape != z_pre.shape:
+                warnings.warn(f'Shape mismatch for {filename} Metal {z_metal.shape} Pre {z_pre.shape}. Skipping.')
                 continue
 
-            # TODO 在像素空间计算一个Mask通道标记出骨与假体界面，4倍下采样，为LDM训练Loss加权作准备
-            # 通道拼接，[0:4]术后[4:8]术前
-            z_cat = np.concatenate((z_post[0], z_pre[0]), axis=0).astype(np.float32)
+            # 通道拼接，[0:4] 目标 metal, [4:8] 条件 pre
+            z_cat = np.concatenate((z_metal[0], z_pre[0]), axis=0).astype(np.float32)
             np.save(save_path, z_cat)
 
 
