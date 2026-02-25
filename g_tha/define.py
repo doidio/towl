@@ -8,6 +8,7 @@ from monai.networks.nets import AutoencoderKL, PatchDiscriminator, DiffusionMode
 from monai.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.transforms import (
     LoadImaged, MapTransform, RandCropByPosNegLabeld, ThresholdIntensityd, CopyItemsd, DeleteItemsd, SpatialPadd,
+    Lambdad,
 )
 
 bone_min = 150.0
@@ -115,13 +116,19 @@ def perceptual_loss():
     )
 
 
+def _label_pre_func(x):
+    return (x > bone_min).float()
+
+def _label_metal_func(x):
+    return (x > -0.95).float()
+
 def vae_train_transforms(subtask, patch_size):
     if subtask in ('pre',):
         return [
             LoadImaged(keys=['image'], ensure_channel_first=True),
             SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=-1024),
             CopyItemsd(keys=['image'], times=1, names=['label']),
-            ThresholdIntensityd(keys=['label'], threshold=bone_min, above=True, cval=0),
+            Lambdad(keys=['label'], func=_label_pre_func),
             RandCropByPosNegLabeld(
                 keys=['image'],
                 label_key='label',
@@ -137,7 +144,8 @@ def vae_train_transforms(subtask, patch_size):
             LoadImaged(keys=['image'], ensure_channel_first=True),
             SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=-1.0),
             CopyItemsd(keys=['image'], times=1, names=['label']),
-            ThresholdIntensityd(keys=['label'], threshold=-0.95, above=True, cval=0),
+            # 计算 TSDF 窄带附近作为前景，不能用 ThresholdIntensityd 因为 0 等值面反而会变成 0 背景
+            Lambdad(keys=['label'], func=_label_metal_func),
             RandCropByPosNegLabeld(
                 keys=['image'],
                 label_key='label',
@@ -151,15 +159,17 @@ def vae_train_transforms(subtask, patch_size):
         raise SystemError(f'Unknown VAE subtask {subtask}')
 
 
-def vae_val_transforms(subtask):
+def vae_val_transforms(subtask, patch_size):
     if subtask in ('pre',):
         return [
             LoadImaged(keys=['image'], ensure_channel_first=True),
+            SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=-1024),
             CTBoneNormalized(keys=['image']),
         ]
     elif subtask in ('metal',):
         return [
             LoadImaged(keys=['image'], ensure_channel_first=True),
+            SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=-1.0),
         ]
     else:
         raise SystemError(f'Unknown VAE subtask {subtask}')

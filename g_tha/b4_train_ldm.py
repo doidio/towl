@@ -26,6 +26,7 @@ except ImportError:
 
 
 def main():
+    torch.backends.cudnn.benchmark = True
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     args = parser.parse_args()
@@ -55,7 +56,8 @@ def main():
     print(f'Train: {len(train_files)}, Val: {len(val_files)}')
 
     val_total = min(val_limit, len(val_files))
-    val_files = val_files[::len(val_files) // (val_total - 1)]
+    if val_total > 1:
+        val_files = val_files[::max(1, len(val_files) // (val_total - 1))]
     print(f'Val limited: {len(val_files)}')
 
     def load_vae(subtask):
@@ -169,8 +171,8 @@ def main():
             cond = batch['condition'].to(device)
 
             # CFG Condition Dropout
-            if torch.rand(1) < 0.15:
-                cond = torch.zeros_like(cond)
+            drop_mask = (torch.rand(cond.shape[0], 1, 1, 1, 1, device=device) < 0.15).float()
+            cond = cond * (1.0 - drop_mask)
 
             with amp_ctx:
                 # 采样时间步 t
@@ -195,7 +197,7 @@ def main():
             if use_amp:
                 scaler.scale(loss).backward()
 
-                if step % gradient_accumulation_steps == 0:
+                if step % gradient_accumulation_steps == 0 or step == len(train_loader):
                     scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(ldm.parameters(), 1.0)
                     scaler.step(optimizer)
@@ -206,7 +208,7 @@ def main():
             else:
                 loss.backward()
 
-                if step % gradient_accumulation_steps == 0:
+                if step % gradient_accumulation_steps == 0 or step == len(train_loader):
                     torch.nn.utils.clip_grad_norm_(ldm.parameters(), 1.0)
                     optimizer.step()
 

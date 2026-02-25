@@ -27,6 +27,7 @@ except ImportError:
 
 
 def main():
+    torch.backends.cudnn.benchmark = True
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
     args = parser.parse_args()
@@ -68,7 +69,7 @@ def main():
     # 数据集覆盖术前和术后
     train_files = [{'image': p.as_posix()} for p in sorted((dataset_root / subtask / 'train').glob('*.nii.gz'))]
     val_files = [{'image': p.as_posix()} for p in sorted((dataset_root / subtask / 'val').glob('*.nii.gz'))]
-    print(f'Train: {len(train_files)}, Val: {len(val_files)}')
+    print(f'Subtask: {subtask} Train: {len(train_files)} Val: {len(val_files)}')
 
     val_total = min(val_limit, len(val_files))
     if val_total > 1:
@@ -76,7 +77,7 @@ def main():
     print(f'Val limited: {len(val_files)}')
 
     train_transforms = Compose(define.vae_train_transforms(subtask, patch_size))
-    val_transforms = Compose(define.vae_val_transforms(subtask))
+    val_transforms = Compose(define.vae_val_transforms(subtask, patch_size))
 
     train_ds = Dataset(train_files, train_transforms)
     val_ds = Dataset(val_files, val_transforms) if len(val_files) else None
@@ -203,18 +204,25 @@ def main():
 
             loss_g = l1_loss
 
-            # 感知损失，退出AMP避免NaN，加微量噪声避免MedicalNet统计std=0导致NaN
+            # 感知损失，退出AMP避免NaN。
+            # 过滤掉几乎无变化的平坦背景区域 (std接近0)，避免 MedicalNet 内部归一化除零导致 NaN，
+            # 同时也避免之前“加微量噪声”方案中，噪声被内部归一化放大成纯随机信号而严重破坏 VAE 重建质量的问题。
             img_float = images.float()
-            noise = torch.randn_like(img_float) * 1e-4
 
             if subtask in ('pre',) and per_loss_fn is not None:
-                per_loss = per_loss_fn(reconstruction.float() + noise, img_float + noise)
+                stds = img_float.view(img_float.shape[0], -1).std(dim=1)
+                valid = stds > 1e-3
+                
+                if valid.any():
+                    valid_recon = reconstruction.float()[valid]
+                    valid_img = img_float[valid]
+                    per_loss_val = per_loss_fn(valid_recon, valid_img)
 
-                if torch.isnan(per_loss):
-                    raise SystemExit('NaN in per_loss')
+                    if torch.isnan(per_loss_val):
+                        raise SystemExit('NaN in per_loss')
 
-                per_loss = per_loss * per_weight
-                loss_g += per_loss
+                    per_loss = per_loss_val * per_weight * (valid.sum().float() / img_float.shape[0])
+                    loss_g += per_loss
 
             with amp_ctx:
                 # KL 正则化损失
