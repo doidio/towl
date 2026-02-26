@@ -62,6 +62,8 @@ def main():
     lr_g = float(train_cfg['lr_g'])
     lr_d = float(train_cfg['lr_d'])
 
+    print('Subtask:\t', subtask)
+
     # 读取 ROI 物理参数，用于 TSDF 梯度约束
     roi_spacing = cfg['ct']['roi']['spacing']
     sdf_t = float(cfg['ct']['roi']['sdf_t'])
@@ -69,12 +71,13 @@ def main():
     # 数据集覆盖术前和术后
     train_files = [{'image': p.as_posix()} for p in sorted((dataset_root / subtask / 'train').glob('*.nii.gz'))]
     val_files = [{'image': p.as_posix()} for p in sorted((dataset_root / subtask / 'val').glob('*.nii.gz'))]
-    print(f'Subtask: {subtask} Train: {len(train_files)} Val: {len(val_files)}')
+    print('Train:\t', len(train_files))
+    print('Val:\t', len(val_files))
 
     val_total = min(val_limit, len(val_files))
     if val_total > 1:
         val_files = val_files[::max(1, len(val_files) // (val_total - 1))]
-    print(f'Val limited: {len(val_files)}')
+    print('Val limited:\t', len(val_files))
 
     train_transforms = Compose(define.vae_train_transforms(subtask, patch_size))
     val_transforms = Compose(define.vae_val_transforms(subtask, patch_size))
@@ -136,7 +139,7 @@ def main():
 
     if load_pt and load_pt.exists():
         try:
-            print(f'Loading checkpoint from {load_pt}...')
+            print('Resuming:\t', load_pt)
             checkpoint = torch.load(load_pt, map_location=device, weights_only=True)
 
             vae.load_state_dict(checkpoint['state_dict'])
@@ -150,12 +153,14 @@ def main():
 
             start_epoch = checkpoint['epoch'] + 1
             best_val_l1 = checkpoint.get('best_val_l1', float('inf'))
-            print('Epoch:', start_epoch)
-            print('   L1:', checkpoint['val_l1'], 'best', best_val_l1)
-            print(' PSNR:', checkpoint['val_psnr'])
-            print(' SSIM:', checkpoint['val_ssim'])
+            print('Epoch:\t', start_epoch)
+            print('L1:  \t', checkpoint['val_l1'], 'best', best_val_l1)
+            print('PSNR:\t', checkpoint['val_psnr'])
+            print('SSIM:\t', checkpoint['val_ssim'])
+            print('Scale Factor:\t', checkpoint.get('scale_factor'))
+            print('Global Mean:\t', checkpoint.get('global_mean'))
         except Exception as e:
-            print(f'Load failed: {e}. Starting from scratch.')
+            raise SystemError(f'Load failed: {e}')
 
     # 验证滑动窗口推理，确定性编解码
     def encode_decode_mu(inputs: torch.Tensor) -> torch.Tensor:

@@ -23,11 +23,11 @@ root = 'dataset'
 root = 'train'
 
 [train.vae]
-subtask = 'pre'
+subtask = 'metal'
 use_amp = true  # 混合精度
 resume = false
 num_workers = 8
-num_epochs = 500
+num_epochs = 100
 warmup_epochs = 2  # 预热轮次数量
 val_interval = 1
 val_limit = 50

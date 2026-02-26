@@ -53,23 +53,29 @@ def main():
     # 压缩编码后的 latent
     train_files = [{'image': p.as_posix()} for p in sorted((train_root / 'latents' / 'train').glob('*.npy'))]
     val_files = [{'image': p.as_posix()} for p in sorted((train_root / 'latents' / 'val').glob('*.npy'))]
-    print(f'Train: {len(train_files)}, Val: {len(val_files)}')
+    print('Train:\t', len(train_files))
+    print('Val:\t', len(val_files))
 
     val_total = min(val_limit, len(val_files))
     if val_total > 1:
         val_files = val_files[::max(1, len(val_files) // (val_total - 1))]
-    print(f'Val limited: {len(val_files)}')
+    print('Val limited:\t', len(val_files))
 
     def load_vae(subtask):
-        ckpt_path = ckpt_dir / f'vae_{subtask}_best.pt'
-        print(f'Loading VAE from {ckpt_path.resolve()}')
+        ckpt_path = (ckpt_dir / f'vae_{subtask}_best.pt').resolve()
+        print('Loading:\t', ckpt_path)
         loaded = torch.load(ckpt_path, map_location=device, weights_only=True)
         vae_model = define.vae_kl().to(device)
         vae_model.load_state_dict(loaded['state_dict'])
         vae_model.eval().float()
-        sf = loaded['scale_factor']
-        mean = loaded.get('global_mean', 0.0)
-        print(f'Scale Factor ({subtask}): {sf:.6f}, Mean: {mean:.6f}')
+
+        print('Epoch:\t', loaded['epoch'])
+        print('L1:   \t', loaded['val_l1'], 'best', loaded['best_val_l1'])
+        print('PSNR:\t', loaded['val_psnr'])
+        print('SSIM:\t', loaded['val_ssim'])
+        print('Scale Factor:\t', sf := loaded['scale_factor'])
+        print('Global Mean:\t', mean := loaded['global_mean'])
+
         return vae_model, sf, mean
 
     vae_metal, sf_metal, mean_metal = load_vae('metal')
@@ -103,10 +109,10 @@ def main():
 
     start_epoch = 0
     best_val_loss = float('inf')
-    ldm_ckpt_path = ckpt_dir / f'{task}_last.pt'
+    ldm_ckpt_path = (ckpt_dir / f'{task}_last.pt').resolve()
 
     if resume and ldm_ckpt_path.exists():
-        print(f'Resuming LDM from {ldm_ckpt_path}...')
+        print('Resuming:\t', ldm_ckpt_path)
         ckpt = torch.load(ldm_ckpt_path, map_location=device)
         ldm.load_state_dict(ckpt['state_dict'])
         optimizer.load_state_dict(ckpt['optimizer'])
@@ -118,11 +124,13 @@ def main():
 
         start_epoch = ckpt['epoch']
         best_val_loss = ckpt.get('best_val_loss', float('inf'))
+        current_val_loss = ckpt.get('val_loss', float('inf'))
 
         if use_amp and 'scaler' in ckpt:
             scaler.load_state_dict(ckpt['scaler'])
 
-        print(f'Load from epoch {start_epoch}, best_val_loss {best_val_loss}')
+        print('Epoch:', start_epoch)
+        print(f'   MSE Loss: {current_val_loss:.5f} (best: {best_val_loss:.5f})')
         start_epoch += 1
 
     suffix = datetime.now().strftime(f'{task}_%Y%m%d_%H%M%S')
@@ -325,6 +333,7 @@ def main():
                 'state_dict': ldm.state_dict(),
                 'ema_state': ema.state_dict(),
                 'optimizer': optimizer.state_dict(),
+                'val_loss': avg_val_loss,
                 'best_val_loss': best_val_loss,
             }
             if use_amp:
