@@ -150,8 +150,10 @@ def main():
 
             start_epoch = checkpoint['epoch'] + 1
             best_val_l1 = checkpoint.get('best_val_l1', float('inf'))
-            print(
-                f'Load from epoch {start_epoch} best_val_l1 {best_val_l1:.4f}')
+            print('Epoch:', start_epoch)
+            print('   L1:', checkpoint['val_l1'], 'best', best_val_l1)
+            print(' PSNR:', checkpoint['val_psnr'])
+            print(' SSIM:', checkpoint['val_ssim'])
         except Exception as e:
             print(f'Load failed: {e}. Starting from scratch.')
 
@@ -210,7 +212,7 @@ def main():
             if subtask in ('pre',) and per_loss_fn is not None:
                 stds = img_float.view(img_float.shape[0], -1).std(dim=1)
                 valid = stds > 1e-3
-                
+
                 if valid.any():
                     valid_recon = reconstruction.float()[valid]
                     valid_img = img_float[valid]
@@ -431,13 +433,10 @@ def main():
 
             ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-            is_best = False
-            if val_l1_loss < best_val_l1:
+            if val_l1_loss < best_val_l1:  # 不用 PSNR 或 SSIM，L1 最能反映骨质宏观占位和均值偏移，同时也最能确保 TSDF 准确
                 best_val_l1 = val_l1_loss
                 checkpoint['best_val_l1'] = best_val_l1
-                is_best = True
 
-            if is_best:
                 torch.save(checkpoint, ckpt_dir / f'{task}_{subtask}_best.pt')
                 print(f'New best model saved!')
 
