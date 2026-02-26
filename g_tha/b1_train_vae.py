@@ -126,8 +126,7 @@ def main():
     writer = SummaryWriter(log_dir=log_dir.as_posix())
 
     start_epoch = 0
-    best_val_ssim = -1.0
-    best_val_psnr = -1.0
+    best_val_l1 = float('inf')
 
     # 继续训练
     if resume:
@@ -150,10 +149,9 @@ def main():
                 scaler_d.load_state_dict(checkpoint['scaler_d'])
 
             start_epoch = checkpoint['epoch'] + 1
-            best_val_ssim = checkpoint.get('best_val_ssim', -1.0)
-            best_val_psnr = checkpoint.get('best_val_psnr', -1.0)
+            best_val_l1 = checkpoint.get('best_val_l1', float('inf'))
             print(
-                f'Load from epoch {start_epoch} best_val_psnr {best_val_psnr:.4f} best_val_ssim {best_val_ssim:.4f}')
+                f'Load from epoch {start_epoch} best_val_l1 {best_val_l1:.4f}')
         except Exception as e:
             print(f'Load failed: {e}. Starting from scratch.')
 
@@ -424,8 +422,7 @@ def main():
                 'val_l1': val_l1_loss,
                 'val_psnr': psnr,
                 'val_ssim': ssim,
-                'best_val_ssim': best_val_ssim,
-                'best_val_psnr': best_val_psnr,
+                'best_val_l1': best_val_l1,
             }
 
             if use_amp:
@@ -435,17 +432,10 @@ def main():
             ckpt_dir.mkdir(parents=True, exist_ok=True)
 
             is_best = False
-            if psnr > best_val_psnr:
-                best_val_psnr = psnr
-                checkpoint['best_val_psnr'] = best_val_psnr
-                if subtask in ('metal',):
-                    is_best = True
-
-            if ssim > best_val_ssim:
-                best_val_ssim = ssim
-                checkpoint['best_val_ssim'] = best_val_ssim
-                if subtask in ('pre',):
-                    is_best = True
+            if val_l1_loss < best_val_l1:
+                best_val_l1 = val_l1_loss
+                checkpoint['best_val_l1'] = best_val_l1
+                is_best = True
 
             if is_best:
                 torch.save(checkpoint, ckpt_dir / f'{task}_{subtask}_best.pt')
