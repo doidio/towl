@@ -32,41 +32,41 @@ def main():
     parser.add_argument('--config', required=True)
     args = parser.parse_args()
 
-    cfg_path = Path(args.config)
-    cfg = tomlkit.loads(cfg_path.read_text('utf-8')).unwrap()
+    config_path = Path(args.config)
+    config = tomlkit.loads(config_path.read_text('utf-8')).unwrap()
 
-    dataset_root = Path(str(cfg['dataset']['root']))
-    train_root = Path(str(cfg['train']['root']))
+    dataset_root = Path(str(config['dataset']['root']))
+    train_root = Path(str(config['train']['root']))
     # cache_dir = train_root / 'cache'
     log_dir = train_root / 'logs'
     ckpt_dir = train_root / 'checkpoints'
 
     task = 'vae'
-    train_cfg = cfg['train'][task]
+    config_train = config['train'][task]
 
-    subtask = str(train_cfg['subtask'])
-    use_amp = bool(train_cfg['use_amp'])
-    resume = bool(train_cfg['resume'])
-    num_workers = int(train_cfg['num_workers'])
-    num_epochs = int(train_cfg['num_epochs'])
-    warmup_epochs = int(train_cfg['warmup_epochs'])
-    batch_size = int(train_cfg['batch_size'])
-    patch_size = list(train_cfg['patch_size'])
-    sw_batch_size = int(train_cfg['sw_batch_size'])
-    val_interval = int(train_cfg['val_interval'])
-    val_limit = int(train_cfg['val_limit'])
-    adv_weight = float(train_cfg['adversarial_weight'])
-    per_weight = float(train_cfg['perceptual_weight'])
-    eik_weight = float(train_cfg['eikonal_weight'])
-    kl_weight = float(train_cfg['kl_weight'])
-    lr_g = float(train_cfg['lr_g'])
-    lr_d = float(train_cfg['lr_d'])
+    subtask = str(config_train['subtask'])
+    use_amp = bool(config_train['use_amp'])
+    resume = bool(config_train['resume'])
+    num_workers = int(config_train['num_workers'])
+    num_epochs = int(config_train['num_epochs'])
+    warmup_epochs = int(config_train['warmup_epochs'])
+    batch_size = int(config_train['batch_size'])
+    patch_size = list(config_train['patch_size'])
+    sw_batch_size = int(config_train['sw_batch_size'])
+    val_interval = int(config_train['val_interval'])
+    val_limit = int(config_train['val_limit'])
+    adv_weight = float(config_train['adversarial_weight'])
+    per_weight = float(config_train['perceptual_weight'])
+    eik_weight = float(config_train['eikonal_weight'])
+    kl_weight = float(config_train['kl_weight'])
+    lr_g = float(config_train['lr_g'])
+    lr_d = float(config_train['lr_d'])
 
     print('Subtask:\t', subtask)
 
     # 读取 ROI 物理参数，用于 TSDF 梯度约束
-    roi_spacing = cfg['ct']['roi']['spacing']
-    sdf_t = float(cfg['ct']['roi']['sdf_t'])
+    roi_spacing = config['ct']['roi']['spacing']
+    sdf_t = float(config['ct']['roi']['sdf_t'])
 
     # 数据集覆盖术前和术后
     train_files = [{'image': p.as_posix()} for p in sorted((dataset_root / subtask / 'train').glob('*.nii.gz'))]
@@ -153,12 +153,14 @@ def main():
 
             start_epoch = checkpoint['epoch'] + 1
             best_val_l1 = checkpoint.get('best_val_l1', float('inf'))
+
             print('Epoch:\t', start_epoch)
             print('L1:  \t', checkpoint['val_l1'], 'best', best_val_l1)
             print('PSNR:\t', checkpoint['val_psnr'])
             print('SSIM:\t', checkpoint['val_ssim'])
             print('Scale Factor:\t', checkpoint.get('scale_factor'))
             print('Global Mean:\t', checkpoint.get('global_mean'))
+            start_epoch += 1
         except Exception as e:
             raise SystemError(f'Load failed: {e}')
 

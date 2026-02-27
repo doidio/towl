@@ -22,6 +22,7 @@ except ImportError:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
+    parser.add_argument('--subtask', required=True, type=str)
     parser.add_argument('--batch_size', default=36, type=int)
     args = parser.parse_args()
 
@@ -35,11 +36,11 @@ def main():
 
     task = 'vae'
     (
-        subtask, use_amp, num_workers, patch_size,
+        use_amp, num_workers, patch_size,
     ) = [cfg['train'][task][_] for _ in (
-        'subtask', 'use_amp', 'num_workers', 'patch_size',
+        'use_amp', 'num_workers', 'patch_size',
     )]
-    subtask = str(subtask)
+    subtask = str(args.subtask)
     patch_size = list(patch_size)
 
     load_pt = ckpt_dir / f'{task}_{subtask}_best.pt'
@@ -64,7 +65,7 @@ def main():
     except Exception:
         raise SystemExit(f'Failed to load checkpoint: {load_pt}') from None
 
-    for _ in ('epoch', 'best_val_psnr', 'best_val_ssim', 'val_l1', 'val_psnr', 'val_ssim', 'scale_factor'):
+    for _ in ('epoch', 'val_l1', 'val_psnr', 'val_ssim', 'scale_factor'):
         print(_, checkpoint.get(_))
 
     vae.eval()

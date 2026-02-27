@@ -24,7 +24,7 @@ except ImportError:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
-    parser.add_argument('--sw_batch_size', default=12)
+    parser.add_argument('--sw_batch_size', default=36)
     args = parser.parse_args()
 
     cfg = tomlkit.loads(Path(args.config).read_text('utf-8')).unwrap()
@@ -62,8 +62,8 @@ def main():
     vae_metal, sf_metal, mean_metal = load_vae('metal')
     vae_pre, sf_pre, mean_pre = load_vae('pre')
 
-    transforms_metal = Compose(define.vae_val_transforms('metal'))
-    transforms_pre = Compose(define.vae_val_transforms('pre'))
+    transforms_metal = Compose(define.vae_val_transforms('metal', patch_size))
+    transforms_pre = Compose(define.vae_val_transforms('pre', patch_size))
 
     def encode_predictor(model):
         def _predictor(inputs: torch.Tensor) -> torch.Tensor:

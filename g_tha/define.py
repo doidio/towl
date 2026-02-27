@@ -7,7 +7,7 @@ from monai.losses import PerceptualLoss
 from monai.networks.nets import AutoencoderKL, PatchDiscriminator, DiffusionModelUNet
 from monai.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.transforms import (
-    LoadImaged, MapTransform, RandCropByPosNegLabeld, ThresholdIntensityd, CopyItemsd, DeleteItemsd, SpatialPadd,
+    LoadImaged, MapTransform, RandCropByPosNegLabeld, CopyItemsd, DeleteItemsd, SpatialPadd,
     Lambdad,
 )
 
@@ -119,8 +119,10 @@ def perceptual_loss():
 def _label_pre_func(x):
     return (x > bone_min).float()
 
+
 def _label_metal_func(x):
     return (x > -0.95).float()
+
 
 def vae_train_transforms(subtask, patch_size):
     if subtask in ('pre',):
@@ -198,9 +200,45 @@ class LoadLatentConditiond(MapTransform):
         return d
 
 
-def ldm_transforms():
+class ScaleLatentd(MapTransform):
+    """根据 VAE 统计值对 Latent 进行归一化"""
+
+    def __init__(self, keys, image_mean, image_sf, cond_mean, cond_sf, allow_missing_keys=False):
+        super().__init__(keys, allow_missing_keys)
+        self.image_mean = image_mean
+        self.image_sf = image_sf
+        self.cond_mean = cond_mean
+        self.cond_sf = cond_sf
+
+    def __call__(self, data):
+        d = dict(data)
+        for key in self.key_iterator(d):
+            if key == 'image':
+                d[key] = (d[key] - self.image_mean) * self.image_sf
+            elif key == 'condition':
+                d[key] = (d[key] - self.cond_mean) * self.cond_sf
+        return d
+
+
+def ldm_collate_fn(batch):
+    """
+    Latent 尺寸不一致，ListBatch 策略比 Padding 到固定较大尺寸更好
+    list 虽然不是 GPU 并行，但节省了不必要的 Padding 背景计算，同时保留了随机尺寸的泛化能力
+    """
+    return {
+        'image': [item['image'] for item in batch],
+        'condition': [item['condition'] for item in batch],
+    }
+
+
+def ldm_transforms(image_mean, image_sf, cond_mean, cond_sf):
     return [
         LoadLatentConditiond(keys=['image']),
+        ScaleLatentd(
+            keys=['image', 'condition'],
+            image_mean=image_mean, image_sf=image_sf,
+            cond_mean=cond_mean, cond_sf=cond_sf,
+        ),
     ]
 
 
