@@ -403,28 +403,25 @@ def main():
     
     # 确保 SDF 和原始 CT 尺寸一致
     # 原始 ITK numpy 数组形状是 [Z, Y, X]
-    # SDF 来自 MONAI 生成，形状是 [X, Y, Z] (因为 LoadImaged ensure_channel_first=True 且我们移除了 Channel)
-    d, h, w = original_ct.shape  # Z, Y, X
+    # SDF 来自 MONAI 生成且经过 CenterSpatialCrop 恢复了原尺寸，形状是 [X, Y, Z]
+    shape = original_ct.shape  # Z, Y, X
     
     # 1. 将 SDF 从 [X, Y, Z] 转置回 [Z, Y, X]
-    sdf_transposed = sdf.cpu().numpy().transpose(2, 1, 0)
-    
-    # 2. 截取掉 SpatialPadd 添加的 padding 部分，使其与原图大小一致
-    sdf_cropped = sdf_transposed[:d, :h, :w]
+    sdf_aligned = sdf.cpu().numpy().transpose(2, 1, 0)
     
     fused_ct = original_ct.copy()
     
     # 规则 1: 假体内部区域 (SDF >= 0)
     # 不限制上限为 1.0，因为 VAE 解码可能会有轻微的数值溢出
-    mask_inside = sdf_cropped >= 0.0
+    mask_inside = sdf_aligned >= 0.0
     # 限制用于插值的 sdf 值域，防止过曝
-    sdf_clamped_inside = np.clip(sdf_cropped[mask_inside], 0.0, 1.0)
+    sdf_clamped_inside = np.clip(sdf_aligned[mask_inside], 0.0, 1.0)
     fused_ct[mask_inside] = 2700.0 + sdf_clamped_inside * (3071.0 - 2700.0)
     
     # 规则 2: 假体边界过渡区域 (SDF >= -1.0 且 < 0)
     # 在术前 CT 值和 2700 之间均匀过渡插值
-    mask_transition = (sdf_cropped >= -1.0) & (sdf_cropped < 0.0)
-    w_transition = sdf_cropped[mask_transition] + 1.0
+    mask_transition = (sdf_aligned >= -1.0) & (sdf_aligned < 0.0)
+    w_transition = sdf_aligned[mask_transition] + 1.0
     fused_ct[mask_transition] = original_ct[mask_transition] * (1.0 - w_transition) + 2700.0 * w_transition
     
     # 保存合成后的 CT
