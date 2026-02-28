@@ -411,18 +411,22 @@ def main():
     
     fused_ct = original_ct.copy()
     
-    # 规则 1: 假体内部区域 (SDF >= 0)
-    # 不限制上限为 1.0，因为 VAE 解码可能会有轻微的数值溢出
-    mask_inside = sdf_aligned >= 0.0
-    # 限制用于插值的 sdf 值域，防止过曝
-    sdf_clamped_inside = np.clip(sdf_aligned[mask_inside], 0.0, 1.0)
-    fused_ct[mask_inside] = 2700.0 + sdf_clamped_inside * (3071.0 - 2700.0)
+    # 规则 1: 假体完全内部区域 (SDF >= 0.2)
+    # 将 SDF > 0.2 的区域直接映射为最高密度 3071
+    mask_core = sdf_aligned >= 0.2
+    fused_ct[mask_core] = 3071.0
+
+    # 规则 2: 假体浅表内部过渡区域 (SDF >= 0 且 < 0.2)
+    # 0 映射到 2700, 0.2 映射到 3071
+    mask_inner_edge = (sdf_aligned >= 0.0) & (sdf_aligned < 0.2)
+    fused_ct[mask_inner_edge] = 2700.0 + (sdf_aligned[mask_inner_edge] / 0.2) * (3071.0 - 2700.0)
     
-    # 规则 2: 假体边界过渡区域 (SDF >= -1.0 且 < 0)
-    # 在术前 CT 值和 2700 之间均匀过渡插值
-    mask_transition = (sdf_aligned >= -1.0) & (sdf_aligned < 0.0)
-    w_transition = sdf_aligned[mask_transition] + 1.0
-    fused_ct[mask_transition] = original_ct[mask_transition] * (1.0 - w_transition) + 2700.0 * w_transition
+    # 规则 3: 假体外部边缘过渡区域 (SDF >= -0.2 且 < 0)
+    # 在术前 CT 值和 2700 之间均匀过渡插值，范围缩窄至 -0.2 让边缘更锐利
+    mask_outer_edge = (sdf_aligned >= -0.2) & (sdf_aligned < 0.0)
+    # 将 sdf 从 [-0.2, 0] 映射为权重 w: [0, 1]
+    w_transition = (sdf_aligned[mask_outer_edge] + 0.2) / 0.2
+    fused_ct[mask_outer_edge] = original_ct[mask_outer_edge] * (1.0 - w_transition) + 2700.0 * w_transition
     
     # 保存合成后的 CT
     fused_itk = itk.image_from_array(fused_ct)
