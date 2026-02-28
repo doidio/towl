@@ -182,3 +182,4 @@ g_tha/train_v1/
 *.nii.gz
 g_tha/dataset/
 g_tha/train/
+g_tha/save/
