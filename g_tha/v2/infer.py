@@ -33,7 +33,7 @@ def main():
     parser.add_argument('--tiled', action=b, default=True, help='是否使用分块推理 (True: 节省显存, False: 全图推理)')
 
     # 生成控制参数
-    parser.add_argument('--seed', type=int, default=42, help='随机种子，固定种子可复现结果')
+    parser.add_argument('--seed', type=int, default=None, help='随机种子，固定种子可复现结果 (默认: None/随机)')
     parser.add_argument('--cfg', type=int, default=1, help='Classifier-Free Guidance 权重 (0: 无条件, >1: 条件增强)')
     parser.add_argument('--ts', type=int, default=50, help='DDIM 采样步数 (通常 50-200)')
 
@@ -273,7 +273,11 @@ def main():
     print(f'Cond encoded:\t {cond.shape}')
 
     # 初始化随机噪声
-    generator = torch.Generator(device=device).manual_seed(args.seed)
+    if args.seed is not None:
+        generator = torch.Generator(device=device).manual_seed(args.seed)
+    else:
+        generator = None
+
     generated = torch.randn(cond.shape, device=device, generator=generator)
 
     # 逐步去噪循环
@@ -368,7 +372,7 @@ def main():
     postfix = f'seed_{args.seed}_cfg_{args.cfg}_ts_{args.ts}' + ('_tiled' if args.tiled else '_no-tiled')
     save = Path(args.save)
 
-    stl_name = cond_path.name.replace('.nii.gz', '.stl')
+    stl_name = cond_path.name.replace('.nii.gz', f'_{postfix}_metal.stl')
     stl_path = save / stl_name
     print(f'Isosurface saving:\t', stl_path.resolve())
 
