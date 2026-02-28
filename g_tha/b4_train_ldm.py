@@ -1,7 +1,3 @@
-# 与传统的、依赖于“先验掩码”来强迫空间注意力的 3D Inpainting 不同（而这种掩码在现实临床部署中是无法预知的），显式窄带 TSDF 表达方式本身就是一
-# 种固有的注意力机制。通过在远场（值被截断为 -1 或 1 的区域）将梯度归零，我们自然地将神经网络的容量坍缩到最关键的骨-假体界面上。这消除了对“先知
-# 掩码”的需求，确保模型的预测能力完全专注于亚像素级别的几何匹配，从而使其成为端到端手术规划中稳健且可直接部署的方案。
-
 import argparse
 from contextlib import nullcontext
 from datetime import datetime
@@ -35,7 +31,6 @@ def main():
     config = tomlkit.loads(config_path.read_text('utf-8')).unwrap()
 
     train_root = Path(str(config['train']['root']))
-    # cache_dir = train_root / 'cache'
     log_dir = train_root / 'logs'
     ckpt_dir = train_root / 'checkpoints'
 
@@ -48,9 +43,13 @@ def main():
         'batch_size', 'sw_batch_size', 'lr', 'gradient_accumulation_steps', 'ema_decay', 'cfg',
     )]
 
+    # 既然每个 batch 处理多张图，梯度累积相应减少
+    gradient_accumulation_steps = max(1, gradient_accumulation_steps // batch_size)
+    print('List Batch Size:\t', batch_size)
+    print('Grad Accu Steps:\t', gradient_accumulation_steps)
+
     patch_size = list(config['train']['vae']['patch_size'])
 
-    # 压缩编码后的 latent
     train_files = [{'image': p.as_posix()} for p in sorted((train_root / 'latents' / 'train').glob('*.npy'))]
     val_files = [{'image': p.as_posix()} for p in sorted((train_root / 'latents' / 'val').glob('*.npy'))]
     print('Train:\t', len(train_files))
@@ -63,7 +62,9 @@ def main():
 
     def load_vae(subtask):
         ckpt_path = (ckpt_dir / f'vae_{subtask}_best.pt').resolve()
-        print('Loading:\t', ckpt_path)
+
+        print(f'[{subtask}]\t', f'Loading {ckpt_path}')
+
         loaded = torch.load(ckpt_path, map_location=device, weights_only=True)
         vae_model = define.vae_kl().to(device)
         vae_model.load_state_dict(loaded['state_dict'])
@@ -81,7 +82,6 @@ def main():
     vae_image, image_sf, image_mean = load_vae('metal')
     vae_cond, cond_sf, cond_mean = load_vae('pre')
 
-    # Scale Latent with Scale Factor dynamically
     transforms = Compose(define.ldm_transforms(
         image_mean=image_mean, image_sf=image_sf,
         cond_mean=cond_mean, cond_sf=cond_sf,
@@ -90,10 +90,13 @@ def main():
     train_ds = Dataset(data=train_files, transform=transforms)
     val_ds = Dataset(data=val_files, transform=transforms)
 
+    # 训练 Loader 使用 custom_collate
     train_loader = DataLoader(
-        train_ds, batch_size=1, shuffle=True,
+        train_ds, batch_size=batch_size, shuffle=True,
         num_workers=num_workers, pin_memory=True, persistent_workers=True,
+        collate_fn=define.ldm_collate_fn,
     )
+    # 验证 Loader 保持 BS=1 即可
     val_loader = DataLoader(val_ds, batch_size=1, num_workers=num_workers)
 
     ldm = define.ldm_unet().to(device)
@@ -106,7 +109,6 @@ def main():
     scaler = GradScaler() if use_amp else None
 
     start_epoch = 0
-    best_val_loss = float('inf')
     ldm_ckpt_path = (ckpt_dir / f'{task}_last.pt').resolve()
 
     if resume and ldm_ckpt_path.exists():
@@ -124,15 +126,13 @@ def main():
             if use_amp and 'scaler' in ckpt:
                 scaler.load_state_dict(ckpt['scaler'])
 
-            start_epoch = ckpt['epoch']
-            best_val_loss = ckpt.get('best_val_loss', float('inf'))
+            start_epoch = ckpt['epoch'] + 1
             val_loss = ckpt.get('val_loss', float('inf'))
 
             print('Epoch:\t', start_epoch)
-            print('MSE:\t', val_loss, 'best', best_val_loss)
-            start_epoch += 1
+            print('MSE:\t', val_loss)
         except Exception as e:
-            raise SystemError(f'Load failed: {e}')
+            print(f'Load failed: {e}')
 
     suffix = datetime.now().strftime(f'{task}_%Y%m%d_%H%M%S')
     if resume:
@@ -149,19 +149,13 @@ def main():
         resample=False,
     )
 
-    def decode_gpu(z, name, vae_model, sf, mean):
-        # 使用分块 GPU 推理，避免大图解码 OOM
+    def decode_gpu(z, name, vae_model, sf, mean, ep):
         z = (z / sf + mean).detach().to(device).float()
-
         with torch.no_grad():
             recon = define.vae_decode_tiled(
-                z=z,
-                vae=vae_model,
-                patch_size=patch_size,
-                sw_batch_size=sw_batch_size,
+                z=z, vae=vae_model, patch_size=patch_size, sw_batch_size=sw_batch_size,
             )
-
-        name = f'val_epoch_{epoch:03d}_{name}.nii.gz'
+        name = f'val_epoch_{ep:03d}_{name}.nii.gz'
         saver(recon[0].cpu(), meta_data={'filename_or_obj': name})
         return recon.cpu()
 
@@ -176,35 +170,51 @@ def main():
 
         for batch in pbar:
             step += 1
-            image = batch['image'].to(device)
-            cond = batch['condition'].to(device)
 
-            # CFG Condition Dropout
-            drop_mask = (torch.rand(cond.shape[0], 1, 1, 1, 1, device=device) < 0.15).float()
-            cond = cond * (1.0 - drop_mask)
+            # batch 现在是一个 dict，里面的 'image' 和 'condition' 是 List[Tensor]
+            image_list = batch['image']
+            cond_list = batch['condition']
+
+            current_bs = len(image_list)
+
+            # 累加这个 list 里所有的 loss
+            total_loss_for_this_batch = torch.tensor(0.0, device=device)
 
             with amp_ctx:
-                # 采样时间步 t
-                timesteps = torch.randint(0, num_train_timesteps, (image.shape[0],), device=device).long()
+                for b_idx in range(current_bs):
+                    # 取出当前单张样本，增加 Batch 维度使其变成 [1, C, D, H, W]
+                    image = image_list[b_idx].unsqueeze(0).to(device, non_blocking=True)
+                    cond = cond_list[b_idx].unsqueeze(0).to(device, non_blocking=True)
 
-                # 生成噪声
-                noise = torch.randn_like(image)
+                    # CFG Condition Dropout
+                    drop_mask = (torch.rand(1, 1, 1, 1, 1, device=device) < 0.15).float()
+                    cond = cond * (1.0 - drop_mask)
 
-                # 加噪过程 (Forward)
-                noisy_image = scheduler.add_noise(original_samples=image, noise=noise, timesteps=timesteps)
+                    # 采样时间步 t
+                    timesteps = torch.randint(0, num_train_timesteps, (1,), device=device).long()
 
-                # 拼接输入
-                input_tensor = torch.cat([noisy_image, cond], dim=1)
+                    # 生成噪声
+                    noise = torch.randn_like(image)
 
-                # 预测噪声
-                noise_pred = ldm(x=input_tensor, timesteps=timesteps)
+                    # 加噪过程
+                    noisy_image = scheduler.add_noise(original_samples=image, noise=noise, timesteps=timesteps)
 
-                # 计算损失
-                loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
-                loss = loss / gradient_accumulation_steps
+                    # 拼接输入
+                    input_tensor = torch.cat([noisy_image, cond], dim=1)
 
+                    # 预测噪声
+                    noise_pred = ldm(x=input_tensor, timesteps=timesteps)
+
+                    # 计算这一个样本的损失
+                    loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
+
+                    # 累加，除以 current_bs 相当于在 List 内部求了平均
+                    # 除以 gradient_accumulation_steps 是为了跨 step 累积
+                    total_loss_for_this_batch += (loss / current_bs / gradient_accumulation_steps)
+
+            # 反向传播 (把这个 List 里所有图的计算图一起 backward)
             if use_amp:
-                scaler.scale(loss).backward()
+                scaler.scale(total_loss_for_this_batch).backward()
 
                 if step % gradient_accumulation_steps == 0 or step == len(train_loader):
                     scaler.unscale_(optimizer)
@@ -215,7 +225,7 @@ def main():
                     optimizer.zero_grad(set_to_none=True)
                     ema.update(ldm)
             else:
-                loss.backward()
+                total_loss_for_this_batch.backward()
 
                 if step % gradient_accumulation_steps == 0 or step == len(train_loader):
                     torch.nn.utils.clip_grad_norm_(ldm.parameters(), 1.0)
@@ -224,17 +234,19 @@ def main():
                     optimizer.zero_grad(set_to_none=True)
                     ema.update(ldm)
 
-            epoch_loss += loss.item()
+            # 这里记录的是当前这一步的平均 MSE 损失，用于显示
+            display_loss = (total_loss_for_this_batch.item() * gradient_accumulation_steps)
+            epoch_loss += display_loss
 
             if step % 1 == 0:
                 global_step = epoch * len(train_loader) + step
-                writer.add_scalar('train/loss', loss.item() * gradient_accumulation_steps, global_step)
+                writer.add_scalar('train/loss', display_loss, global_step)
 
-            pbar.set_postfix({'MSE': f'{loss.item() * gradient_accumulation_steps:.4f}'})
+            pbar.set_postfix({'MSE': f'{display_loss:.4f}'})
 
         writer.add_scalar('train/epoch_loss', epoch_loss / step, epoch)
 
-        # 验证与采样
+        # 验证与采样 (保持 BS=1，不需要改 collate_fn)
         if epoch % val_interval == 0:
             ldm.eval()
             ema.store(ldm)
@@ -248,19 +260,11 @@ def main():
                     image = batch['image'].to(device)
                     cond = batch['condition'].to(device)
 
-                    # 采样时间步 t
                     timesteps = torch.randint(0, num_train_timesteps, (image.shape[0],), device=device).long()
-
-                    # 生成噪声
                     noise = torch.randn_like(image)
-
-                    # 加噪过程 (Forward)
                     noisy_image = scheduler.add_noise(image, noise, timesteps)
-
-                    # 拼接输入
                     input_tensor = torch.cat([noisy_image, cond], dim=1)
 
-                    # 预测噪声
                     with amp_ctx:
                         noise_pred = ldm(input_tensor, timesteps)
                         loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
@@ -268,25 +272,18 @@ def main():
                     val_loss += loss.item()
                     val_steps += 1
 
-                    # 可视化：仅第一个 Batch 的第一个样本
                     if i == 0:
                         val_scheduler = define.scheduler_ddim()
                         val_scheduler.set_timesteps(num_inference_steps=50, device=device)
 
-                        generator = torch.Generator(device=device).manual_seed(42)  # 固定随机种子
+                        generator = torch.Generator(device=device).manual_seed(42)
                         generated = torch.randn(image.shape, device=device, generator=generator)
-                        # generated = torch.randn_like(image)
 
                         for t in val_scheduler.timesteps:
                             val_bar.set_postfix({'DDIM': t.item()})
-
-                            # 拼接条件 (Condition)
                             latent_input = torch.cat([generated] * 2)
-
-                            # 构造条件部分：前半部分是 cond，后半部分是 zeros
                             uncond = torch.zeros_like(cond)
                             cond_input = torch.cat([cond, uncond])
-
                             model_input = torch.cat([latent_input, cond_input], dim=1)
 
                             with torch.no_grad():
@@ -296,17 +293,14 @@ def main():
                             noise_cond, noise_uncond = noise_pred_batch.chunk(2)
                             noise_pred = noise_uncond + cfg * (noise_cond - noise_uncond)
 
-                            # 更新 Latent
                             with torch.no_grad():
                                 generated, _ = val_scheduler.step(noise_pred, t, generated)
 
-                        # 解码显示 (Latent -> Image)
                         with amp_ctx:
-                            vis_generated = decode_gpu(generated, 'Generated', vae_image, image_sf, image_mean)
-
+                            vis_generated = decode_gpu(generated, 'Generated', vae_image, image_sf, image_mean, epoch)
                             if epoch == 0:
-                                vis_gt = decode_gpu(image, 'GroundTruth', vae_image, image_sf, image_mean)
-                                vis_cond = decode_gpu(cond, 'Condition', vae_cond, cond_sf, cond_mean)
+                                vis_gt = decode_gpu(image, 'GroundTruth', vae_image, image_sf, image_mean, epoch)
+                                vis_cond = decode_gpu(cond, 'Condition', vae_cond, cond_sf, cond_mean, epoch)
 
                         def norm_vis(x):
                             x_min, x_max = x.min(), x.max()
@@ -314,42 +308,37 @@ def main():
 
                         idx = vis_generated.shape[3] // 2  # [B, C, D, H, W]
 
-                        vis_generated = vis_generated[0, 0, :, idx]
+                        vis_generated = vis_generated[0, 0, :, idx, :]
                         writer.add_image('val/Generated', norm_vis(vis_generated), epoch, dataformats='HW')
 
                         if epoch == 0:
-                            vis_cond = vis_cond[0, 0, :, idx]
-                            vis_gt = vis_gt[0, 0, :, idx]
+                            vis_cond = vis_cond[0, 0, :, idx, :]
+                            vis_gt = vis_gt[0, 0, :, idx, :]
                             writer.add_image('val/Condition', norm_vis(vis_cond), epoch, dataformats='HW')
                             writer.add_image('val/GroundTruth', norm_vis(vis_gt), epoch, dataformats='HW')
 
             ema.restore(ldm)
             avg_val_loss = val_loss / val_steps
             writer.add_scalar('val/loss', avg_val_loss, epoch)
-            print(f'Val Loss: {avg_val_loss:.5f}')
+            print('Val Loss:\t', avg_val_loss)
 
-            # 保存模型
             ckpt = {
                 'epoch': epoch,
                 'state_dict': ldm.state_dict(),
                 'ema_state': ema.state_dict(),
                 'optimizer': optimizer.state_dict(),
                 'val_loss': avg_val_loss,
-                'best_val_loss': best_val_loss,
             }
             if use_amp:
                 ckpt['scaler'] = scaler.state_dict()
 
             ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-            if avg_val_loss < best_val_loss:
-                best_val_loss = avg_val_loss
-                ckpt['best_val_loss'] = best_val_loss
-                torch.save(ckpt, ckpt_dir / f'{task}_best.pt')
-                print('New best model saved!')
+            if epoch % 50 == 0:
+                torch.save(ckpt, ckpt_dir / f'{task}_{epoch:03d}.pt')
+                print(f'Model saved at epoch {epoch}!')
 
             torch.save(ckpt, ckpt_dir / f'{task}_last.pt')
-            # torch.save(ckpt, ckpt_dir / f'{task}_epoch_{epoch}.pt')
 
         torch.cuda.empty_cache()
 
