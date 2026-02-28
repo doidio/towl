@@ -102,6 +102,7 @@ def main():
         # 获取 latent space 的缩放因子 (用于保持 latent 分布的标准差接近 1)
         scale_factor, global_mean = _['scale_factor'], _['global_mean']
         print(f'\tEpoch:\t', _['epoch'])
+        print(f'\tParams:\t {sum(p.numel() for p in vae.parameters()) / 1e9:.2f} B')
         print(f'\tL1:  \t', _['val_l1'])
         print(f'\tPSNR:\t', _['val_psnr'])
         print(f'\tSSIM:\t', _['val_ssim'])
@@ -138,6 +139,7 @@ def main():
 
     _ = torch.load(ldm_path, map_location=device)
     print(f'\tEpoch:\t', _['epoch'])
+    print(f'\tParams:\t {sum(p.numel() for p in ldm.parameters()) / 1e9:.2f} B')
 
     if 'ema_state' in _:
         print('\tState:\t EMA')
