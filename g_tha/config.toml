@@ -43,7 +43,7 @@ kl_weight = 0.03  # KL正则化权重，与L1重建权重博弈，使模型既�
 
 [train.ldm]
 use_amp = true  # 混合精度
-resume = false
+resume = true
 num_workers = 8
 num_epochs = 1000
 val_interval = 1
@@ -53,4 +53,4 @@ sw_batch_size = 12  # 滑动窗口并发数
 lr = 1e-4
 gradient_accumulation_steps = 16  # 梯度累积
 ema_decay = 0.999  # 指数移动平均衰减率
-cfg = 3.0  # 引导权重
+cfg = 3.0  # 验证可视化时的无分类引导权重

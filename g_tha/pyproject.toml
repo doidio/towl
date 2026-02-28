@@ -42,4 +42,4 @@ torchvision = [{ index = "pytorch-cu126", marker = "sys_platform == 'linux' or s
 torchaudio = [{ index = "pytorch-cu126", marker = "sys_platform == 'linux' or sys_platform == 'win32'" }]
 
 [tool.setuptools.packages.find]
-include = ["v1*"]
+include = ["v1*", "v2*"]

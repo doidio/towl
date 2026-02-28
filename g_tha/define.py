@@ -12,6 +12,7 @@ from monai.transforms import (
 )
 
 bone_min = 150.0
+ct_min = -1024.0
 
 
 class CTBoneNormalized(MapTransform):
@@ -49,11 +50,8 @@ class CTBoneNormalized(MapTransform):
                 is_numpy = False
                 img_t = img
 
-            device = img_t.device
-            dtype = img_t.dtype
-
-            xp = torch.tensor(self.src_pts, device=device, dtype=dtype)
-            fp = torch.tensor(self.dst_pts, device=device, dtype=dtype)
+            xp = torch.tensor(self.src_pts, device=img_t.device, dtype=img_t.dtype)
+            fp = torch.tensor(self.dst_pts, device=img_t.device, dtype=img_t.dtype)
 
             x_clamped = torch.clamp(img_t, min=xp[0], max=xp[-1])
 
@@ -73,7 +71,7 @@ class CTBoneNormalized(MapTransform):
             if is_numpy:
                 d[key] = res.cpu().numpy().astype(np.float32)
             else:
-                d[key] = res.to(dtype=dtype)  # 保持原有精度
+                d[key] = res.to(dtype=img_t.dtype)  # 保持原有精度
 
         return d
 
@@ -128,7 +126,7 @@ def vae_train_transforms(subtask, patch_size):
     if subtask in ('pre',):
         return [
             LoadImaged(keys=['image'], ensure_channel_first=True),
-            SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=-1024),
+            SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=ct_min),
             CopyItemsd(keys=['image'], times=1, names=['label']),
             Lambdad(keys=['label'], func=_label_pre_func),
             RandCropByPosNegLabeld(
@@ -165,7 +163,7 @@ def vae_val_transforms(subtask, patch_size):
     if subtask in ('pre',):
         return [
             LoadImaged(keys=['image'], ensure_channel_first=True),
-            SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=-1024),
+            SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=ct_min),
             CTBoneNormalized(keys=['image']),
         ]
     elif subtask in ('metal',):

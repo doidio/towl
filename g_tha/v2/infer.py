@@ -8,7 +8,9 @@ from tqdm import tqdm
 # 全局配置
 spacing = 1.0
 patch_size = (128,) * 3  # VAE 推理时的滑动窗口大小
-bone_min = 150.0  # 骨窗范围，用于归一化
+bone_min = 150.0  # 骨阈值
+metal_min = 2700.0  # 假体金属阈值
+ct_min, ct_max = -1024.0, 3071.0  # CT最值
 vae_downsample = 4  # VAE 的下采样倍率 (例如: 128 -> 32)
 
 
@@ -40,7 +42,7 @@ def main():
     # 参数后处理
     sw_batch_size = max(args.sw, 1)
     timesteps = min(max(args.ts, 1), 1000)
-    cfg = max(args.cfg, 0.0)
+    cfg = float(max(args.cfg, 0.0))
 
     # 延迟导入以加快命令行响应速度
     import torch
@@ -49,7 +51,7 @@ def main():
     from torch import autocast
     from monai.networks.nets import AutoencoderKL, DiffusionModelUNet
     from monai.networks.schedulers import DDIMScheduler
-    from monai.transforms import Compose, MapTransform, LoadImaged, SaveImage, SpatialPadd, CenterSpatialCrop
+    from monai.transforms import Compose, MapTransform, LoadImaged, SpatialPadd, CenterSpatialCrop
     from monai.inferers import sliding_window_inference
 
     # 设备选择 (优先使用 CUDA)
@@ -99,11 +101,11 @@ def main():
 
         # 获取 latent space 的缩放因子 (用于保持 latent 分布的标准差接近 1)
         scale_factor, global_mean = _['scale_factor'], _['global_mean']
-        print(f'Epoch:\t', _['epoch'])
-        print(f'L1:  \t', _['val_l1'])
-        print(f'PSNR:\t', _['val_psnr'])
-        print(f'SSIM:\t', _['val_ssim'])
-        print(f'Scale:\t', _['scale_factor'])
+        print(f'\tEpoch:\t', _['epoch'])
+        print(f'\tL1:  \t', _['val_l1'])
+        print(f'\tPSNR:\t', _['val_psnr'])
+        print(f'\tSSIM:\t', _['val_ssim'])
+        print(f'\tScale:\t', _['scale_factor'])
 
         vae_dual += [vae, scale_factor, global_mean]
 
@@ -122,7 +124,6 @@ def main():
     else:
         print(f'Loading: {ldm_path.resolve()}')
 
-    # 初始化 LDM 网络结构
     ldm = DiffusionModelUNet(
         spatial_dims=3,
         in_channels=8,
@@ -135,18 +136,29 @@ def main():
         use_flash_attention=True,
     ).to(device)
 
-    # 加载权重 (推理时强烈建议使用 EMA 权重)
     _ = torch.load(ldm_path, map_location=device)
-    print(f'LDM Epoch:\t', _['epoch'])
+    print(f'\tEpoch:\t', _['epoch'])
 
     if 'ema_state' in _:
-        print('LDM Loading:\t EMA State')
+        print('\tState:\t EMA')
         ldm.load_state_dict(_['ema_state'])
     else:
-        print('LDM Loading:\t Raw State (No EMA found)')
+        print('\tState:\t Raw (No EMA found)')
         ldm.load_state_dict(_['state_dict'])
-        
+
     ldm.eval().float()
+
+    print('\tCFG:\t', cfg, 'Uncond-only' if cfg == 0 else 'Cond-only' if cfg == 1 else 'Guided')
+    print('\tDDIM:\t', timesteps)
+
+    # 初始化 LDM 采样器
+    scheduler = DDIMScheduler(
+        num_train_timesteps=1000,
+        schedule='scaled_linear_beta',
+        prediction_type='epsilon',
+        clip_sample=False,
+    )
+    scheduler.set_timesteps(num_inference_steps=timesteps, device=device)
 
     # 数据预处理类定义
     class CTBoneNormalized(MapTransform):
@@ -210,12 +222,6 @@ def main():
             return d
 
     # 准备条件图像 (Condition)
-    cond_transforms = Compose([
-        LoadImaged(keys=['image'], ensure_channel_first=True),
-        SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=-1024),
-        CTBoneNormalized(keys=['image']),
-    ])
-
     cond_path = Path(args.cond)
 
     if not cond_path.exists():
@@ -224,6 +230,11 @@ def main():
         print(f'Cond loading:\t {cond_path.resolve()}')
 
     # 加载并归一化条件图像 [B, C, H, W, D]
+    cond_transforms = Compose([
+        LoadImaged(keys=['image'], ensure_channel_first=True),
+        SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=ct_min),
+        CTBoneNormalized(keys=['image']),
+    ])
     cond_raw = cond_transforms({'image': cond_path.as_posix()})['image']
     cond = cond_raw.unsqueeze(0).to(device)
 
@@ -259,17 +270,6 @@ def main():
     cond = (cond - vae_cond_mean) * vae_cond_scale
     print(f'Cond encoded:\t {cond.shape}')
 
-    # 7. LDM 采样 (Sampling)
-    # --------------------------------------------------------------------------
-    # 配置 DDIM 调度器
-    scheduler = DDIMScheduler(
-        num_train_timesteps=1000,
-        schedule='scaled_linear_beta',
-        prediction_type='epsilon',
-        clip_sample=False,
-    )
-    scheduler.set_timesteps(num_inference_steps=timesteps, device=device)
-
     # 初始化随机噪声
     generator = torch.Generator(device=device).manual_seed(args.seed)
     generated = torch.randn(cond.shape, device=device, generator=generator)
@@ -279,9 +279,7 @@ def main():
         bar.set_postfix({'DDIM': t.item()})
 
         # 预测噪声
-        noise_pred = None
         if cfg > 1.0:
-            # 复制一份输入 latent 用于并行计算 (有条件 + 无条件)
             latent_input = torch.cat([generated] * 2)
 
             # 构造条件部分: [Cond, Uncond] (Uncond 用全 0 表示)
@@ -301,20 +299,20 @@ def main():
             noise_cond, noise_uncond = noise_pred_batch.chunk(2)
             noise_pred = noise_uncond + cfg * (noise_cond - noise_uncond)
         elif cfg == 1.0:
-            # 单纯条件生成 (cfg=1)，跳过无条件分支计算，推理速度翻倍
             model_input = torch.cat([generated, cond], dim=1)
             with torch.no_grad():
                 t_input = t[None].to(device)
                 with autocast(device.type) if args.amp else nullcontext():
                     noise_pred = ldm(model_input, t_input)
+            noise_pred = noise_pred
         else:
-            # 单纯无条件生成 (cfg=0 或其他边缘情况)
             uncond = torch.zeros_like(cond)
             model_input = torch.cat([generated, uncond], dim=1)
             with torch.no_grad():
                 t_input = t[None].to(device)
                 with autocast(device.type) if args.amp else nullcontext():
                     noise_pred = ldm(model_input, t_input)
+            noise_pred = noise_pred
 
         # DDIM 更新步
         with torch.no_grad():
@@ -325,7 +323,7 @@ def main():
 
     print(f'Generated decoding:\t {generated.shape}')
 
-    # VAE 解码 (Decoding) 必须使用 metal 的 VAE
+    # VAE 解码 (Decoding)
     if args.tiled:
         # 分块解码
         def decode_predictor(latent_patch):
@@ -351,37 +349,26 @@ def main():
 
     print(f'Generated decoded:\t {generated.shape}')
 
-    # 保存结果
-    save = Path(args.save)
-    print(f'Generated saving:\t {save.resolve()}')
-    saver = SaveImage(
-        output_dir=save,
-        output_postfix=f'seed_{args.seed}_cfg_{args.cfg}_ts_{args.ts}' + ('_tiled' if args.tiled else '_no-tiled'),
-        output_ext='.nii.gz',
-        separate_folder=False,
-        print_log=False,
-    )
-
     generated = generated[0].detach().cpu().float()
 
     # 将 Pad 过的 SDF 裁剪回原始图像的尺寸
     import itk
     itk_img = itk.imread(cond_path.as_posix())
-    
-    # itk_img.GetLargestPossibleRegion().GetSize() 返回的是 itkSize3 (X, Y, Z)
-    size = [int(_) for _ in itk.size(itk_img)]
-    
-    # 使用 MONAI 的 CenterSpatialCrop 进行裁剪，因为 SpatialPadd 默认是居中 padding 的
-    cropper = CenterSpatialCrop(roi_size=size)
+    pre = itk.array_from_image(itk_img).astype(np.float32)  # [D, H, W]
+
+    # 使用 CenterSpatialCrop 进行裁剪，因为 SpatialPadd 默认是居中 padding 的
+    cropper = CenterSpatialCrop(roi_size=pre.shape[::-1])  # TODO 数据集转置过但真实数据没有
     generated = cropper(generated)
 
-    saver(generated, meta_data={'filename_or_obj': cond_path.name})
+    sdf = generated[0]  # [D, H, W]
+
+    # 提取假体等值面网格体
+    postfix = f'seed_{args.seed}_cfg_{args.cfg}_ts_{args.ts}' + ('_tiled' if args.tiled else '_no-tiled')
+    save = Path(args.save)
 
     stl_name = cond_path.name.replace('.nii.gz', '.stl')
     stl_path = save / stl_name
     print(f'Isosurface saving:\t', stl_path.resolve())
-
-    sdf = generated[0]  # [D, H, W]
 
     from diso import DiffDMC
     import trimesh
@@ -393,49 +380,40 @@ def main():
     mesh = trimesh.Trimesh(vertices, indices)
     mesh.export(stl_path.as_posix())
 
-    # 8. 将假体 SDF 合成回术前原始图像
-    print('Fusing SDF back to Pre-op CT...')
-    import itk
-    
-    # 读回原始 CT
-    itk_img = itk.imread(cond_path.as_posix())
-    original_ct = itk.array_from_image(itk_img).astype(np.float32)  # [D, H, W]
-    
-    # 确保 SDF 和原始 CT 尺寸一致
-    # 原始 ITK numpy 数组形状是 [Z, Y, X]
-    # SDF 来自 MONAI 生成且经过 CenterSpatialCrop 恢复了原尺寸，形状是 [X, Y, Z]
-    shape = original_ct.shape  # Z, Y, X
-    
-    # 1. 将 SDF 从 [X, Y, Z] 转置回 [Z, Y, X]
-    sdf_aligned = sdf.cpu().numpy().transpose(2, 1, 0)
-    
-    fused_ct = original_ct.copy()
-    
-    # 规则 1: 假体完全内部区域 (SDF >= 0.2)
-    # 将 SDF > 0.2 的区域直接映射为最高密度 3071
-    mask_core = sdf_aligned >= 0.2
-    fused_ct[mask_core] = 3071.0
+    # 保存假体SDF结果
+    save_metal = save / cond_path.name.replace('.nii.gz', f'_{postfix}_metal.nii.gz')
+    print('Metal SDF saving:\t', save_metal.resolve())
 
-    # 规则 2: 假体浅表内部过渡区域 (SDF >= 0 且 < 0.2)
-    # 0 映射到 2700, 0.2 映射到 3071
-    mask_inner_edge = (sdf_aligned >= 0.0) & (sdf_aligned < 0.2)
-    fused_ct[mask_inner_edge] = 2700.0 + (sdf_aligned[mask_inner_edge] / 0.2) * (3071.0 - 2700.0)
-    
-    # 规则 3: 假体外部边缘过渡区域 (SDF >= -0.2 且 < 0)
-    # 在术前 CT 值和 2700 之间均匀过渡插值，范围缩窄至 -0.2 让边缘更锐利
-    mask_outer_edge = (sdf_aligned >= -0.2) & (sdf_aligned < 0.0)
-    # 将 sdf 从 [-0.2, 0] 映射为权重 w: [0, 1]
-    w_transition = (sdf_aligned[mask_outer_edge] + 0.2) / 0.2
-    fused_ct[mask_outer_edge] = original_ct[mask_outer_edge] * (1.0 - w_transition) + 2700.0 * w_transition
-    
-    # 保存合成后的 CT
-    fused_itk = itk.image_from_array(fused_ct)
+    sdf = sdf.cpu().numpy().transpose(2, 1, 0)
+    fused_itk = itk.image_from_array(sdf)
     fused_itk.CopyInformation(itk_img)
-    
-    fused_name = cond_path.name.replace('.nii.gz', f'_fused_seed_{args.seed}_cfg_{args.cfg}.nii.gz')
+
+    itk.imwrite(fused_itk, save_metal.as_posix())
+
+    # 将假体 SDF 合成回术前原始图像
+    fused_name = cond_path.name.replace('.nii.gz', f'_{postfix}_fused.nii.gz')
     fused_path = save / fused_name
+    print('Fused saving:\t', fused_path.resolve())
+
+    # 将 SDF 从 [X, Y, Z] 转置回 [Z, Y, X]
+    fused = pre.copy()
+
+    # 假体表面柔化，归一化 0.1 约为 0.5mm
+    delta = 0.1
+    fused[sdf >= delta] = ct_max
+
+    _ = (sdf >= 0.0) & (sdf < delta)
+    fused[_] = metal_min + (sdf[_] / delta) * (ct_max - metal_min)
+
+    _ = (sdf >= -delta) & (sdf < 0.0)
+    t = (sdf[_] + delta) / delta
+    fused[_] = pre[_] * (1.0 - t) + metal_min * t
+
+    # 保存合成后的 CT
+    fused_itk = itk.image_from_array(fused)
+    fused_itk.CopyInformation(itk_img)
+
     itk.imwrite(fused_itk, fused_path.as_posix())
-    print(f'Fused CT saved to:\t {fused_path.resolve()}')
 
 
 if __name__ == '__main__':

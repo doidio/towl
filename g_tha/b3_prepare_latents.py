@@ -62,6 +62,7 @@ def main():
     vae_metal, sf_metal, mean_metal = load_vae('metal')
     vae_pre, sf_pre, mean_pre = load_vae('pre')
 
+    # TODO 生成latents以及LDM阶段改用原有大小DivisiblePadd(keys=['image'], k=16)
     transforms_metal = Compose(define.vae_val_transforms('metal', patch_size))
     transforms_pre = Compose(define.vae_val_transforms('pre', patch_size))
 
