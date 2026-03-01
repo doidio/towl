@@ -24,10 +24,10 @@ def main():
 
     # 模型路径参数 (默认使用脚本同级目录下的 .pt 文件)
     parser.add_argument('--vae-pre', type=str, default=None,
-                        help='VAE模型路径 (默认: train/checkpoints/vae_pre_best.pt)')
+                        help='VAE模型路径 (默认: vae_pre_best.pt)')
     parser.add_argument('--vae-metal', type=str, default=None,
-                        help='VAE模型路径 (默认: train/checkpoints/vae_metal_best.pt)')
-    parser.add_argument('--ldm', type=str, default=None, help='LDM模型路径 (默认: train/checkpoints/ldm_last.pt)')
+                        help='VAE模型路径 (默认: vae_metal_best.pt)')
+    parser.add_argument('--ldm', type=str, default=None, help='LDM模型路径 (默认: ldm_last.pt)')
 
     # 硬件与性能参数
     parser.add_argument('--amp', action=b, default=True, help='是否启用混合精度 (默认: True)')
@@ -67,7 +67,7 @@ def main():
         print('VAE', subtask)
 
         if getattr(args, f'vae_{subtask}') is None:
-            vae_path = Path(f'train/checkpoints/vae_{subtask}_best.pt')
+            vae_path = Path(f'vae_{subtask}_best.pt')
         else:
             vae_path = Path(getattr(args, f'vae_{subtask}'))
 
@@ -119,7 +119,7 @@ def main():
     print('LDM')
 
     if args.ldm is None:
-        ldm_path = Path(f'train/checkpoints/ldm_last.pt')
+        ldm_path = Path(f'ldm_last.pt')
     else:
         ldm_path = Path(args.ldm)
 

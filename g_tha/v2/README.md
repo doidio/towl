@@ -52,9 +52,9 @@ python v2/infer.py
 *   `--amp` / `--no-amp`: 是否启用自动混合精度 (AMP)，开启能显著加快推理速度并减少显存占用。(默认: `True`)
 
 ### 模型权重路径参数
-*   `--vae-pre` `<str>`: 术前图像 VAE 模型权重路径 (默认: `train/checkpoints/vae_pre_best.pt`)
-*   `--vae-metal` `<str>`: 假体金属 VAE 模型权重路径 (默认: `train/checkpoints/vae_metal_best.pt`)
-*   `--ldm` `<str>`: 核心扩散网络（UNet）权重路径 (默认: `train/checkpoints/ldm_last.pt`)
+*   `--vae-pre` `<str>`: 术前图像 VAE 模型权重路径 (默认: `vae_pre_best.pt`)
+*   `--vae-metal` `<str>`: 假体金属 VAE 模型权重路径 (默认: `vae_metal_best.pt`)
+*   `--ldm` `<str>`: 核心扩散网络（UNet）权重路径 (默认: `ldm_last.pt`)
 
 ---
 
