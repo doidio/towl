@@ -16,7 +16,7 @@ vae_downsample = 4  # VAE 的下采样倍率 (例如: 128 -> 32)
 
 def main():
     b = argparse.BooleanOptionalAction
-    parser = argparse.ArgumentParser(description='Latent Diffusion Model 推理脚本')
+    parser = argparse.ArgumentParser(description='Latent Diffusion Model CFG 对比推理脚本')
 
     # 必须参数
     parser.add_argument('--cond', type=str, required=True, help='术前条件图像路径 (.nii.gz)')
@@ -36,16 +36,17 @@ def main():
 
     # 生成控制参数
     parser.add_argument('--seed', type=int, default=None, help='随机种子，固定种子可复现结果 (默认: None/随机)')
-    parser.add_argument('--cfg', type=int, default=3, help='Classifier-Free Guidance 权重 (0: 无条件, >1: 条件增强)')
+    parser.add_argument('--cfgs', type=float, nargs='+', default=[-1.0, -0.5, 0.0, 0.5, 1.0, 1.5, 3.0, 5.0, 10.0],
+                        help='CFG 权重列表用于对比横向排列 (默认: 0.0 1.0 2.0 3.0 4.0 5.0 6.0 7.0)')
     parser.add_argument('--ts', type=int, default=50, help='DDIM 采样步数 (通常 50-200)')
-    parser.add_argument('--summary', action=b, default=False, help='是否生成推理过程摘要图并保存中间步骤 (默认: False)')
+    parser.add_argument('--save-all', action=b, default=False, help='是否保存所有CFG对应的 NIfTI 和 STL 文件 (默认: False)')
 
     args = parser.parse_args()
 
     # 参数后处理
     sw_batch_size = max(args.sw, 1)
     timesteps = min(max(args.ts, 1), 1000)
-    cfg = float(max(args.cfg, 0.0))
+    cfgs = [float(max(c, 0.0)) for c in args.cfgs]
 
     # 延迟导入以加快命令行响应速度
     import torch
@@ -59,7 +60,7 @@ def main():
 
     # 设备选择 (优先使用 CUDA)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Device:\t {device}')
+    print(f'Device:	 {device}')
 
     # 加载 VAE 模型 (AutoencoderKL)
     vae_dual = []
@@ -72,7 +73,7 @@ def main():
             vae_path = Path(getattr(args, f'vae_{subtask}'))
 
         if not vae_path.exists():
-            raise SystemError(f'Not found:\t {vae_path.resolve()}')
+            raise SystemError(f'Not found:	 {vae_path.resolve()}')
         else:
             print(f'Loading: {vae_path.resolve()}')
 
@@ -104,12 +105,9 @@ def main():
 
         # 获取 latent space 的缩放因子 (用于保持 latent 分布的标准差接近 1)
         scale_factor, global_mean = _['scale_factor'], _['global_mean']
-        print(f'\tEpoch:\t', _['epoch'])
-        print(f'\tParams:\t {sum(p.numel() for p in vae.parameters()) / 1e9:.2f} B')
-        print(f'\tL1:  \t', _['val_l1'])
-        print(f'\tPSNR:\t', _['val_psnr'])
-        print(f'\tSSIM:\t', _['val_ssim'])
-        print(f'\tScale:\t', _['scale_factor'])
+        print(f'	Epoch:	', _['epoch'])
+        print(f'	Params:	 {sum(p.numel() for p in vae.parameters()) / 1e9:.2f} B')
+        print(f'	Scale:	', scale_factor)
 
         vae_dual += [vae, scale_factor, global_mean]
 
@@ -124,7 +122,7 @@ def main():
         ldm_path = Path(args.ldm)
 
     if not ldm_path.exists():
-        raise SystemError(f'Not found:\t {ldm_path.resolve()}')
+        raise SystemError(f'Not found:	 {ldm_path.resolve()}')
     else:
         print(f'Loading: {ldm_path.resolve()}')
 
@@ -141,20 +139,20 @@ def main():
     ).to(device)
 
     _ = torch.load(ldm_path, map_location=device)
-    print(f'\tEpoch:\t', _['epoch'])
-    print(f'\tParams:\t {sum(p.numel() for p in ldm.parameters()) / 1e9:.2f} B')
+    print(f'	Epoch:	', _['epoch'])
+    print(f'	Params:	 {sum(p.numel() for p in ldm.parameters()) / 1e9:.2f} B')
 
     if 'ema_state' in _:
-        print('\tState:\t EMA')
+        print('	State:	 EMA')
         ldm.load_state_dict(_['ema_state'])
     else:
-        print('\tState:\t Raw (No EMA found)')
+        print('	State:	 Raw (No EMA found)')
         ldm.load_state_dict(_['state_dict'])
 
     ldm.eval().float()
 
-    print('\tCFG:\t', cfg, 'Uncond-only' if cfg == 0 else 'Cond-only' if cfg == 1 else 'Guided')
-    print('\tDDIM:\t', timesteps)
+    print('	CFGs List:	', cfgs)
+    print('	DDIM steps:	', timesteps)
 
     # 初始化 LDM 采样器
     scheduler = DDIMScheduler(
@@ -163,14 +161,13 @@ def main():
         prediction_type='epsilon',
         clip_sample=False,
     )
-    scheduler.set_timesteps(num_inference_steps=timesteps, device=device)
 
     # 准备条件图像路径
     cond_path = Path(args.cond)
     if not cond_path.exists():
-        raise SystemError(f'Condition not found:\t {cond_path.resolve()}')
+        raise SystemError(f'Condition not found:	 {cond_path.resolve()}')
     else:
-        print(f'Cond loading:\t {cond_path.resolve()}')
+        print(f'Cond loading:	 {cond_path.resolve()}')
 
     # 准备后处理工具
     import itk
@@ -180,21 +177,18 @@ def main():
     itk_img = itk.imread(cond_path.as_posix())
     original_ct = itk.array_from_image(itk_img).astype(np.float32)  # [D, H, W]
 
-    # TODO 目前代码跑验证集巧合正确，转置的问题要重新思考，latents也需要同步修改尺寸为16的整除数
-
     cropper = CenterSpatialCrop(roi_size=original_ct.shape[::-1])
     save_dir = Path(args.save) / '_'.join([
         cond_path.with_suffix('').with_suffix('').name,
         'seed', str(args.seed) if args.seed else 'random',
-        'cfg', str(args.cfg),
+        'cfgs_compare',
         'ts', str(args.ts),
         'tiled' if args.tiled else 'no-tiled',
-        'summary' if args.summary else 'no-summary',
     ])
     save_dir.mkdir(parents=True, exist_ok=True)
 
     # 获取冠状面中心切片索引
-    coronal_idx = original_ct.shape[1] // 2
+    coronal_idx = original_ct.shape[1] // 2 + 5
 
     def add_label(img_bgr, text):
         """添加白色无背景标签"""
@@ -213,7 +207,7 @@ def main():
         img = np.flipud(img)  # 保持正位
         return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-    def decode_and_save(latent_tensor, step_idx=None):
+    def decode_and_save(latent_tensor, cfg_val):
         """解码 Latent 并保存融合结果，返回用于摘要的 BGR 切片"""
         # 1. 反向缩放 Latent
         z = latent_tensor / vae_image_scale + vae_image_mean
@@ -257,52 +251,22 @@ def main():
         t_alpha = (sdf_viz[mask_outer] + delta) / delta
         fused[mask_outer] = original_ct[mask_outer] * (1.0 - t_alpha) + metal_min * t_alpha
 
-        # 5. 保存 NIfTI
-        if step_idx is not None:
-            step_dir = save_dir / 'summary'
-            step_dir.mkdir(parents=True, exist_ok=True)
-            out_path = step_dir / f'{step_idx:03d}.nii.gz'
-        else:
-            out_name = cond_path.name.replace('.nii.gz', f'_fused.nii.gz')
+        # 5. 保存 NIfTI (若开启 save-all)
+        if args.save_all:
+            out_name = cond_path.name.replace('.nii.gz', f'_cfg_{cfg_val}_fused.nii.gz')
             out_path = save_dir / out_name
 
-        itk_out = itk.image_from_array(fused)
-        itk_out.CopyInformation(itk_img)
-        itk.imwrite(itk_out, out_path.as_posix())
+            itk_out = itk.image_from_array(fused)
+            itk_out.CopyInformation(itk_img)
+            itk.imwrite(itk_out, out_path.as_posix())
 
         # 6. 提取 BGR 切片用于摘要
         fused_slice = fused[:, coronal_idx, :]
         bgr = hu_to_bgr(fused_slice)
-        label_text = f'Step {step_idx}' if step_idx is not None else 'Final'
-        return sdf_numpy, add_label(bgr, label_text)
-
-    # 准备摘要长图列表
-    summary_list = [add_label(hu_to_bgr(original_ct[:, coronal_idx, :]), '术前')]
-
-    # 计算递增采样点列表 (0, 10, 30, 60, 100, 150...)
-    sample_schedule = {0}
-    _curr, _step, _inc = 0, 10, 10
-    while _curr < timesteps:
-        sample_schedule.add(_curr)
-        _curr += _step
-        _step += _inc
+        return sdf_numpy, add_label(bgr, f'CFG {cfg_val}')
 
     # 数据预处理类定义
     class CTBoneNormalized(MapTransform):
-        """
-        基于线性分段函数的 CT 值映射变换 (Linear Piecewise Mapping)
-
-        1. 剔除无效背景: 将低于 bone_min (如 150 HU) 的软组织、脂肪和空气全部截断映射为 -1.0。
-           这清除了大部分无用的背景噪声，强制 VAE 将所有网络容量 (Capacity) 集中在骨骼特征上，
-           并为后续 LDM 留下大面积“零方差”区域，极大地降低了生成难度。
-        2. 放大松质骨纹理 ([-1.0, 0.0]): 将 [150, 650] 的狭窄区间拉伸到了网络输入空间的一半。
-           松质骨(骨小梁)是临床最关注且网络最难生成的精细纹理，这样分配算力能让特征学习得最锐利。
-        3. 压缩皮质骨阶跃 ([0.0, 1.0]): 致密皮质骨的 CT 值往往在 1150 甚至局部突破 2000。
-           如果将 1150 强行截断到 1.0，会导致严重的振铃效应 (Gibbs Artifacts)，MSE 惩罚极高。
-           将 1150~3000 非线性压缩到 [0.5, 1.0] 的窄区间内，既保留了硬骨相对密度的层次感，
-           又在数值上极大地“宽容”了高密度区域的 L1/MSE 重建误差，防止其在训练中反向吞噬松质骨的纹理细节。
-        """
-
         def __init__(self, keys, reverse=False, allow_missing_keys=False):
             super().__init__(keys, allow_missing_keys)
 
@@ -357,7 +321,7 @@ def main():
     cond_raw = cond_transforms({'image': cond_path.as_posix()})['image']
     cond = cond_raw.unsqueeze(0).to(device)
 
-    print(f'Cond encoding:\t {cond.shape}')
+    print(f'Cond encoding:	 {cond.shape}')
 
     # VAE 编码 (Encoding)
     if args.tiled:
@@ -385,9 +349,9 @@ def main():
             cond = vae_cond.encode(cond)[0]
         cond = cond.to(device)
 
-    # 缩放 latent 分布 (减去均值，乘以缩放因子)
+    # 缩放 latent 分布
     cond = (cond - vae_cond_mean) * vae_cond_scale
-    print(f'Cond encoded:\t {cond.shape}')
+    print(f'Cond encoded:	 {cond.shape}')
 
     # 初始化随机噪声
     if args.seed is not None:
@@ -395,91 +359,98 @@ def main():
     else:
         generator = None
 
-    generated = torch.randn(cond.shape, device=device, generator=generator)
+    # 初始化基准随机噪声，以保证不同 CFG 从相同的初始噪声起点进行去噪
+    base_noise = torch.randn(cond.shape, device=device, generator=generator)
 
-    # 逐步去噪循环
-    for i, t in enumerate(bar := tqdm(scheduler.timesteps, desc='LDM generating')):
-        bar.set_postfix({'DDIM': t.item()})
+    # 准备摘要长图列表
+    summary_list = [add_label(hu_to_bgr(original_ct[:, coronal_idx, :]), 'Preop')]
 
-        # 预测噪声
-        with torch.no_grad():
-            t_input = t[None].to(device)
+    # 针对不同 CFG 参数循环生成
+    for cfg in cfgs:
+        print(f'\n================ Generating for CFG: {cfg} ================')
+        
+        # 复制相同的初始噪声
+        generated = base_noise.clone()
+        scheduler.set_timesteps(num_inference_steps=timesteps, device=device)
 
-            if cfg > 1.0:
-                # 并行计算条件与无条件预测
-                latent_input = torch.cat([generated] * 2)
-                cond_input = torch.cat([cond, torch.zeros_like(cond)])
-                model_input = torch.cat([latent_input, cond_input], dim=1)
+        # 逐步去噪循环
+        for i, t in enumerate(bar := tqdm(scheduler.timesteps, desc=f'LDM (CFG={cfg})')):
+            bar.set_postfix({'DDIM': t.item()})
 
-                with autocast(device.type) if args.amp else nullcontext():
-                    noise_pred_batch = ldm(model_input, t_input.repeat(2))
-
-                # CFG 引导公式: noise = uncond + w * (cond - uncond)
-                noise_cond, noise_uncond = noise_pred_batch.chunk(2)
-                noise_pred = noise_uncond + cfg * (noise_cond - noise_uncond)
-
-            elif cfg == 1.0:
-                # 仅条件路
-                model_input = torch.cat([generated, cond], dim=1)
-                with autocast(device.type) if args.amp else nullcontext():
-                    noise_pred = ldm(model_input, t_input)
-
-            else:
-                # 仅无条件路
-                model_input = torch.cat([generated, torch.zeros_like(cond)], dim=1)
-                with autocast(device.type) if args.amp else nullcontext():
-                    noise_pred = ldm(model_input, t_input)
-
-        # DDIM 更新步
-        with torch.no_grad():
-            # scheduler.step 返回 (当前步结果, 预测的原始干净样本)
-            generated, pred_0 = scheduler.step(noise_pred, t, generated)
-
-        # 保存中间步骤与摘要图 (如果启用采样计划)
-        if args.summary and (i in sample_schedule):
+            # 预测噪声
             with torch.no_grad():
-                # 解码预测出的干净样本并添加到摘要长图
-                _, bgr_slice = decode_and_save(pred_0, step_idx=i)
-                summary_list.append(bgr_slice)
+                t_input = t[None].to(device)
 
-    # 最终解码并融合
-    print('Generated decoding:\t', generated.shape)
-    generated, bgr_final = decode_and_save(generated)
-    summary_list.append(bgr_final)
-    print('Generated decoded:\t', generated.shape)
+                if cfg > 1.0:
+                    # 并行计算条件与无条件预测
+                    latent_input = torch.cat([generated] * 2)
+                    cond_input = torch.cat([cond, torch.zeros_like(cond)])
+                    model_input = torch.cat([latent_input, cond_input], dim=1)
 
-    # 保存摘要长图 (如果启用)
-    if args.summary:
-        summary_img = np.hstack(summary_list)
-        summary_path = save_dir / cond_path.name.replace('.nii.gz', f'_summary.png')
-        cv2.imwrite(summary_path.as_posix(), summary_img)
-        print(f'Summary saved:\t', summary_path.resolve())
+                    with autocast(device.type) if args.amp else nullcontext():
+                        noise_pred_batch = ldm(model_input, t_input.repeat(2))
 
-    # 提取假体等值面网格体 (STL)
-    stl_name = cond_path.name.replace('.nii.gz', f'_metal.stl')
-    stl_path = save_dir / stl_name
-    print(f'Isosurface saving:\t', stl_path.resolve())
+                    # CFG 引导公式: noise = uncond + w * (cond - uncond)
+                    noise_cond, noise_uncond = noise_pred_batch.chunk(2)
+                    noise_pred = noise_uncond + cfg * (noise_cond - noise_uncond)
 
-    from diso import DiffDMC
-    import trimesh
+                elif cfg == 1.0:
+                    # 仅条件路
+                    model_input = torch.cat([generated, cond], dim=1)
+                    with autocast(device.type) if args.amp else nullcontext():
+                        noise_pred = ldm(model_input, t_input)
 
-    # 计算 STL 需要的 SDF 张量 [X, Y, Z]
-    final_sdf_x_aligned = torch.from_numpy(generated.transpose(2, 1, 0)).to(device)
+                else:
+                    # 仅无条件路
+                    model_input = torch.cat([generated, torch.zeros_like(cond)], dim=1)
+                    with autocast(device.type) if args.amp else nullcontext():
+                        noise_pred = ldm(model_input, t_input)
 
-    vertices, indices = DiffDMC(dtype=torch.float32)(-final_sdf_x_aligned, None, isovalue=0.0)
-    vertices, indices = vertices.cpu().numpy(), indices.cpu().numpy()
-    vertices = vertices * spacing * (np.array(final_sdf_x_aligned.shape) - 1)
+            # DDIM 更新步
+            with torch.no_grad():
+                generated, pred_0 = scheduler.step(noise_pred, t, generated)
 
-    mesh = trimesh.Trimesh(vertices, indices)
-    mesh.export(stl_path.as_posix())
+        # 最终解码并融合
+        print(f'Decoding CFG={cfg} ...')
+        sdf_numpy, bgr_final = decode_and_save(generated, cfg)
+        summary_list.append(bgr_final)
 
-    # 保存假体 SDF 结果 (Metal SDF)
-    save_metal = save_dir / cond_path.name.replace('.nii.gz', f'_metal.nii.gz')
-    print('Metal SDF saving:\t', save_metal.resolve())
+        # 保存 3D 文件 (如果启用)
+        if args.save_all:
+            # 提取假体等值面网格体 (STL)
+            stl_name = cond_path.name.replace('.nii.gz', f'_cfg_{cfg}_metal.stl')
+            stl_path = save_dir / stl_name
+            print(f'Isosurface saving:	', stl_path.resolve())
 
-    itk_metal = itk.image_from_array(generated)
-    itk_metal.CopyInformation(itk_img)
-    itk.imwrite(itk_metal, save_metal.as_posix())
+            from diso import DiffDMC
+            import trimesh
+
+            # 计算 STL 需要的 SDF 张量 [X, Y, Z]
+            final_sdf_x_aligned = torch.from_numpy(sdf_numpy.transpose(2, 1, 0)).to(device)
+
+            vertices, indices = DiffDMC(dtype=torch.float32)(-final_sdf_x_aligned, None, isovalue=0.0)
+            vertices, indices = vertices.cpu().numpy(), indices.cpu().numpy()
+            vertices = vertices * spacing * (np.array(final_sdf_x_aligned.shape) - 1)
+
+            mesh = trimesh.Trimesh(vertices, indices)
+            mesh.export(stl_path.as_posix())
+
+            # 保存假体 SDF 结果 (Metal SDF)
+            save_metal = save_dir / cond_path.name.replace('.nii.gz', f'_cfg_{cfg}_metal.nii.gz')
+            print('Metal SDF saving:	', save_metal.resolve())
+
+            itk_metal = itk.image_from_array(sdf_numpy)
+            itk_metal.CopyInformation(itk_img)
+            itk.imwrite(itk_metal, save_metal.as_posix())
+
+
+    # 保存所有 CFG 的横向对比长图
+    summary_img = np.hstack(summary_list)
+    summary_path = save_dir / cond_path.name.replace('.nii.gz', f'_cfgs_comparison.png')
+    cv2.imwrite(summary_path.as_posix(), summary_img)
+    print(f'\n======================================================')
+    print(f'CFG comparison summary successfully saved at:\n{summary_path.resolve()}')
+    print(f'======================================================')
 
 
 if __name__ == '__main__':
