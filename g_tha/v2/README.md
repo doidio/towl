@@ -12,19 +12,21 @@
 python v2/infer.py --cond dataset/pre/val/1004333_L.nii.gz --save save
 ```
 
-### 推荐的完整命令 (用于验证和对比)
+### 推荐命令 (上大算力环境)
 
 为了结果可复现并生成中间过程的可视化摘要，推荐固定随机种子并开启摘要功能：
 
 ```bash
-python v2/infer.py 
-    --cond dataset/pre/val/1004333_L.nii.gz 
-    --save save 
-    --seed 42 
-    --cfg 5 
-    --ts 50 
-    --summary 
-    --no-tiled
+cd g_tha/v2
+
+# 查看帮助
+uv run infer.py --help
+
+# 推理
+uv run infer.py --cond ../dataset/pre/val/1004333_L.nii.gz --ldm ldm_latest.pt --vae-pre vae_pre_best.pt --vae-metal vae_metal_best.pt --seed 42 --save save
+
+# 推理并保存过程摘要
+uv run infer.py --cond ../dataset/pre/val/1004333_L.nii.gz --ldm ldm_latest.pt --vae-pre vae_pre_best.pt --vae-metal vae_metal_best.pt --seed 42 --save save --ts 1000 --summary
 ```
 
 ---
