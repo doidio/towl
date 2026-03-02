@@ -67,7 +67,7 @@ def main():
         print('VAE', subtask)
 
         if getattr(args, f'vae_{subtask}') is None:
-            vae_path = Path(f'vae_{subtask}_best.pt')
+            vae_path = Path(__file__).parent / f'vae_{subtask}_best.pt'
         else:
             vae_path = Path(getattr(args, f'vae_{subtask}'))
 
@@ -119,7 +119,7 @@ def main():
     print('LDM')
 
     if args.ldm is None:
-        ldm_path = Path(f'ldm_last.pt')
+        ldm_path = Path(__file__).parent / 'ldm_last.pt'
     else:
         ldm_path = Path(args.ldm)
 

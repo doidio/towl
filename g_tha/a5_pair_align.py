@@ -13,8 +13,8 @@ import tomlkit
 import trimesh
 import warp as wp
 from minio import Minio, S3Error
-from stpyvista import stpyvista
-from stpyvista.panel_backend import PanelVTKKwargs
+# from stpyvista import stpyvista
+# from stpyvista.panel_backend import PanelVTKKwargs
 
 from kernel import diff_dmc, compute_sdf, icp
 
@@ -338,7 +338,8 @@ else:
 
         if st.radio('plot', _ := ['2D 截图', '3D 场景'], horizontal=True, label_visibility='collapsed') == _[1]:
             with st.spinner(_ := '同步', show_time=True):  # noqa
-                stpyvista(pl, panel_kwargs=PanelVTKKwargs(orientation_widget=True))
+                st.warning('暂不可用')
+                # stpyvista(pl, panel_kwargs=PanelVTKKwargs(orientation_widget=True))
         else:
             sil = pl.add_silhouette(metal_actor.GetMapper().GetInput(), color='lightgray')  # noqa
 
