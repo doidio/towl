@@ -290,8 +290,8 @@ else:
         with st.form('submit'):
             if 'excluded' in pairs[prl] and 'excluded' not in st.session_state:
                 st.session_state['excluded'] = pairs[prl]['excluded']
-            excluded = st.multiselect('是否排除', ['配准差', '小转子下骨折', '小转子下截骨'], accept_new_options=True,
-                                      key='excluded')
+            excluded = st.multiselect('是否排除', ['配准差', '小转子下骨折', '小转子下截骨', '钢板', '髓内钉', ''],
+                                      accept_new_options=True, key='excluded')
 
             if st.form_submit_button('提交（覆盖）' if 'post_xform' in pairs[prl] else '提交'):
                 data = {**pairs[prl], **data}

@@ -239,7 +239,7 @@ def launch():
     """
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True, help='Path to the TOML configuration file')
-    parser.add_argument('--max-workers', default=10, type=int, help='Maximum number of concurrent worker processes')
+    parser.add_argument('--max-workers', default=6, type=int, help='Maximum number of concurrent worker processes')
     args = parser.parse_args()
 
     # 加载配置并初始化 Minio 客户端
