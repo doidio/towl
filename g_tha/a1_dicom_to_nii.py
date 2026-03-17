@@ -88,6 +88,10 @@ def main(zip_file: str, cfg_path: str):
                 except (RuntimeError, Exception):
                     continue
 
+                # 强行抹除原始 Direction，将体素坐标系升格为全局笛卡尔坐标系
+                direction = itk.matrix_from_array(np.identity(3, dtype=np.float64))
+                image.SetDirection(direction)
+
                 # 校验分辨率和层厚
                 spacing = np.array(itk.spacing(image))
                 if not np.all((0 < np.array(spacing)) & (np.array(spacing) < 3.5)):

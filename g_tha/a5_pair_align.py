@@ -105,7 +105,7 @@ elif (it := st.session_state.get('roi')) is None:
 
             with st.spinner(_ := '读取自动分割', show_time=True):  # noqa
                 total = itk.imread(f.as_posix(), itk.UC)
-                total = itk.array_from_image(total)
+                total = itk.array_from_image(total).transpose(2, 1, 0)
 
                 if np.sum(total == label_femur) == 0:
                     st.error(f'自动分割不包含股骨 {label_femur}')
@@ -126,15 +126,15 @@ elif (it := st.session_state.get('roi')) is None:
             with st.spinner(_ := '读取原图', show_time=True):  # noqa
                 image = itk.imread(f.as_posix(), itk.SS)
 
-                size = np.array([float(_) for _ in reversed(itk.size(image))])
-                spacing = np.array([float(_) for _ in reversed(itk.spacing(image))])
-                origin = np.array([float(_) for _ in reversed(itk.origin(image))])
+                size = np.array(itk.size(image), float)
+                spacing = np.array(itk.spacing(image), float)
+                origin = np.array(itk.origin(image), float)
 
                 sizes.append(size)
                 spacings.append(spacing)
                 origins.append(origin)
 
-                image = itk.array_from_image(image)
+                image = itk.array_from_image(image).transpose(2, 1, 0)
 
                 image_bg = float(np.min(image))
                 image_bgs.append(image_bg)
@@ -187,7 +187,7 @@ else:
 
         st.info('术后（绿）指定区域（浅绿）采样点（深红）配准到术前（浅黄）')
 
-        zl = [round(_.bounds[1][0] - _.bounds[0][0]) for _ in bone_meshes]
+        zl = [round(_.bounds[1][2] - _.bounds[0][2]) for _ in bone_meshes]
 
         d_proximal = st.number_input(
             f'近端截除 (0 ~ {zl[1]:.0f} mm)', 0, zl[1], pairs[prl].get('d_proximal', min(zl[1], 15)), step=5,
@@ -198,10 +198,10 @@ else:
             post_mesh: trimesh.Trimesh = bone_meshes[1].copy()
 
             if d_proximal > 0 or zl[0] < zl[1]:
-                z_max = post_mesh.bounds[1][0] - d_proximal
+                z_max = post_mesh.bounds[1][2] - d_proximal
                 z_min = z_max - zl[0]
 
-                z = post_mesh.vertices[:, 0]
+                z = post_mesh.vertices[:, 2]
                 mask = (z_min <= z) & (z <= z_max)
                 post_mesh.update_faces(np.all(mask[post_mesh.faces], axis=1))
                 post_mesh.remove_unreferenced_vertices()
@@ -217,7 +217,7 @@ else:
             st.error('近端裁剪过多')
             st.stop()
 
-        zl.append(round(post_mesh.bounds[1][0] - post_mesh.bounds[0][0]))
+        zl.append(round(post_mesh.bounds[1][2] - post_mesh.bounds[0][2]))
         _min, _max = d_proximal, d_proximal + min(zl[0], zl[2])
 
         d_sample_range = st.slider(
@@ -239,7 +239,7 @@ else:
             ])
             d = d.numpy()
 
-            z0 = post_mesh.bounds[1][0] - post_mesh.vertices[:, 0]
+            z0 = post_mesh.bounds[1][2] - post_mesh.vertices[:, 2]
 
             _ = d - d_metal
             _ = np.clip(_, 0, max(d_metal, 1e-6))
@@ -258,12 +258,13 @@ else:
 
         with st.spinner(_ := '配准', show_time=True):  # noqa
             matrix = np.identity(4)
-            matrix[0, 3] = bone_meshes[0].bounds[1][0] - post_mesh.bounds[1][0]
+            matrix[2, 3] = bone_meshes[0].bounds[1][2] - post_mesh.bounds[1][2]
             matrix, _, mse, iters = icp(
                 vertices, bone_meshes[0], matrix, 1e-5, 2000,
                 **dict(reflection=False, scale=False),
             )
 
+        # 计算 ROI 局部原点
         offset = [np.array(origins[_]) + np.array(roi_bounds[_][0]) * np.array(spacings[_]) for _ in range(2)]
 
         pre = np.identity(4)
@@ -276,8 +277,7 @@ else:
 
         data = {
             'roi_bounds': np.array(roi_bounds).tolist(),
-            'post_xform': np.array(wp.transform_from_matrix(wp.mat44(matrix)), dtype=float).tolist(),
-            'post_xform_global': np.array(wp.transform_from_matrix(wp.mat44(g_matrix)), dtype=float).tolist(),
+            'post_xform': np.array(wp.transform_from_matrix(wp.mat44(g_matrix)), dtype=float).tolist(),
             'post_points': n,
             'iterations': iters,
             'mse': mse,
@@ -306,10 +306,10 @@ else:
     with col_r:
         with st.spinner(_ := '场景', show_time=True):  # noqa
             b = np.array(post_mesh.bounds)
-            b[1][0] += d_proximal
+            b[1][2] += d_proximal
 
-            z, y, x = [b[1][_] - b[0][_] for _ in (0, 1, 2)]
-            h, wy, wx = [round(_ * 5) for _ in (z, y, x)]
+            x, y, z = [b[1][_] - b[0][_] for _ in (0, 1, 2)]
+            wx, wy, h = [round(_ * 5) for _ in (x, y, z)]
 
             pl = pv.Plotter(
                 off_screen=True, border=False, window_size=[768, 768],
@@ -330,9 +330,9 @@ else:
             pl.add_mesh(pre_mesh, color='lightyellow')  # noqa
             pl.add_points(vertices, color='crimson', render_points_as_spheres=True, point_size=3)
 
-            pl.camera_position = 'zx'
+            pl.camera_position = 'xz'
             pl.reset_camera(bounds=b.T.flatten())
-            pl.camera.parallel_scale = (b[1][0] - b[0][0]) * 0.6
+            pl.camera.parallel_scale = (b[1][2] - b[0][2]) * 0.6
             pl.reset_camera_clipping_range()
             pl.render()
 
@@ -350,10 +350,10 @@ else:
 
                 pl.window_size = [[wx, wy][i], h]
 
-                pl.camera_position = 'zx'
+                pl.camera_position = 'xz'
                 pl.reset_camera(bounds=b.T.flatten())
                 pl.camera.Azimuth(deg)
-                pl.camera.parallel_scale = (b[1][0] - b[0][0]) * 0.6
+                pl.camera.parallel_scale = (b[1][2] - b[0][2]) * 0.6
                 pl.reset_camera_clipping_range()
                 pl.render()
                 a = pl.screenshot(return_img=True).copy()

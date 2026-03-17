@@ -60,15 +60,15 @@ def main(config: str, prl: str, pair: dict):
     # 遍历术前 (pre) 和术后 (post) 数据
     for op, object_name in enumerate((pair['pre'], pair['post'])):
         with tempfile.TemporaryDirectory() as tdir:
-            # 1. 下载并读取 TotalSegmentator 的分割结果 (total.nii.gz)
-            f = Path(tdir) / 'total.nii.gz'
-            try:
-                client.fget_object('total', object_name, f.as_posix())
-            except S3Error:
-                continue
+            with st.spinner(_ := '读取自动分割', show_time=True):  # noqa
+                f = Path(tdir) / 'total.nii.gz'
+                try:
+                    client.fget_object('total', object_name, f.as_posix())
+                except S3Error:
+                    continue
 
             total = itk.imread(f.as_posix(), itk.UC)
-            total = itk.array_from_image(total)
+            total = itk.array_from_image(total).transpose(2, 1, 0)
 
             # 如果分割结果中没有目标股骨标签，则跳过
             if not np.any(total == label_femur):
@@ -90,17 +90,15 @@ def main(config: str, prl: str, pair: dict):
 
             image = itk.imread(f.as_posix(), itk.SS)
 
-            # 提取图像的物理属性：尺寸、间距、原点 (注意 ITK 读取的顺序通常需要反转以匹配 numpy 的 ZYX 顺序)
-            size = np.array([float(_) for _ in reversed(itk.size(image))])
-            spacing = np.array([float(_) for _ in reversed(itk.spacing(image))])
-            origin = np.array([float(_) for _ in reversed(itk.origin(image))])
+            size = np.array(itk.size(image), float)
+            spacing = np.array(itk.spacing(image), float)
+            origin = np.array(itk.origin(image), float)
 
             sizes.append(size)
             spacings.append(spacing)
             origins.append(origin)
 
-            # 转换为 numpy 数组并记录背景值 (通常是图像中的最小值，如 -1024)
-            image = itk.array_from_image(image)
+            image = itk.array_from_image(image).transpose(2, 1, 0)
             ct_images.append(image)
 
             image_bg = float(np.min(image))
@@ -129,28 +127,12 @@ def main(config: str, prl: str, pair: dict):
         raise RuntimeError('No metal implant found in the post-op image.')
 
     # 解析术后到术前的配准变换矩阵
-    if 'post_xform_global' in pair:
-        # 如果有全局变换矩阵，直接使用
-        post_xform = wp.transform(*pair['post_xform_global'])
-    elif 'post_xform' in pair:
-        # 如果是局部变换矩阵，需要结合图像的原点和裁剪偏移量计算全局变换
+    if 'post_xform' in pair:
         post_xform = wp.transform(*pair['post_xform'])
         post_xform = np.array(wp.transform_to_matrix(post_xform), float).reshape((4, 4))
-
-        # 计算术前和术后图像裁剪区域的物理坐标偏移
-        offset = [np.array(origins[_]) + np.array(roi_bounds[_][0]) * np.array(spacings[_]) for _ in range(2)]
-
-        pre = np.identity(4)
-        pre[:3, 3] = offset[0]
-
-        post_inv = np.identity(4)
-        post_inv[:3, 3] = -offset[1]
-
-        # 组合变换矩阵：平移到术后局部坐标系 -> 应用局部变换 -> 平移回术前全局坐标系
-        post_xform = pre @ post_xform @ post_inv
         post_xform = wp.transform_from_matrix(wp.mat44(post_xform))
     else:
-        raise RuntimeError('Missing transformation matrix in pair data.')
+        raise RuntimeError('Missing post_xform matrix in pair data.')
 
     # 计算目标 ROI 的轴向包围盒 (AABB)
     bounds = mesh.bounds
@@ -196,22 +178,28 @@ def main(config: str, prl: str, pair: dict):
     image_roi_np = image_roi.numpy()
     image_a, image_b, image_sdf = image_roi_np[..., 1], image_roi_np[..., 0], image_roi_np[..., 2]
 
+    # 计算局部的简单正交物理原点
+    roi_origin_itk = np.array(origin) + center
+    roi_direction_itk = np.identity(3, dtype=np.float64)
+
     # 保存重采样后的术前、术后和 SDF 图像为 NIfTI 格式
     for op, image in (('pre', image_a), ('post', image_b), ('metal', image_sdf)):
         f = dataset_root / op / subdir / f'{prl}.nii.gz'
         f.parent.mkdir(parents=True, exist_ok=True)
 
-        _ = itk.image_from_array(image)
+        _ = itk.image_from_array(image.transpose(2, 1, 0))
         _.SetSpacing(roi_spacing)
+        _.SetOrigin(roi_origin_itk)
+        _.SetDirection(itk.matrix_from_array(roi_direction_itk))
         itk.imwrite(_, f.as_posix(), True)
 
     # 生成用于可视化的 2D 投影快照 (DRR - Digitally Reconstructed Radiograph)
     snapshot = []
-    for ax in (1, 2):  # 分别在冠状面和矢状面生成投影
+    for ax in (1, 0):  # 分别在冠状面和矢状面生成投影
         stack = [
-            fast_drr(image_a, ax), 
-            fast_drr(image_b, ax),
-            fast_drr(image_sdf, ax, th=(-1.0, 1.0), mode='max')
+            fast_drr(image_a, ax).transpose(1, 0, 2), 
+            fast_drr(image_b, ax).transpose(1, 0, 2),
+            fast_drr(image_sdf, ax, th=(-1.0, 1.0), mode='max').transpose(1, 0, 2)
         ]
         img = np.hstack(stack)  # 水平拼接术前、术后和SDF投影
         snapshot.append(img)
@@ -256,6 +244,9 @@ def launch():
         # 解析对象路径，例如: patientID/R/pre/image.nii.gz
         pid, rl, op, nii = _.object_name.split('/')
         prl = f'{pid}_{rl}'
+        print(prl)
+        if prl != '1325325_R':
+            continue
         if prl not in pairs:
             pairs[prl] = {'prl': prl}
         pairs[prl][op] = f'{pid}/{nii}'
@@ -275,7 +266,7 @@ def launch():
                 continue
 
             # 如果缺少配准变换矩阵，则跳过
-            if 'post_xform_global' not in pairs[prl] and 'post_xform' not in pairs[prl]:
+            if 'post_xform' not in pairs[prl]:
                 continue
 
             # 默认标记为训练集
