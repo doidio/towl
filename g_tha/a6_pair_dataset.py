@@ -60,12 +60,11 @@ def main(config: str, prl: str, pair: dict):
     # 遍历术前 (pre) 和术后 (post) 数据
     for op, object_name in enumerate((pair['pre'], pair['post'])):
         with tempfile.TemporaryDirectory() as tdir:
-            with st.spinner(_ := '读取自动分割', show_time=True):  # noqa
-                f = Path(tdir) / 'total.nii.gz'
-                try:
-                    client.fget_object('total', object_name, f.as_posix())
-                except S3Error:
-                    continue
+            f = Path(tdir) / 'total.nii.gz'
+            try:
+                client.fget_object('total', object_name, f.as_posix())
+            except S3Error:
+                continue
 
             total = itk.imread(f.as_posix(), itk.UC)
             total = itk.array_from_image(total).transpose(2, 1, 0)
@@ -244,7 +243,6 @@ def launch():
         # 解析对象路径，例如: patientID/R/pre/image.nii.gz
         pid, rl, op, nii = _.object_name.split('/')
         prl = f'{pid}_{rl}'
-        print(prl)
         if prl != '1325325_R':
             continue
         if prl not in pairs:
