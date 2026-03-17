@@ -306,16 +306,16 @@ def main():
                             x_min, x_max = x.min(), x.max()
                             return (x - x_min) / (x_max - x_min + 1e-5)
 
-                        idx = vis_generated.shape[3] // 2  # [B, C, D, H, W]
+                        y_idx = vis_generated.shape[3] // 2  # [B, C, Z, Y, X]
 
-                        vis_generated = vis_generated[0, 0, :, idx, :]
-                        writer.add_image('val/Generated', norm_vis(vis_generated), epoch, dataformats='HW')
+                        vis_generated_slice = vis_generated[0, 0, :, y_idx, :] # [Z, X]
+                        writer.add_image('val/Generated', norm_vis(vis_generated_slice), epoch, dataformats='HW')
 
                         if epoch == 0:
-                            vis_cond = vis_cond[0, 0, :, idx, :]
-                            vis_gt = vis_gt[0, 0, :, idx, :]
-                            writer.add_image('val/Condition', norm_vis(vis_cond), epoch, dataformats='HW')
-                            writer.add_image('val/GroundTruth', norm_vis(vis_gt), epoch, dataformats='HW')
+                            vis_cond_slice = vis_cond[0, 0, :, y_idx, :]
+                            vis_gt_slice = vis_gt[0, 0, :, y_idx, :]
+                            writer.add_image('val/Condition', norm_vis(vis_cond_slice), epoch, dataformats='HW')
+                            writer.add_image('val/GroundTruth', norm_vis(vis_gt_slice), epoch, dataformats='HW')
 
             ema.restore(ldm)
             avg_val_loss = val_loss / val_steps

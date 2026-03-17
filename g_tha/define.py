@@ -8,7 +8,7 @@ from monai.networks.nets import AutoencoderKL, PatchDiscriminator, DiffusionMode
 from monai.networks.schedulers import DDPMScheduler, DDIMScheduler
 from monai.transforms import (
     LoadImaged, MapTransform, RandCropByPosNegLabeld, CopyItemsd, DeleteItemsd, SpatialPadd,
-    Lambdad,
+    Lambdad, DivisiblePadd,
 )
 
 bone_min = 150.0
@@ -164,12 +164,14 @@ def vae_val_transforms(subtask, patch_size):
         return [
             LoadImaged(keys=['image'], ensure_channel_first=True),
             SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=ct_min),
+            DivisiblePadd(keys=['image'], k=16, constant_values=ct_min),
             CTBoneNormalized(keys=['image']),
         ]
     elif subtask in ('metal',):
         return [
             LoadImaged(keys=['image'], ensure_channel_first=True),
             SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=-1.0),
+            DivisiblePadd(keys=['image'], k=16, constant_values=-1.0),
         ]
     else:
         raise SystemError(f'Unknown VAE subtask {subtask}')

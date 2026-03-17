@@ -388,10 +388,10 @@ def main():
                         def norm_vis(x: torch.Tensor) -> torch.Tensor:
                             return torch.clamp(x * 0.5 + 0.5, 0.0, 1.0)
 
-                        z_idx = val_images.shape[3] // 2  # [B, C, D, H, W] coronal
+                        y_idx = val_images.shape[3] // 2  # [B, C, Z, Y, X] 冠状面切片
 
-                        vis_input = val_images[0, 0, :, z_idx]
-                        vis_recon = val_recon[0, 0, :, z_idx]
+                        vis_input = val_images[0, 0, :, y_idx, :]  # [Z, X]
+                        vis_recon = val_recon[0, 0, :, y_idx, :]  # [Z, X]
                         vis_diff = torch.clamp(torch.abs(vis_input - vis_recon), 0.0, 1.0)
 
                         writer.add_image('val/Input', norm_vis(vis_input), epoch, dataformats='HW')
