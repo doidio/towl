@@ -1,4 +1,4 @@
-# uv run streamlit run drr_to_pair.py --server.port 8501 -- --config config.toml
+# uv run streamlit run a3_drr_to_pair.py --server.port 8500 -- --config config.toml
 
 import argparse
 import locale
@@ -20,7 +20,7 @@ parser.add_argument('--config', required=True)
 args = parser.parse_args()
 
 cfg_path = Path(args.config)
-cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
+cfg = tomlkit.loads(cfg_path.read_text('utf-8')).unwrap()
 client = Minio(**cfg['minio']['client'])
 
 st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed')
@@ -40,7 +40,7 @@ elif (it := st.session_state.get('pid')) is None:
     ud = st.session_state['ud']
 
     st.progress(_ := len(dn) / (len(dn) + len(ud)), text=f'{100 * _:.2f}%')
-    st.metric(f'progress', f'{len(dn)} / {len(dn) + len(ud)} 个人', label_visibility='collapsed')
+    st.metric(f'progress', f'{len(dn)} / {len(dn) + len(ud)} 个患者', label_visibility='collapsed')
 
     if len(ud) > 0 and st.button('下一个'):
         with st.spinner('下一个', show_time=True):  # noqa
@@ -84,7 +84,7 @@ elif (it := st.session_state.get('pid')) is None:
                 with tempfile.TemporaryDirectory() as tdir:
                     f = Path(tdir) / 'info.toml'
                     client.fget_object('drr', f'{object_name}/{f.name}', f.as_posix())
-                    info = tomlkit.loads(f.read_text('utf-8'))
+                    info = tomlkit.loads(f.read_text('utf-8')).unwrap()
 
                     if any((
                             'DERIVED' in info['dicom']['ImageType'],
@@ -148,8 +148,8 @@ else:
                 st.session_state[f'select_{rl}'] = (pre, post)
 
     with st.form('submit'):
-        rl = st.columns(2)
-        for i, c in enumerate(rl):
+        rl = [[], []]
+        for i, c in enumerate(st.columns(2)):
             rl[i] = c.multiselect(['右侧', '左侧'][i], options.keys(), key=f'select_' + 'RL'[i])
 
         n = set(len(_) for _ in rl)

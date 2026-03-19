@@ -4,18 +4,6 @@ access_key = "minioadmin"
 secret_key = "minioadmin"
 secure = false
 
-[ct]
-bone = 220
-metal = 2700
-
-[totalsegmentator.label]
-left_femur = 75
-right_femur = 76
-
-[ct.roi]
-spacing = 1.0
-sdf_t = 5.0  # 截断距离
-
 [dataset]
 root = 'dataset'
 

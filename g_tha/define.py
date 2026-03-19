@@ -11,8 +11,19 @@ from monai.transforms import (
     Lambdad, DivisiblePadd,
 )
 
-bone_min = 150.0
 ct_min = -1024.0
+ct_bone_min = 150.0  # 用于归一化
+ct_bone_best = 220.0  # 用于配准和显示
+ct_metal = 2700.0
+
+# TotalSegmentator 标签
+ct_seg_femur_left = 75
+ct_seg_femur_right = 76
+ct_seg_hip_left = 77
+ct_seg_hip_right = 78
+
+roi_spacing = 1.0  # 重采样体素精度 mm
+sdf_t = 5.0  # 截断距离 mm
 
 
 class CTBoneNormalized(MapTransform):
@@ -33,7 +44,7 @@ class CTBoneNormalized(MapTransform):
     def __init__(self, keys, reverse=False, allow_missing_keys=False):
         super().__init__(keys, allow_missing_keys)
 
-        self.src_pts = [bone_min, 650.0, 1150.0, 3000.0]
+        self.src_pts = [ct_bone_min, 650.0, 1150.0, 3000.0]
         self.dst_pts = [-1.0, 0.0, 0.5, 1.0]
         if reverse:
             self.src_pts, self.dst_pts = self.dst_pts, self.src_pts
@@ -95,7 +106,7 @@ def vae_kl():
     )
 
 
-def discriminator():
+def vae_discriminator():
     return PatchDiscriminator(
         spatial_dims=3,
         channels=64,  # 起始通道数
@@ -105,7 +116,7 @@ def discriminator():
     )
 
 
-def perceptual_loss():
+def vae_perceptual_loss():
     return PerceptualLoss(
         spatial_dims=3,
         network_type='medicalnet_resnet50_23datasets',
@@ -114,11 +125,11 @@ def perceptual_loss():
     )
 
 
-def _label_pre_func(x):
-    return (x > bone_min).float()
+def _label_pre_fn(x):
+    return (x > ct_bone_min).float()
 
 
-def _label_metal_func(x):
+def _label_metal_fn(x):
     return (x > -0.95).float()
 
 
@@ -128,7 +139,7 @@ def vae_train_transforms(subtask, patch_size):
             LoadImaged(keys=['image'], ensure_channel_first=True),
             SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=ct_min),
             CopyItemsd(keys=['image'], times=1, names=['label']),
-            Lambdad(keys=['label'], func=_label_pre_func),
+            Lambdad(keys=['label'], func=_label_pre_fn),
             RandCropByPosNegLabeld(
                 keys=['image'],
                 label_key='label',
@@ -145,7 +156,7 @@ def vae_train_transforms(subtask, patch_size):
             SpatialPadd(keys=['image'], spatial_size=patch_size, constant_values=-1.0),
             CopyItemsd(keys=['image'], times=1, names=['label']),
             # 计算 TSDF 窄带附近作为前景，不能用 ThresholdIntensityd 因为 0 等值面反而会变成 0 背景
-            Lambdad(keys=['label'], func=_label_metal_func),
+            Lambdad(keys=['label'], func=_label_metal_fn),
             RandCropByPosNegLabeld(
                 keys=['image'],
                 label_key='label',

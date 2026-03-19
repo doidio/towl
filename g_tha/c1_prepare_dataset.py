@@ -13,6 +13,7 @@ from PIL import Image
 from minio import Minio, S3Error
 from tqdm import tqdm
 
+from define import ct_metal, roi_spacing, sdf_t
 from kernel import diff_dmc, resample_roi, fast_drr
 
 
@@ -30,11 +31,6 @@ def main(config: str, prl: str, pair: dict):
 
     # 初始化 Minio 客户端，用于从对象存储中读取数据
     client = Minio(**cfg['minio']['client'])
-
-    # 获取金属的 CT 阈值和目标 ROI 的体素间距 (spacing)
-    ct_metal = cfg['ct']['metal']
-    roi_spacing = np.ones(3) * cfg['ct']['roi']['spacing']
-    sdf_t = float(cfg['ct']['roi']['sdf_t'])
 
     # 设置数据集输出根目录
     dataset_root = Path(str(cfg['dataset']['root']))
@@ -144,12 +140,12 @@ def main(config: str, prl: str, pair: dict):
     # 向上取整到 64 的倍数，以适配后续深度学习网络（如 U-Net/VAE）的多次下采样要求
     roi_size = np.ceil(roi_size / 64.0).astype(int) * 64
 
+    # 计算 ROI 的起始物理坐标 (原点)
+    origin = -0.5 * roi_spacing * roi_size
+
     # 构建 ROI 的变换矩阵（仅包含平移到中心点）
     roi_xform = np.identity(4)
     roi_xform[:3, 3] = center
-
-    # 计算 ROI 的起始物理坐标 (原点)
-    origin = -0.5 * roi_spacing * roi_size
 
     roi_xform = wp.transform_from_matrix(wp.mat44(roi_xform))
 

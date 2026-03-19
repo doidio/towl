@@ -16,7 +16,9 @@ from torch.amp import GradScaler, autocast
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
-import define
+from define import (
+    roi_spacing, sdf_t, vae_train_transforms, vae_val_transforms, vae_kl, vae_discriminator, vae_perceptual_loss
+)
 
 try:
     import torch_musa
@@ -64,10 +66,6 @@ def main():
 
     print('Subtask:\t', subtask)
 
-    # 读取 ROI 物理参数，用于 TSDF 梯度约束
-    roi_spacing = config['ct']['roi']['spacing']
-    sdf_t = float(config['ct']['roi']['sdf_t'])
-
     # 数据集覆盖术前和术后
     train_files = [{'image': p.as_posix()} for p in sorted((dataset_root / subtask / 'train').glob('*.nii.gz'))]
     val_files = [{'image': p.as_posix()} for p in sorted((dataset_root / subtask / 'val').glob('*.nii.gz'))]
@@ -79,8 +77,8 @@ def main():
         val_files = val_files[::max(1, len(val_files) // (val_total - 1))]
     print('Val limited:\t', len(val_files))
 
-    train_transforms = Compose(define.vae_train_transforms(subtask, patch_size))
-    val_transforms = Compose(define.vae_val_transforms(subtask, patch_size))
+    train_transforms = Compose(vae_train_transforms(subtask, patch_size))
+    val_transforms = Compose(vae_val_transforms(subtask, patch_size))
 
     train_ds = Dataset(train_files, train_transforms)
     val_ds = Dataset(val_files, val_transforms) if len(val_files) else None
@@ -92,10 +90,10 @@ def main():
     val_loader = DataLoader(val_ds, batch_size=1, num_workers=num_workers) if val_ds else None
 
     # 生成器 (VAE)
-    vae = define.vae_kl().to(device)
+    vae = vae_kl().to(device)
 
     # 判别器 (PatchGAN)
-    discriminator = define.discriminator().to(device)
+    discriminator = vae_discriminator().to(device)
 
     # L1 损失
     l1_loss_fn = torch.nn.L1Loss()
@@ -105,7 +103,7 @@ def main():
 
     # 感知损失
     if subtask in ('pre',):
-        per_loss_fn = define.perceptual_loss().to(device)
+        per_loss_fn = vae_perceptual_loss().to(device)
     else:
         per_loss_fn = None
 

@@ -345,6 +345,59 @@ def resample_roi(
 
 
 @wp.kernel
+def resample_cup_head(
+        volume: wp.uint64, origin: wp.vec3, spacing: wp.vec3, ct_min: float, ct_width: float,
+        head_image: wp.array2d(dtype=wp.vec3ub), head_origin: wp.vec3, head_spacing: wp.float32,
+        axis_i: wp.vec3, axis_j: wp.vec3,
+        cup_center: wp.vec3, cup_axis: wp.vec3, head_center: wp.vec3, head_radius: wp.float32, cup_radius: wp.float32,
+):
+    i, j = wp.tid()
+
+    p = head_origin + axis_i * wp.float32(i) * head_spacing + axis_j * wp.float32(j) * head_spacing
+
+    uvw = wp.vec3(wp.cw_div(p - origin, spacing))
+    grey = float(wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR))
+
+    grey = 255.0 * (grey - ct_min) / ct_width
+    grey = wp.clamp(grey, 0.0, 255.0)
+
+    r = grey
+    g = grey
+    b = grey
+
+    to_p_cup = p - cup_center
+    radius_cup = wp.length(to_p_cup)
+    dot_cup = wp.dot(to_p_cup, cup_axis)
+
+    to_p_head = p - head_center
+    radius_head = wp.length(to_p_head)
+
+    # 计算杯轴在当前切面投影的有效长度，用于归一化 2D 线宽
+    n_proj_len = wp.sqrt(wp.dot(cup_axis, axis_i) * wp.dot(cup_axis, axis_i) +
+                         wp.dot(cup_axis, axis_j) * wp.dot(cup_axis, axis_j))
+    n_proj_len = wp.max(n_proj_len, 0.1)
+
+    tk = head_spacing * 2.1
+
+    # 纱线轮廓
+    if i % 3 < 1 or j % 3 < 1:
+        if wp.abs(radius_head - head_radius) <= tk:
+            r, g, b = 0.0, 127.0, 255.0
+
+        if dot_cup < 0 and wp.abs(radius_cup - cup_radius) <= tk:
+            r, g, b = 255.0, 127.0, 127.0
+
+        if wp.abs(dot_cup) <= tk * n_proj_len and radius_head >= head_radius - tk and radius_cup <= cup_radius + tk:
+            r, g, b = 255.0, 127.0, 127.0 * 1.0
+
+    r = wp.clamp(r, 0.0, 255.0)
+    g = wp.clamp(g, 0.0, 255.0)
+    b = wp.clamp(b, 0.0, 255.0)
+
+    head_image[i, j] = wp.vec3ub(wp.uint8(r), wp.uint8(g), wp.uint8(b))
+
+
+@wp.kernel
 def contact_drr(
         image_a: wp.array3d(dtype=float), image_b: wp.array3d(dtype=float),
         image_3: wp.array3d(dtype=float), image_2: wp.array2d(dtype=wp.vec3ub),
