@@ -239,8 +239,7 @@ def launch():
         # 解析对象路径，例如: patientID/R/pre/image.nii.gz
         pid, rl, op, nii = _.object_name.split('/')
         prl = f'{pid}_{rl}'
-        if prl != '1325325_R':
-            continue
+
         if prl not in pairs:
             pairs[prl] = {'prl': prl}
         pairs[prl][op] = f'{pid}/{nii}'

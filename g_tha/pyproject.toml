@@ -20,6 +20,7 @@ dependencies = [
     "pydicom>=3.0.1",
     "pyvista>=0.47.1",
     "rtree>=1.4.1",
+    "setuptools>=82.0.1",
     "stpyvista>=0.1.4",
     "streamlit>=1.55.0",
     "tensorboard>=2.20.0",

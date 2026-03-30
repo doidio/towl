@@ -1,6 +1,5 @@
 # uv run streamlit run b1_prepare_context.py --server.port 8501 -- --config config.toml
 
-import argparse
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -11,10 +10,13 @@ import streamlit as st
 import tomlkit
 import warp as wp
 from PIL import Image, ImageDraw, ImageFont
-from minio import Minio, S3Error
+from minio import S3Error
 
+from b0_config import client_pairs, FEMORAL, FEMORAL_OFFSET
 from define import ct_bone_best, ct_metal, ct_seg_femur_right, ct_seg_femur_left, ct_seg_hip_right, ct_seg_hip_left
 from kernel import resample_cup_head
+
+save_key = 'cup_center'
 
 st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed', layout='wide')
 st.markdown('### G-THA 全局标签录入')
@@ -22,40 +24,7 @@ st.markdown('### G-THA 全局标签录入')
 # --- 第一阶段：初始化与数据列表加载 ---
 if (it := st.session_state.get('init')) is None:
     with st.spinner('初始化', show_time=True):  # noqa
-        parser = argparse.ArgumentParser()
-        parser.add_argument('--config', required=True)
-        args = parser.parse_args()
-
-        cfg_path = Path(args.config)
-        cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
-
-        client = Minio(**cfg['minio']['client'])
-
-        # 遍历 MinIO 'pair' 桶，整理术前术后成对的病例数据
-        pairs = {}
-        for _ in client.list_objects('pair', recursive=True):
-            if not _.object_name.endswith('.nii.gz'):
-                continue
-
-            # 预期路径结构：PatientID/RL/PreOrPost/image.nii.gz
-            pid, rl, op, nii = _.object_name.split('/')
-
-            if op not in ('pre', 'post'):
-                continue
-
-            prl = f'{pid}_{rl}'  # 患者 ID + 左右侧作为唯一标识
-            if prl not in pairs:
-                pairs[prl] = {'prl': prl}
-            pairs[prl][op] = f'{pid}/{nii}'
-
-        # 尝试加载已有结果（context.toml）
-        for prl in pairs:
-            try:
-                data = client.get_object('pair', '/'.join([prl.replace('_', '/'), 'context.toml'])).data
-                data = tomlkit.loads(data.decode('utf-8'))
-                pairs[prl].update(data)
-            except S3Error:
-                pass
+        client, pairs = client_pairs('context')
 
     st.session_state['init'] = client, pairs
     st.rerun()
@@ -65,7 +34,7 @@ elif (it := st.session_state.get('prl')) is None:
     client, pairs = st.session_state['init']
 
     # 统计配准进度
-    dn = len([_ for _ in pairs if 'cup_center' in pairs[_]])
+    dn = len([_ for _ in pairs if save_key in pairs[_]])
     ud = len(pairs) - dn
 
     st.progress(_ := dn / (dn + ud), text=f'{100 * _:.2f}%')
@@ -74,7 +43,7 @@ elif (it := st.session_state.get('prl')) is None:
     # 自动跳转到下一个待配准的病例
     if st.button('下一个'):
         for prl in pairs:
-            if 'cup_center' not in pairs[prl]:
+            if save_key not in pairs[prl]:
                 st.session_state['prl_input'] = prl
                 break
 
@@ -174,7 +143,7 @@ else:
     liner_offset = pairs[prl].get('liner_offset', 0.0)
     liner_offset = cols[0].number_input('内衬偏心距', 0.0, 9.0, liner_offset, 0.5, format='%.1f', key='liner_offset')
 
-    step = cols[0].radio('步长 (mm/deg)', _ := [0.25, 0.5, 5, 20], horizontal=True)
+    step = cols[0].radio('调节步长 (mm/deg)', _ := [0.25, 0.5, 5, 20], horizontal=True)
     step_atom = _[0]
 
     b = np.minimum(roi_boxes[0][0], roi_boxes[1][0] - 1), np.maximum(roi_boxes[0][1], roi_boxes[1][1] - 1)
@@ -213,7 +182,7 @@ else:
         if i not in (0, 1):
             s, w = w, s
 
-        if col_l.button(f'↺', key=f'↺_{i}', use_container_width=True):
+        if col_l.button(f'↺', key=f'↺_{i}', width='stretch'):
             v = np.array(st.session_state['cup_axis'])
             x, y = v[axes[0]], (-v[axes[1]] if i in (0, 1) else v[axes[1]])
             theta = np.deg2rad(step)
@@ -222,7 +191,7 @@ else:
             v[axes[1]] = -y if i in (0, 1) else y
             st.session_state['cup_axis'] = v / np.linalg.norm(v)
 
-        if col_r.button(f'↻', key=f'↻_{i}', use_container_width=True):
+        if col_r.button(f'↻', key=f'↻_{i}', width='stretch'):
             v = np.array(st.session_state['cup_axis'])
             x, y = v[axes[0]], (-v[axes[1]] if i in (0, 1) else v[axes[1]])
             theta = np.deg2rad(-step)
@@ -231,14 +200,14 @@ else:
             v[axes[1]] = -y if i in (0, 1) else y
             st.session_state['cup_axis'] = v / np.linalg.norm(v)
 
-        if col_l.button(f'{a}', key=f'{a}_{i}', use_container_width=True):
+        if col_l.button(f'{a}', key=f'{a}_{i}', width='stretch'):
             st.session_state['cup_center'][axes[0]] += step * (1 if a in 'LPS' else -1)
-        if col_r.button(f'{d}', key=f'{d}_{i}', use_container_width=True):
+        if col_r.button(f'{d}', key=f'{d}_{i}', width='stretch'):
             st.session_state['cup_center'][axes[0]] += step * (1 if d in 'LPS' else -1)
 
-        if col_m.button(f'{w}', key=f'{w}_{i}', use_container_width=True):
+        if col_m.button(f'{w}', key=f'{w}_{i}', width='stretch'):
             st.session_state['cup_center'][axes[1]] += step * (1 if w in 'LPS' else -1)
-        if col_m.button(f'{s}', key=f'{s}_{i}', use_container_width=True):
+        if col_m.button(f'{s}', key=f'{s}_{i}', width='stretch'):
             st.session_state['cup_center'][axes[1]] += step * (1 if s in 'LPS' else -1)
 
     cup_center = np.array(st.session_state['cup_center'], float)
@@ -297,33 +266,63 @@ else:
 
     for _ in range(3):
         caption = ['矢状面 (Sagittal)', '冠状面 (Coronal)', '横断面 (Axial)'][_]
-        img_slots[_].image(stack[_], caption, use_container_width=True)
+        img_slots[_].image(stack[_], caption, width='stretch')
 
-    # 准备待保存的数据
-    data = {
-        'cup_outer': cup_outer,
-        'head_outer': head_outer,
-        'liner_offset': liner_offset,
-        'cup_center': cup_center.tolist(),
-        'cup_axis': cup_axis.tolist(),
-    }
-    st.code(tomlkit.dumps(data), 'toml')
+    # 股骨柄型号规格
+    with cols[0]:
+        spec_0, spec_1 = pairs[prl].get('femoral_spec', ['', ''])
+
+        if spec_0 not in FEMORAL:
+            spec_0 = ''
+
+        if spec_1 not in FEMORAL[spec_0]:
+            spec_1 = ''
+
+        options = list(FEMORAL.keys())
+        spec_0 = st.selectbox('股骨柄型号', options, options.index(spec_0))
+
+        if len(spec_0):
+            options = FEMORAL[spec_0]
+            spec_1 = st.selectbox('股骨柄规格', options, options.index(spec_1))
+        else:
+            spec_1 = ''
+
+    # 股骨柄头偏距
+    with cols[0]:
+        femoral_offset = pairs[prl].get('femoral_offset', 0.0)
+        femoral_offset = st.selectbox('股骨柄偏距 (mm)', FEMORAL_OFFSET, FEMORAL_OFFSET.index(femoral_offset))
 
     # 提交结果
     with st.form('submit'):
+        data = {
+            'cup_outer': cup_outer,
+            'head_outer': head_outer,
+            'liner_offset': liner_offset,
+            'cup_center': cup_center.tolist(),
+            'cup_axis': cup_axis.tolist(),
+            'femoral_spec': [spec_0, spec_1],
+            'femoral_offset': femoral_offset,
+        }
+        st.code(tomlkit.dumps(data), 'toml')
+
         if 'excluded' in pairs[prl] and 'excluded' not in st.session_state:
             st.session_state['excluded'] = pairs[prl]['excluded']
 
-        excluded = st.multiselect('是否排除', ['骨盆骨折'],
-                                  accept_new_options=True, key='excluded')
+        excluded = st.multiselect('是否排除', ['半髋置换', ], accept_new_options=True, key='excluded')
 
-        if st.form_submit_button('提交（覆盖）' if 'cup_center' in pairs[prl] else '提交'):
+        if st.form_submit_button('提交（覆盖）' if save_key in pairs[prl] else '提交'):
             data = {**pairs[prl], **data}
             if len(excluded):
                 data.update({'excluded': excluded})
+
+            # 更新内存中的总表
+            pairs[prl].update(data)
+
             data = tomlkit.dumps(data).encode('utf-8')
 
             client.put_object('pair', '/'.join([pid, rl, 'context.toml']), BytesIO(data), len(data))
 
+            # 保留 init 状态，只清空当前会话的其他状态
             st.session_state.clear()
+            st.session_state['init'] = client, pairs
             st.rerun()
