@@ -13,7 +13,6 @@ import warp as wp
 from minio import S3Error
 
 from b0_config import client_pairs
-from define import ct_bone_best, ct_metal
 from kernel import compute_sdf, icp
 
 save_key = 'hip_align'
@@ -62,11 +61,11 @@ elif (it := st.session_state.get('roi')) is None:
     prl = st.session_state['prl']
     pid, rl = prl.split('_')
 
-    st.code(f'股骨阈值 = {ct_bone_best}  金属阈值 = {ct_metal}')
     st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
     rois = {'femur': [], 'hip': []}
     metal_meshes = {'femur': [], 'hip': []}
+    metal_meshes_split = {'femur': [], 'hip': []}
     bone_meshes = {'femur': [], 'hip': []}
 
     # 分别处理术前(op=0)和术后(op=1)数据
@@ -89,15 +88,29 @@ elif (it := st.session_state.get('roi')) is None:
                         object_name = '/'.join([pid, rl, op, part, f.name])
                         data = client.fget_object('pair', object_name, f.as_posix())
 
-                        metal_meshes[part].append(trimesh.load_mesh(f.as_posix()))
-                    except S3Error:
+                        mesh = trimesh.load_mesh(f.as_posix())
+                        metal_meshes[part].append(mesh)
+
+                        # 金属可能分离成髋臼杯、球头、股骨柄、膝关节假体，选范围最大的股骨柄以上
+                        if not mesh.is_empty:
+                            # 将网格拆分为独立的连通分量，并按包围盒对角线长度降序排序，取最大的组件（通常是股骨柄）
+                            ls = list(sorted(
+                                mesh.split(only_watertight=True),
+                                key=lambda _: np.linalg.norm(_.bounds[1] - _.bounds[0]), reverse=True,
+                            ))
+                            metal_meshes_split[part].append([mesh, *ls])
+                        else:
+                            metal_meshes_split[part].append([])
+                    except (S3Error, Exception):
                         if part in ('femur',):
                             st.error(f'{op} {part} {f.name} 下载失败')
                             st.stop()
 
                         metal_meshes[part].append(None)
+                        metal_meshes_split[part].append([])
                 else:
                     metal_meshes[part].append(None)
+                    metal_meshes_split[part].append([])
 
                 try:
                     f = Path(tdir) / 'bone.stl'
@@ -109,7 +122,7 @@ elif (it := st.session_state.get('roi')) is None:
 
                 bone_meshes[part].append(trimesh.load_mesh(f.as_posix()))
 
-    st.session_state['roi'] = rois, metal_meshes, bone_meshes
+    st.session_state['roi'] = rois, metal_meshes, metal_meshes_split, bone_meshes
     st.rerun()
 
 # --- 第四阶段：交互式配准与结果确认 ---
@@ -117,16 +130,68 @@ else:
     client, pairs = st.session_state['init']
     prl = st.session_state['prl']
     pid, rl = prl.split('_')
-    rois, metal_meshes, bone_meshes = st.session_state['roi']
+    rois, metal_meshes, metal_meshes_split, bone_meshes = st.session_state['roi']
+
+    with st.expander('存档'):
+        st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
     cols = st.columns(3)
 
-    with cols[0]:
-        st.code(f'骨阈值 = {ct_bone_best}  金属阈值 = {ct_metal}')
-        st.code(tomlkit.dumps(pairs[prl]), 'toml')
-        st.info('术后（绿）指定区域（浅绿）采样点（深红）配准到术前（浅黄）')
-
     save = {'femur': {}, 'hip': {}}
+
+    part, name = ('femur', '股骨柄')
+    with cols[0]:
+        if len(metal_meshes_split[part][1]) > 1:
+            options = ['单连体 {} 点 {} 面'.format(len(_.vertices), len(_.faces))
+                       for _ in metal_meshes_split[part][1]]
+            options[0] = options[0].replace('单连体', '合并体')
+            idx = pairs[prl].get(part, {}).get('metal_select', 1)
+            idx = min(idx, len(options) - 1)
+            metal_select = st.selectbox(f'选择{name}（选最大单连体，注意排除钢板，单连体损坏选合并体）',
+                                        range(len(options)), idx, format_func=lambda _: options[_])
+        else:
+            st.error('没有可选的股骨柄')
+            st.stop()
+
+        save[part]['metal_select'] = metal_select
+
+    with cols[1]:
+        pl = pv.Plotter(
+            off_screen=True, border=False, window_size=[768, 768],
+            line_smoothing=True, point_smoothing=True, polygon_smoothing=True,
+        )
+        pl.enable_parallel_projection()  # 使用正交投影便于观察几何关系
+        pl.enable_depth_peeling()
+        pl.enable_anti_aliasing('msaa')
+
+        if (select := save[part]['metal_select']) > -1:
+            metal_femur = metal_meshes_split[part][1][select]
+            pl.add_mesh(metal_femur, color='lightblue')
+
+        pl.camera_position = 'xz'
+        pl.reset_camera()
+        pl.reset_camera_clipping_range()
+        pl.render()
+
+        imgs = []
+
+        for i, deg in enumerate([0, 90 if rl == 'R' else -90]):
+            b = np.array(metal_femur.bounds)
+
+            x, y, z = [b[1][_] - b[0][_] for _ in (0, 1, 2)]
+            wx, wy, h = [round(_ * 5) for _ in (x, y, z)]
+
+            pl.camera_position = 'xz'
+            pl.reset_camera()
+            pl.camera.Azimuth(deg)
+            pl.reset_camera_clipping_range()
+            pl.render()
+            img = pl.screenshot(return_img=True).copy()
+            imgs.append(img)
+
+        st.image(np.hstack(imgs))
+        pl.close()
+
     for part_id, part in enumerate(('femur', 'hip')):
         part_name = ['股骨', '髋骨'][part_id]
 
@@ -135,14 +200,22 @@ else:
             spacings = [np.array(rois[part][_]['spacing']) for _ in range(2)]
             origins = [np.array(rois[part][_]['origin']) for _ in range(2)]
 
-            zl = [round(_.bounds[1][2] - _.bounds[0][2]) for _ in bone_meshes[part]]
-
             post_mesh: trimesh.Trimesh = bone_meshes[part][1].copy()
+
+            if part in ('femur',):
+                _max = round(post_mesh.bounds[1][2] - metal_femur.bounds[0][2])
+                _ = pairs[prl].get(part, {}).get('metal_depth', round(_max * 2 / 3))
+                metal_depth = st.slider(f'{part_name}柄深度（0 ~ {_max} mm）（小转子以下）', 0, _max, _, step=1)
+
+                _ = pairs[prl].get(part, {}).get('metal_truncated', False)
+                metal_truncated = st.checkbox(f'{part_name}柄是否被截断', _)
+
+            zl = [round(_.bounds[1][2] - _.bounds[0][2]) for _ in bone_meshes[part]]
 
             if part in ('femur',):
                 _ = pairs[prl].get(part, {}).get('d_proximal', min(zl[1], 15))
                 d_proximal = st.number_input(
-                    f'{part_name}近端截除 (0 ~ {zl[1]:.0f} mm)', 0, zl[1], _, step=5, key=f'{part}_d_proximal',
+                    f'{part_name}近端截除（0 ~ {zl[1]:.0f} mm）', 0, zl[1], _, step=5, key=f'{part}_d_proximal',
                     help='截除术后比术前多余的近端特征，或截除术后到大粗隆顶端',
                 )
 
@@ -174,19 +247,20 @@ else:
             # 采样点纵向范围
             zl.append(round(post_mesh.bounds[1][2] - post_mesh.bounds[0][2]))
             _min, _max = int(d_proximal), int(d_proximal + min(zl[0], zl[2]))
+
             _def = pairs[prl].get(part, {}).get('d_sample_range', (_min, _max))
             _def = (max(_min, min(int(_def[0]), _max)), max(_min, min(int(_def[1]), _max)))
 
             if _def[0] > _def[1]: _def = (_min, _max)
 
             d_sample_range = st.slider(
-                f'{part_name}采样点范围 ({_min} ~ {_max} mm)', _min, _max, _def, step=1,
+                f'{part_name}采样点范围（{_min} ~ {_max} mm）', _min, _max, _def, step=1,
                 help='近端 ~ 远端', key=f'{part}_d_sample_range',
             )
 
             # 避开金属假体的距离
             _ = pairs[prl].get(part, {}).get('d_metal', 5 if part in ('femur',) else 15)
-            d_metal = st.number_input(f'{part_name}采样点远离金属 (0 ~ 50 mm)', 0, 50, _, step=5, key=f'{part}_d_metal')
+            d_metal = st.number_input(f'{part_name}采样点远离金属（0 ~ 50 mm）', 0, 50, _, step=5, key=f'{part}_d_metal')
 
             with st.spinner(_ := '采样', show_time=True):  # noqa
                 max_dist = float(np.linalg.norm(sizes[1] * spacings[1]))
@@ -253,16 +327,21 @@ else:
             g_matrix = pre @ matrix @ post_inv
 
             align = np.array(wp.transform_from_matrix(wp.mat44(g_matrix)), dtype=float).tolist()
+
             save[f'{part}_align'] = align
+
             if part in ('femur',):
                 save[part]['d_proximal'] = d_proximal
+                save[part]['metal_depth'] = metal_depth
+                save[part]['metal_truncated'] = metal_truncated
+
             save[part]['d_sample_range'] = d_sample_range
             save[part]['d_metal'] = d_metal
             save[part]['post_points'] = len(vertices)
             save[part]['iterations'] = int(iters)
             save[part]['mse'] = float(mse)
 
-        with cols[part_id + 1]:
+        with cols[2 - part_id]:
             with st.spinner(_ := '场景', show_time=True):  # noqa
                 # 使用 PyVista 构建三维场景
                 b = np.array(post_mesh.bounds)
@@ -280,8 +359,12 @@ else:
                 pl.enable_anti_aliasing('msaa')
 
                 # 添加各种组件到场景
-                if metal_meshes[part][1] is not None:
-                    metal_actor = pl.add_mesh(metal_meshes[part][1], color='lightblue')  # 金属假体（浅蓝）
+                if part in ('femur',):
+                    cb = bone_meshes[part][1].bounds.copy()
+                    cb[0][2] = metal_femur.bounds[0][2]
+                    cb[1][2] = cb[0][2] + save[part]['metal_depth']
+
+                    pl.add_mesh(pv.Cube(bounds=cb.T.flatten()), color='orange', opacity=0.1)
 
                 if post_mesh_outlier is not None and len(post_mesh_outlier.faces):
                     pl.add_mesh(post_mesh_outlier, color='green')  # 术后被裁剪掉的部分（深绿）
@@ -299,14 +382,18 @@ else:
                 pl.render()
 
                 # 渲染并拼接正侧位（AP & Lateral）视图
-                sil = pl.add_silhouette(metal_actor.GetMapper().GetInput(), color='lightgray')  # noqa
+                sil = None
+                if metal_meshes[part][1] is not None:
+                    metal_actor = pl.add_mesh(metal_meshes[part][1], color='lightblue')  # 金属假体（浅蓝）
+                    sil = pl.add_silhouette(metal_actor.GetMapper().GetInput(), color='lightgray')  # noqa
 
                 imgs = []
                 # 循环生成两个视角的截图：正面 (0度) 和侧面 (90或-90度)
                 for i, deg in enumerate([0, 90 if rl == 'R' else -90]):
                     for actor in pl.actors.values():
                         actor.SetVisibility(False)
-                    sil.SetVisibility(True)
+                    if sil is not None:
+                        sil.SetVisibility(True)
 
                     pl.window_size = [[wx, wy][i], h]
 
@@ -347,7 +434,7 @@ else:
             if 'excluded' in pairs[prl] and 'excluded' not in st.session_state:
                 st.session_state['excluded'] = pairs[prl]['excluded']
 
-            options = ['配准差', '骨折', '小转子下骨折', '小转子下截骨', '钢板', '髓内钉']
+            options = ['配准差', '骨折', '假体破损', '小转子下骨折', '小转子下截骨', '钢板', '髓内钉']
             if 'excluded' in pairs[prl] and pairs[prl]['excluded'] not in options:
                 options.append(pairs[prl]['excluded'])
 
