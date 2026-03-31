@@ -120,7 +120,9 @@ elif (it := st.session_state.get('roi')) is None:
                     st.error(f'{op} {part} {f.name} 下载失败')
                     st.stop()
 
-                bone_meshes[part].append(trimesh.load_mesh(f.as_posix()))
+                _ = trimesh.load_mesh(f.as_posix())
+                _ = max(_.split(), key=lambda _: _.area)
+                bone_meshes[part].append(_)
 
     st.session_state['roi'] = rois, metal_meshes, metal_meshes_split, bone_meshes
     st.rerun()
@@ -421,8 +423,10 @@ else:
 
                 pl.close()
 
-            if metal_meshes[part][1] is None:
-                st.warning('髋臼侧未发现金属假体')
+            if (_ := metal_meshes[part][1]) is None:
+                st.warning('未发现金属假体')
+            else:
+                st.caption('金属体 {} 点 {} 面'.format(len(_.vertices), len(_.faces)))
 
     # 提交
     with cols[0]:
