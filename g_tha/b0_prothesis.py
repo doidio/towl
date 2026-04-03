@@ -101,10 +101,9 @@ def parse_stem(name, spec):
         elif 'AK-ML' in text or 'AK MEDICAL' in text: model = 'AK Medical ML-TP'
         elif 'LINK' in text or 'LCU' in text: model = 'Waldemar Link LCU'
     
-    # 兜底：如果名称中有 "股骨柄" 且未识别出品牌，暂默认为 Corail
-    if not model and '股骨柄' in text:
-        model = 'DePuy Corail'
-
+    # 识别结果修正：如果只识别出型号但没有识别出规格，且型号识别依据较弱时，应置空
+    # 特别是针对 generic 的 "股骨柄" 名称，不要默认归类为某个品牌
+    
     if model:
         sizes = [s for s in FEMORAL[model] if s != '']
         sizes.sort(key=lambda x: len(str(x)), reverse=True)
