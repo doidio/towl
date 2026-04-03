@@ -12,7 +12,8 @@ import warp as wp
 from PIL import Image, ImageDraw, ImageFont
 from minio import S3Error
 
-from b0_config import client_pairs, FEMORAL, FEMORAL_OFFSET
+from b0_prothesis import FEMORAL, HEAD_OFFSET
+from b0_config import client_pairs
 from define import ct_bone_best, ct_metal, ct_seg_femur_right, ct_seg_femur_left, ct_seg_hip_right, ct_seg_hip_left
 from kernel import resample_cup_head
 
@@ -287,10 +288,12 @@ else:
         else:
             spec_1 = ''
 
-    # 股骨柄头偏距
+    # 股骨头偏距
     with cols[0]:
-        femoral_offset = pairs[prl].get('femoral_offset', 0.0)
-        femoral_offset = st.selectbox('股骨柄偏距 (mm)', FEMORAL_OFFSET, FEMORAL_OFFSET.index(femoral_offset))
+        head_offset = pairs[prl].get('head_offset', '')
+        if head_offset not in HEAD_OFFSET:
+            head_offset = ''
+        head_offset = st.selectbox('股骨头偏距/颈长偏移 (mm)', HEAD_OFFSET, HEAD_OFFSET.index(head_offset))
 
     # 提交结果
     with st.form('submit'):
@@ -301,7 +304,7 @@ else:
             'cup_center': cup_center.tolist(),
             'cup_axis': cup_axis.tolist(),
             'femoral_spec': [spec_0, spec_1],
-            'femoral_offset': femoral_offset,
+            'head_offset': head_offset,
         }
         st.code(tomlkit.dumps(data), 'toml')
 
