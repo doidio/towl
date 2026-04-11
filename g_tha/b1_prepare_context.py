@@ -12,10 +12,10 @@ import warp as wp
 from PIL import Image, ImageDraw, ImageFont
 from minio import S3Error
 
-from b0_prothesis import FEMORAL, HEAD_OFFSET
 from b0_config import client_pairs
-from define import ct_bone_best, ct_metal, ct_seg_femur_right, ct_seg_femur_left, ct_seg_hip_right, ct_seg_hip_left
-from kernel import resample_cup_head
+from b0_prothesis import FEMORAL, HEAD_OFFSET
+from define import ct_metal, ct_seg_femur_right, ct_seg_femur_left, ct_seg_hip_right, ct_seg_hip_left
+from kernel import resample_cup_head, resample_cup_head_3d
 
 save_key = 'cup_center'
 
@@ -68,11 +68,17 @@ elif (it := st.session_state.get('roi')) is None:
         {'R': ct_seg_femur_right, 'L': ct_seg_femur_left}[rl],
     ]
 
-    st.code(f'股骨阈值 = {ct_bone_best}  金属阈值 = {ct_metal}')
     st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
     # 术后
-    object_name = pairs[prl]['post']
+    roi_boxes = []
+    for part in ('hip', 'femur'):
+        origin = np.array(pairs[prl]['post'][part]['roi']['origin'])
+        spacing = np.array(pairs[prl]['post'][part]['roi']['spacing'])
+        size = np.array(pairs[prl]['post'][part]['roi']['size'])
+        roi_boxes.append([origin, origin + spacing * size])
+
+    object_name = pairs[prl]['post']['nii']
 
     with tempfile.TemporaryDirectory() as tdir:
         with st.spinner(_ := '下载原图', show_time=True):  # noqa
@@ -95,29 +101,7 @@ elif (it := st.session_state.get('roi')) is None:
 
             volume = wp.Volume.load_from_numpy(image, bg_value=image_bg)
 
-        with st.spinner(_ := '下载分割', show_time=True):  # noqa
-            f = Path(tdir) / 'total.nii.gz'
-            try:
-                client.fget_object('total', object_name, f.as_posix())
-            except S3Error:
-                st.error(_ + '失败')
-                st.stop()
-
-        with st.spinner(_ := '读取分割', show_time=True):  # noqa
-            total = itk.imread(f.as_posix(), itk.UC)
-            total = itk.array_from_image(total).transpose(2, 1, 0)
-
-            if True in (_ := [np.sum(total == seg_labels[_]) == 0 for _ in range(2)]):
-                st.error('分割 {}包含髋臼 {}包含股骨'.format('' if _[0] else '不', '' if _[1] else '不'))
-                st.stop()
-
-            roi_boxes = []
-            for anatomy in range(2):
-                ijk = np.argwhere(total == seg_labels[anatomy])
-                box = np.array([ijk.min(axis=0), ijk.max(axis=0) + 1])
-                roi_boxes.append(box.tolist())
-
-    st.session_state['roi'] = image, volume, total, size, spacing, origin, image_bg, roi_boxes
+    st.session_state['roi'] = image, volume, size, spacing, origin, image_bg, roi_boxes
     st.rerun()
 
 # --- 第四阶段：手动标注 ---
@@ -125,37 +109,62 @@ else:
     client, pairs = st.session_state['init']
     prl = st.session_state['prl']
     pid, rl = prl.split('_')
-    image, volume, total, size, spacing, origin, image_bg, roi_boxes = st.session_state['roi']
+    image, volume, size, spacing, origin, image_bg, roi_boxes = st.session_state['roi']
 
-    st.code(tomlkit.dumps(pairs[prl]), 'toml')
+    with st.expander('存档'):
+        st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
     roi_boxes = np.array(roi_boxes)
 
     cols = st.columns([2, 3, 3, 3])
 
+    # 股骨柄型号规格
+    with cols[0]:
+        spec_0, spec_1 = pairs[prl].get('femoral_spec', ['', ''])
+
+        if spec_0 not in FEMORAL:
+            spec_0 = ''
+
+        if spec_1 not in FEMORAL[spec_0]:
+            spec_1 = ''
+
+        options = list(FEMORAL.keys())
+        spec_0 = st.selectbox('股骨柄型号', options, options.index(spec_0) if spec_0 in options else 0)
+
+        if len(spec_0):
+            options = FEMORAL[spec_0]
+            spec_1 = st.selectbox('股骨柄规格', options, options.index(spec_1) if spec_1 in options else 0)
+        else:
+            spec_1 = ''
+
+    # 股骨头偏距
+    with cols[0]:
+        head_offset = pairs[prl].get('head_offset', '')
+        if head_offset not in HEAD_OFFSET:
+            head_offset = ''
+        head_offset = st.selectbox('股骨头偏距/颈长偏移 (mm)', HEAD_OFFSET, HEAD_OFFSET.index(head_offset))
+
+    # 三视图
     view_size = cols[0].radio('视野范围 (mm)', [100, 200, 300], horizontal=True)
 
-    cup_outer = pairs[prl].get('cup_outer', 90)
+    cup_outer = int(pairs[prl].get('cup_outer', 90))
     cup_outer = cols[0].number_input('髋臼杯外径', 10, 90, cup_outer, 2, key='cup_outer')
 
-    head_outer = pairs[prl].get('head_outer', 10)
+    head_outer = int(pairs[prl].get('head_outer', 10))
     head_outer = cols[0].number_input('股骨头外径', 10, 90, head_outer, 2, key='head_outer')
 
     liner_offset = pairs[prl].get('liner_offset', 0.0)
     liner_offset = cols[0].number_input('内衬偏心距', 0.0, 9.0, liner_offset, 0.5, format='%.1f', key='liner_offset')
 
-    step = cols[0].radio('调节步长 (mm/deg)', _ := [0.25, 0.5, 5, 20], horizontal=True)
+    step = cols[0].radio('调节步长 (mm/deg)', _ := [5, 2.5, 1, 0.5, 0.25], horizontal=True)
     step_atom = _[0]
 
-    b = np.minimum(roi_boxes[0][0], roi_boxes[1][0] - 1), np.maximum(roi_boxes[0][1], roi_boxes[1][1] - 1)
-    b = b * spacing + origin
-
-    cup_center_default = (
+    cup_center_default = [
         (roi_boxes[1][0][0] + roi_boxes[1][1][0]) * 0.5,
         (roi_boxes[1][0][1] + roi_boxes[1][1][1]) * 0.5,
         roi_boxes[1][1][2] - 1,
-    )
-    cup_center_default = cup_center_default * spacing + origin - [0, 0, 20]
+    ]
+    cup_center_default = np.array(cup_center_default) - [20 if rl == 'L' else -20, 10, 20]
     cup_center_default = np.round(cup_center_default / step_atom) * step_atom
     cup_center_default = cup_center_default.tolist()
 
@@ -218,6 +227,85 @@ else:
     roi_spacing = 0.2
     roi_size = np.ceil((np.ones(3) * view_size) / roi_spacing).astype(int)
 
+
+    def get_coverage(cc, ca):
+        roi = wp.zeros((*roi_size,), dtype=wp.float32)
+        metal = wp.zeros((*roi_size,), dtype=wp.float32)
+        o = cc - 0.5 * roi_size * roi_spacing
+        hc = cc + liner_offset * ca
+        wp.launch(resample_cup_head_3d, roi.shape, [
+            volume.id, wp.vec3(origin), wp.vec3(spacing), ct_metal,
+            roi, wp.vec3(o), roi_spacing, metal,
+            wp.vec3(cc), wp.vec3(ca), wp.vec3(hc), head_outer / 2.0, cup_outer / 2.0,
+        ])
+        roi, metal = roi.numpy(), metal.numpy()
+        if (_ := np.sum(roi)) > 0:
+            return float(np.sum(metal) / _)
+        return 0.0
+
+
+    coverage_max = get_coverage(cup_center, cup_axis)
+    empty = cols[0].empty()
+    empty.info(f'金属占比 {coverage_max * 1e2:.3f}%')
+
+    if cols[0].button('自动微调位置朝向', width='stretch'):
+        # 斐波那契球面均匀采样方向
+        samples = 26
+        phi = np.pi * (3. - np.sqrt(5.))
+        i = np.arange(samples)
+        y = 1 - (i / float(samples - 1)) * 2
+        radius = np.sqrt(1 - y * y)
+        theta = phi * i
+        x = np.cos(theta) * radius
+        z = np.sin(theta) * radius
+        sphere_directions = np.column_stack((x, y, z))
+
+        better = True
+        while better:
+            better = False
+            for offset in sphere_directions:
+                offset = np.array(offset, float)
+                offset /= np.linalg.norm(offset)
+                cup_center_test = cup_center + offset * step
+
+                coverage = get_coverage(cup_center_test, cup_axis)
+
+                if coverage_max < coverage:
+                    coverage_max = coverage
+                    cup_center = cup_center_test
+                    head_center = cup_center + liner_offset * cup_axis
+                    st.session_state['cup_center'] = cup_center.tolist()
+
+                    better = True
+                    empty.success(f'金属占比 {coverage_max * 1e2:.3f}%')
+
+        better = True
+        while better:
+            better = False
+            for axis in [
+                [-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1],
+            ]:
+                k = np.array(axis, float)
+                v = cup_axis.copy()
+                theta = np.deg2rad(step)
+
+                # 罗德里格旋转公式 (Rodrigues' rotation formula)
+                v = v * np.cos(theta) + np.cross(k, v) * np.sin(theta) + k * np.dot(k, v) * (1 - np.cos(theta))
+                v /= np.linalg.norm(v)
+
+                coverage = get_coverage(cup_center, v)
+
+                if coverage_max < coverage:
+                    coverage_max = coverage
+                    cup_axis = v.copy()
+                    head_center = cup_center + liner_offset * cup_axis
+                    st.session_state['cup_axis'] = cup_axis.tolist()
+
+                    better = True
+                    empty.success(f'金属占比 {coverage_max * 1e2:.3f}%')
+
+        empty.info(f'金属占比 {coverage_max * 1e2:.3f}%')
+
     ort = [
         ['S', 'I', 'A', 'P'],
         ['S', 'I', 'R', 'L'],
@@ -249,51 +337,34 @@ else:
             roi_slice = np.flipud(roi_slice)
 
         img = Image.fromarray(roi_slice)
+
+        # orientation
         draw = ImageDraw.Draw(img)
         cw, ch = [_ / 2 for _ in img.size]
 
-        fill = (0, 127, 255)
+        fill = (255, 255, 255)
         try:
-            font = ImageFont.truetype('timesbd.ttf', 12)
+            font = ImageFont.truetype('timesbd.ttf', 24)
         except (OSError, Exception):
             font = ImageFont.load_default()
 
-        draw.text((cw, ch - 10), ort[i][0], fill, font, anchor='mm')
-        draw.text((cw, ch + 10), ort[i][1], fill, font, anchor='mm')
-        draw.text((cw - 10, ch), ort[i][2], fill, font, anchor='mm')
-        draw.text((cw + 10, ch), ort[i][3], fill, font, anchor='mm')
+        draw.text((cw, 20), ort[i][0], fill, font, anchor='mm')
+        draw.text((cw, ch * 2 - 20), ort[i][1], fill, font, anchor='mm')
+        draw.text((20, ch), ort[i][2], fill, font, anchor='mm')
+        draw.text((cw * 2 - 20, ch), ort[i][3], fill, font, anchor='mm')
 
         stack.append(np.array(img))
 
+    images = []
+    captions = ['矢状面 (Sagittal)', '冠状面 (Coronal)', '横断面 (Axial)']
     for _ in range(3):
-        caption = ['矢状面 (Sagittal)', '冠状面 (Coronal)', '横断面 (Axial)'][_]
-        img_slots[_].image(stack[_], caption, width='stretch')
+        img_slots[_].image(stack[_], captions[_], width='stretch')
 
-    # 股骨柄型号规格
-    with cols[0]:
-        spec_0, spec_1 = pairs[prl].get('femoral_spec', ['', ''])
+        _ = Image.fromarray(stack[_])
+        buf = BytesIO()
+        _.save(buf, format='PNG')
+        images.append(buf.getvalue())
 
-        if spec_0 not in FEMORAL:
-            spec_0 = ''
-
-        if spec_1 not in FEMORAL[spec_0]:
-            spec_1 = ''
-
-        options = list(FEMORAL.keys())
-        spec_0 = st.selectbox('股骨柄型号', options, options.index(spec_0))
-
-        if len(spec_0):
-            options = FEMORAL[spec_0]
-            spec_1 = st.selectbox('股骨柄规格', options, options.index(spec_1))
-        else:
-            spec_1 = ''
-
-    # 股骨头偏距
-    with cols[0]:
-        head_offset = pairs[prl].get('head_offset', '')
-        if head_offset not in HEAD_OFFSET:
-            head_offset = ''
-        head_offset = st.selectbox('股骨头偏距/颈长偏移 (mm)', HEAD_OFFSET, HEAD_OFFSET.index(head_offset))
 
     # 提交结果
     with st.form('submit'):
@@ -305,6 +376,7 @@ else:
             'cup_axis': cup_axis.tolist(),
             'femoral_spec': [spec_0, spec_1],
             'head_offset': head_offset,
+            'coverage': coverage_max,
         }
         st.code(tomlkit.dumps(data), 'toml')
 

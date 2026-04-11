@@ -366,35 +366,58 @@ def resample_cup_head(
     b = grey
 
     to_p_cup = p - cup_center
-    radius_cup = wp.length(to_p_cup)
+    cup_r = wp.length(to_p_cup)
     dot_cup = wp.dot(to_p_cup, cup_axis)
 
     to_p_head = p - head_center
-    radius_head = wp.length(to_p_head)
+    head_r = wp.length(to_p_head)
 
-    # 计算杯轴在当前切面投影的有效长度，用于归一化 2D 线宽
-    n_proj_len = wp.sqrt(wp.dot(cup_axis, axis_i) * wp.dot(cup_axis, axis_i) +
-                         wp.dot(cup_axis, axis_j) * wp.dot(cup_axis, axis_j))
-    n_proj_len = wp.max(n_proj_len, 0.1)
+    in_head = head_r <= head_radius
+    in_cup = dot_cup <= 0.0 and cup_r <= cup_radius
 
-    tk = head_spacing * 2.1
-
-    # 纱线轮廓
-    if i % 3 < 1 or j % 3 < 1:
-        if wp.abs(radius_head - head_radius) <= tk:
-            r, g, b = 0.0, 127.0, 255.0
-
-        if dot_cup < 0 and wp.abs(radius_cup - cup_radius) <= tk:
-            r, g, b = 255.0, 127.0, 127.0
-
-        if wp.abs(dot_cup) <= tk * n_proj_len and radius_head >= head_radius - tk and radius_cup <= cup_radius + tk:
-            r, g, b = 255.0, 127.0, 127.0 * 1.0
+    # 填充
+    if in_head or in_cup:
+        if in_head:
+            r, g, b = r * 0.5 + 127.0, g * 0.5, b * 0.5
+        else:
+            r, g, b = r * 0.5, g * 0.5 + 64.0, b * 0.5 + 127.0
 
     r = wp.clamp(r, 0.0, 255.0)
     g = wp.clamp(g, 0.0, 255.0)
     b = wp.clamp(b, 0.0, 255.0)
 
     head_image[i, j] = wp.vec3ub(wp.uint8(r), wp.uint8(g), wp.uint8(b))
+
+
+@wp.kernel
+def resample_cup_head_3d(
+        volume: wp.uint64, origin: wp.vec3, spacing: wp.vec3, ct_metal: float,
+        roi: wp.array3d(dtype=wp.float32), roi_origin: wp.vec3, roi_spacing: wp.float32,
+        metal: wp.array3d(dtype=wp.float32),
+        cup_center: wp.vec3, cup_axis: wp.vec3, head_center: wp.vec3, head_radius: wp.float32, cup_radius: wp.float32,
+):
+    i, j, k = wp.tid()
+
+    p = (roi_origin
+         + wp.vec3(1.0, 0.0, 0.0) * wp.float32(i) * roi_spacing
+         + wp.vec3(0.0, 1.0, 0.0) * wp.float32(j) * roi_spacing
+         + wp.vec3(0.0, 0.0, 1.0) * wp.float32(k) * roi_spacing)
+
+    uvw = wp.vec3(wp.cw_div(p - origin, spacing))
+    grey = float(wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR))
+
+    to_p_cup = p - cup_center
+    cup_r = wp.length(to_p_cup)
+    dot_cup = wp.dot(to_p_cup, cup_axis)
+
+    to_p_head = p - head_center
+    head_r = wp.length(to_p_head)
+
+    if head_r <= head_radius or (dot_cup <= 0.0 and cup_r <= cup_radius):
+        roi[i, j, k] = 1.0
+
+        if ct_metal < grey:
+            metal[i, j, k] = 1.0
 
 
 @wp.kernel
