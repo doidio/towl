@@ -8,6 +8,7 @@ import itk
 import numpy as np
 import streamlit as st
 import tomlkit
+import trimesh
 import warp as wp
 from PIL import Image, ImageDraw, ImageFont
 from minio import S3Error
@@ -61,7 +62,7 @@ elif (it := st.session_state.get('prl')) is None:
 elif (it := st.session_state.get('roi')) is None:
     client, pairs = st.session_state['init']
     prl = st.session_state['prl']
-    rl = prl.split('_')[1]
+    pid, rl = prl.split('_')
 
     seg_labels = [
         {'R': ct_seg_hip_right, 'L': ct_seg_hip_left}[rl],
@@ -89,7 +90,6 @@ elif (it := st.session_state.get('roi')) is None:
                 st.error(_ + '失败')
                 st.stop()
 
-        with st.spinner(_ := '读取原图', show_time=True):  # noqa
             image = itk.imread(f.as_posix(), itk.SS)
 
             size = np.array(itk.size(image), float)
@@ -101,7 +101,20 @@ elif (it := st.session_state.get('roi')) is None:
 
             volume = wp.Volume.load_from_numpy(image, bg_value=image_bg)
 
-    st.session_state['roi'] = image, volume, size, spacing, origin, image_bg, roi_boxes
+        with st.spinner(_ := '下载股骨', show_time=True):  # noqa
+            try:
+                f = Path(tdir) / 'bone.stl'
+                object_name = '/'.join([pid, rl, 'post', 'femur', f.name])
+                data = client.fget_object('pair', object_name, f.as_posix())
+            except S3Error:
+                st.error(f'post/femur/{f.name} 下载失败')
+                st.stop()
+
+            _ = trimesh.load_mesh(f.as_posix())
+            _ = max(_.split(), key=lambda _: _.area)
+            bone_mesh = _
+
+    st.session_state['roi'] = image, volume, size, spacing, origin, image_bg, roi_boxes, bone_mesh
     st.rerun()
 
 # --- 第四阶段：手动标注 ---
@@ -109,7 +122,7 @@ else:
     client, pairs = st.session_state['init']
     prl = st.session_state['prl']
     pid, rl = prl.split('_')
-    image, volume, size, spacing, origin, image_bg, roi_boxes = st.session_state['roi']
+    image, volume, size, spacing, origin, image_bg, roi_boxes, bone_mesh = st.session_state['roi']
 
     with st.expander('存档'):
         st.code(tomlkit.dumps(pairs[prl]), 'toml')
@@ -159,13 +172,14 @@ else:
     step = cols[0].radio('调节步长 (mm/deg)', _ := [5, 2.5, 1, 0.5, 0.25], horizontal=True)
     step_atom = _[0]
 
-    cup_center_default = [
-        (roi_boxes[1][0][0] + roi_boxes[1][1][0]) * 0.5,
-        (roi_boxes[1][0][1] + roi_boxes[1][1][1]) * 0.5,
-        roi_boxes[1][1][2] - 1,
-    ]
-    cup_center_default = np.array(cup_center_default) - [20 if rl == 'L' else -20, 10, 20]
-    cup_center_default = np.round(cup_center_default / step_atom) * step_atom
+    # 初始估计球心
+    v_max = bone_mesh.vertices[np.argmax(bone_mesh.vertices[:, 2])]
+    cup_center_default = v_max.copy()
+    cup_center_default += roi_boxes[1][0]
+    cup_center_default[2] -= 20
+
+    cup_center_default = np.array(cup_center_default)
+    cup_center_default = np.round(cup_center_default / 0.25) * 0.25
     cup_center_default = cup_center_default.tolist()
 
     if 'cup_center' not in st.session_state:
@@ -236,7 +250,7 @@ else:
         wp.launch(resample_cup_head_3d, roi.shape, [
             volume.id, wp.vec3(origin), wp.vec3(spacing), ct_metal,
             roi, wp.vec3(o), roi_spacing, metal,
-            wp.vec3(cc), wp.vec3(ca), wp.vec3(hc), head_outer / 2.0, cup_outer / 2.0,
+            wp.vec3(cc), wp.vec3(ca), wp.vec3(hc), head_outer / 2.0, cup_outer / 2.0 - 1.0,  # 修正髋臼杯外层
         ])
         roi, metal = roi.numpy(), metal.numpy()
         if (_ := np.sum(roi)) > 0:
@@ -246,9 +260,9 @@ else:
 
     coverage_max = get_coverage(cup_center, cup_axis)
     empty = cols[0].empty()
-    empty.info(f'金属占比 {coverage_max * 1e2:.3f}%')
+    empty.info(f'金属占比（3D）{coverage_max * 1e2:.3f}%')
 
-    if cols[0].button('自动微调位置朝向', width='stretch'):
+    if cols[0].button('自动微调', width='stretch'):
         # 斐波那契球面均匀采样方向
         samples = 26
         phi = np.pi * (3. - np.sqrt(5.))
@@ -344,7 +358,7 @@ else:
 
         fill = (255, 255, 255)
         try:
-            font = ImageFont.truetype('timesbd.ttf', 24)
+            font = ImageFont.truetype('timesbd.ttf', 20)
         except (OSError, Exception):
             font = ImageFont.load_default()
 
@@ -364,7 +378,6 @@ else:
         buf = BytesIO()
         _.save(buf, format='PNG')
         images.append(buf.getvalue())
-
 
     # 提交结果
     with st.form('submit'):
