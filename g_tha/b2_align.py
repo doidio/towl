@@ -1,5 +1,5 @@
 # uv run streamlit run b2_align.py --server.port 8502 -- --config config.toml
-
+import argparse
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -12,7 +12,7 @@ import trimesh
 import warp as wp
 from minio import S3Error
 
-from b0_config import client_pairs
+from b0_config import cache_client_pairs
 from kernel import compute_sdf, icp
 
 save_key = 'hip_align'
@@ -23,7 +23,10 @@ st.markdown('### G-THA 术前术后配准')
 # --- 第一阶段：初始化与数据列表加载 ---
 if (it := st.session_state.get('init')) is None:
     with st.spinner('初始化', show_time=True):  # noqa
-        client, pairs = client_pairs('align')
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--config', required=True)
+        args, _ = parser.parse_known_args()
+        client, pairs = cache_client_pairs(args.config, 'align')
 
     st.session_state['init'] = client, pairs
     st.rerun()

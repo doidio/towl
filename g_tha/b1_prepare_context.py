@@ -1,5 +1,5 @@
 # uv run streamlit run b1_prepare_context.py --server.port 8501 -- --config config.toml
-
+import argparse
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -13,12 +13,11 @@ import warp as wp
 from PIL import Image, ImageDraw, ImageFont
 from minio import S3Error
 
-from b0_config import client_pairs
-from b0_prothesis import FEMORAL, HEAD_OFFSET
+from b0_config import cache_client_pairs
 from define import ct_metal, ct_seg_femur_right, ct_seg_femur_left, ct_seg_hip_right, ct_seg_hip_left
-from kernel import resample_cup_head, resample_cup_head_3d
+from kernel import resample_cup_head, count_cup_head_3d
 
-save_key = 'cup_center'
+save_key = 'head_center'
 
 st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed', layout='wide')
 st.markdown('### G-THA 全局标签录入')
@@ -26,7 +25,10 @@ st.markdown('### G-THA 全局标签录入')
 # --- 第一阶段：初始化与数据列表加载 ---
 if (it := st.session_state.get('init')) is None:
     with st.spinner('初始化', show_time=True):  # noqa
-        client, pairs = client_pairs('context')
+        parser = argparse.ArgumentParser()
+        parser.add_argument('--config', required=True)
+        args, _ = parser.parse_known_args()
+        client, pairs = cache_client_pairs(args.config, 'context')
 
     st.session_state['init'] = client, pairs
     st.rerun()
@@ -87,7 +89,7 @@ elif (it := st.session_state.get('roi')) is None:
             try:
                 client.fget_object('nii', object_name, f.as_posix())
             except S3Error:
-                st.error(_ + '失败')
+                st.error(f'下载原图失败 {object_name}')
                 st.stop()
 
             image = itk.imread(f.as_posix(), itk.SS)
@@ -105,9 +107,9 @@ elif (it := st.session_state.get('roi')) is None:
             try:
                 f = Path(tdir) / 'bone.stl'
                 object_name = '/'.join([pid, rl, 'post', 'femur', f.name])
-                data = client.fget_object('pair', object_name, f.as_posix())
+                client.fget_object('pair', object_name, f.as_posix())
             except S3Error:
-                st.error(f'post/femur/{f.name} 下载失败')
+                st.error(f'下载股骨失败 {object_name}')
                 st.stop()
 
             _ = trimesh.load_mesh(f.as_posix())
@@ -132,33 +134,36 @@ else:
     cols = st.columns([2, 3, 3, 3])
 
     # 股骨柄型号规格
-    with cols[0]:
-        spec_0, spec_1 = pairs[prl].get('femoral_spec', ['', ''])
-
-        if spec_0 not in FEMORAL:
-            spec_0 = ''
-
-        if spec_1 not in FEMORAL[spec_0]:
-            spec_1 = ''
-
-        options = list(FEMORAL.keys())
-        spec_0 = st.selectbox('股骨柄型号', options, options.index(spec_0) if spec_0 in options else 0)
-
-        if len(spec_0):
-            options = FEMORAL[spec_0]
-            spec_1 = st.selectbox('股骨柄规格', options, options.index(spec_1) if spec_1 in options else 0)
-        else:
-            spec_1 = ''
+    # with cols[0]:
+    #     spec_0, spec_1 = pairs[prl].get('femoral_spec', ['', ''])
+    #
+    #     if spec_0 not in FEMORAL:
+    #         spec_0 = ''
+    #
+    #     if spec_1 not in FEMORAL[spec_0]:
+    #         spec_1 = ''
+    #
+    #     options = list(FEMORAL.keys())
+    #     spec_0 = st.selectbox('股骨柄型号', options, options.index(spec_0) if spec_0 in options else 0)
+    #
+    #     if len(spec_0):
+    #         options = FEMORAL[spec_0]
+    #         spec_1 = st.selectbox('股骨柄规格', options, options.index(spec_1) if spec_1 in options else 0)
+    #     else:
+    #         spec_1 = ''
 
     # 股骨头偏距
-    with cols[0]:
-        head_offset = pairs[prl].get('head_offset', '')
-        if head_offset not in HEAD_OFFSET:
-            head_offset = ''
-        head_offset = st.selectbox('股骨头偏距/颈长偏移 (mm)', HEAD_OFFSET, HEAD_OFFSET.index(head_offset))
+    # with cols[0]:
+    #     head_offset = pairs[prl].get('head_offset', '')
+    #     if head_offset not in HEAD_OFFSET:
+    #         head_offset = ''
+    #     head_offset = st.selectbox('股骨头偏距/颈长偏移 (mm)', HEAD_OFFSET, HEAD_OFFSET.index(head_offset))
 
     # 三视图
     view_size = cols[0].radio('视野范围 (mm)', [100, 200, 300], horizontal=True)
+    view_window = cols[0].radio('窗', ['假体', '骨骼'], horizontal=True)
+
+    window = [2000.0, 1000.0] if view_window == '假体' else [-100.0, 1000.0]
 
     cup_outer = int(pairs[prl].get('cup_outer', 90))
     cup_outer = cols[0].number_input('髋臼杯外径', 10, 90, cup_outer, 2, key='cup_outer')
@@ -167,23 +172,24 @@ else:
     head_outer = cols[0].number_input('股骨头外径', 10, 90, head_outer, 2, key='head_outer')
 
     liner_offset = pairs[prl].get('liner_offset', 0.0)
-    liner_offset = cols[0].number_input('内衬偏心距', 0.0, 9.0, liner_offset, 0.5, format='%.1f', key='liner_offset')
+    liner_offset: float = cols[0].number_input('内衬偏心距', -5.0, 5.0, liner_offset, 0.25, format='%.1f',
+                                               key='liner_offset')
 
     step = cols[0].radio('调节步长 (mm/deg)', _ := [5, 2.5, 1, 0.5, 0.25], horizontal=True)
     step_atom = _[0]
 
     # 初始估计球心
     v_max = bone_mesh.vertices[np.argmax(bone_mesh.vertices[:, 2])]
-    cup_center_default = v_max.copy()
-    cup_center_default += roi_boxes[1][0]
-    cup_center_default[2] -= 20
+    head_center_default = v_max.copy()
+    head_center_default += roi_boxes[1][0]
+    head_center_default[2] -= 15
 
-    cup_center_default = np.array(cup_center_default)
-    cup_center_default = np.round(cup_center_default / 0.25) * 0.25
-    cup_center_default = cup_center_default.tolist()
+    head_center_default = np.array(head_center_default)
+    head_center_default = np.round(head_center_default / 0.25) * 0.25
+    head_center_default = head_center_default.tolist()
 
-    if 'cup_center' not in st.session_state:
-        st.session_state['cup_center'] = pairs[prl].get('cup_center', cup_center_default)
+    if 'head_center' not in st.session_state:
+        st.session_state['head_center'] = pairs[prl].get('head_center', head_center_default)
 
     cup_axis_default = np.array([(1 if rl == 'L' else -1) * np.sin(np.deg2rad(40)), 0, -np.cos(np.deg2rad(40))])
     cup_axis_default /= np.linalg.norm(cup_axis_default)
@@ -225,44 +231,57 @@ else:
             st.session_state['cup_axis'] = v / np.linalg.norm(v)
 
         if col_l.button(f'{a}', key=f'{a}_{i}', width='stretch'):
-            st.session_state['cup_center'][axes[0]] += step * (1 if a in 'LPS' else -1)
+            st.session_state['head_center'][axes[0]] += step * (1 if a in 'LPS' else -1)
         if col_r.button(f'{d}', key=f'{d}_{i}', width='stretch'):
-            st.session_state['cup_center'][axes[0]] += step * (1 if d in 'LPS' else -1)
+            st.session_state['head_center'][axes[0]] += step * (1 if d in 'LPS' else -1)
 
         if col_m.button(f'{w}', key=f'{w}_{i}', width='stretch'):
-            st.session_state['cup_center'][axes[1]] += step * (1 if w in 'LPS' else -1)
+            st.session_state['head_center'][axes[1]] += step * (1 if w in 'LPS' else -1)
         if col_m.button(f'{s}', key=f'{s}_{i}', width='stretch'):
-            st.session_state['cup_center'][axes[1]] += step * (1 if s in 'LPS' else -1)
+            st.session_state['head_center'][axes[1]] += step * (1 if s in 'LPS' else -1)
 
-    cup_center = np.array(st.session_state['cup_center'], float)
+    head_center = np.array(st.session_state['head_center'], float)
     cup_axis = np.array(st.session_state['cup_axis'], float)
-    head_center = cup_center + liner_offset * cup_axis
 
     roi_spacing = 0.2
     roi_size = np.ceil((np.ones(3) * view_size) / roi_spacing).astype(int)
 
+    counts = wp.zeros(6, dtype=wp.int32)
 
-    def get_coverage(cc, ca):
-        roi = wp.zeros((*roi_size,), dtype=wp.float32)
-        metal = wp.zeros((*roi_size,), dtype=wp.float32)
+
+    def get_occupancy(hc, ca, lo):
+        counts.zero_()
+        cc = hc - lo * ca
         o = cc - 0.5 * roi_size * roi_spacing
-        hc = cc + liner_offset * ca
-        wp.launch(resample_cup_head_3d, roi.shape, [
+
+        wp.launch(count_cup_head_3d, tuple(roi_size.tolist()), [
             volume.id, wp.vec3(origin), wp.vec3(spacing), ct_metal,
-            roi, wp.vec3(o), roi_spacing, metal,
-            wp.vec3(cc), wp.vec3(ca), wp.vec3(hc), head_outer / 2.0, cup_outer / 2.0 - 1.0,  # 修正髋臼杯外层
+            wp.vec3(o), roi_spacing,
+            wp.vec3(cc), wp.vec3(ca), wp.vec3(hc), head_outer / 2.0, cup_outer / 2.0,
+            counts
         ])
-        roi, metal = roi.numpy(), metal.numpy()
-        if (_ := np.sum(roi)) > 0:
-            return float(np.sum(metal) / _)
-        return 0.0
+
+        c = counts.numpy()
+        head_roi_sum = float(c[0])
+        head_metal_sum = float(c[1])
+        cup_roi_sum = float(c[2])
+        cup_metal_sum = float(c[3])
+        liner_roi_sum = float(c[4])
+        liner_metal_sum = float(c[5])
+
+        h_occ = head_metal_sum / head_roi_sum if head_roi_sum > 0 else 0.0
+        c_occ = cup_metal_sum / cup_roi_sum if cup_roi_sum > 0 else 0.0
+        l_occ = liner_metal_sum / liner_roi_sum if liner_roi_sum > 0 else 0.0
+
+        return h_occ, c_occ, l_occ
 
 
-    coverage_max = get_coverage(cup_center, cup_axis)
+    cols[0].caption('高亮占比（3D）')
     empty = cols[0].empty()
-    empty.info(f'金属占比（3D）{coverage_max * 1e2:.3f}%')
 
     if cols[0].button('自动微调', width='stretch'):
+        occ_max = get_occupancy(head_center, cup_axis, liner_offset)
+
         # 斐波那契球面均匀采样方向
         samples = 26
         phi = np.pi * (3. - np.sqrt(5.))
@@ -280,18 +299,17 @@ else:
             for offset in sphere_directions:
                 offset = np.array(offset, float)
                 offset /= np.linalg.norm(offset)
-                cup_center_test = cup_center + offset * step
+                head_center_test = head_center + offset * step
 
-                coverage = get_coverage(cup_center_test, cup_axis)
+                occ = get_occupancy(head_center_test, cup_axis, liner_offset)
 
-                if coverage_max < coverage:
-                    coverage_max = coverage
-                    cup_center = cup_center_test
-                    head_center = cup_center + liner_offset * cup_axis
-                    st.session_state['cup_center'] = cup_center.tolist()
+                if occ_max[0] * 0.8 + occ_max[1] * 0.2 < occ[0] * 0.8 + occ[1] * 0.2:
+                    occ_max = occ
+                    head_center = head_center_test
 
+                    empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
                     better = True
-                    empty.success(f'金属占比 {coverage_max * 1e2:.3f}%')
+                    break
 
         better = True
         while better:
@@ -307,18 +325,43 @@ else:
                 v = v * np.cos(theta) + np.cross(k, v) * np.sin(theta) + k * np.dot(k, v) * (1 - np.cos(theta))
                 v /= np.linalg.norm(v)
 
-                coverage = get_coverage(cup_center, v)
+                occ = get_occupancy(head_center, v, liner_offset)
 
-                if coverage_max < coverage:
-                    coverage_max = coverage
+                if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
+                    occ_max = occ
                     cup_axis = v.copy()
-                    head_center = cup_center + liner_offset * cup_axis
-                    st.session_state['cup_axis'] = cup_axis.tolist()
 
+                    empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
                     better = True
-                    empty.success(f'金属占比 {coverage_max * 1e2:.3f}%')
+                    break
 
-        empty.info(f'金属占比 {coverage_max * 1e2:.3f}%')
+        empty.info(f'球头 {occ_max[0] * 1e2:.3f}% 壳杯 {occ_max[1] * 1e2:.3f}% 内衬 {occ_max[2] * 1e2:.3f}%')
+
+        occ_max = get_occupancy(head_center, cup_axis, liner_offset)
+        liner_offset_best = liner_offset
+
+        th = (cup_outer - head_outer) * 0.25
+        for step in range(1, int(th // 0.25)):
+            for inv in (-1, 1):
+                liner_offset_test = liner_offset + inv * step * 0.25
+
+                occ = get_occupancy(head_center, cup_axis, liner_offset_test)
+
+                if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
+                    occ_max = occ
+                    liner_offset_best = liner_offset_test
+
+                    empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
+
+        st.session_state['head_center'] = head_center.tolist()
+        st.session_state['cup_axis'] = cup_axis.tolist()
+        st.session_state['liner_offset_best'] = liner_offset_best
+
+    liner_offset_best: float = st.session_state.get('liner_offset_best', liner_offset)
+    cup_center = head_center - liner_offset_best * cup_axis
+
+    occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
+    empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
 
     ort = [
         ['S', 'I', 'A', 'P'],
@@ -339,7 +382,7 @@ else:
         roi_origin = cup_center - 0.5 * roi_size * roi_spacing * axes[0] - 0.5 * roi_size * roi_spacing * axes[1]
 
         wp.launch(resample_cup_head, roi_slice.shape, [
-            volume.id, wp.vec3(origin), wp.vec3(spacing), -100.0, 1000.0,
+            volume.id, wp.vec3(origin), wp.vec3(spacing), *window,
             roi_slice, wp.vec3(roi_origin), roi_spacing, wp.vec3(axes[0]), wp.vec3(axes[1]),
             wp.vec3(cup_center), wp.vec3(cup_axis), wp.vec3(head_center), head_outer / 2.0, cup_outer / 2.0,
         ])
@@ -382,14 +425,17 @@ else:
     # 提交结果
     with st.form('submit'):
         data = {
+            'femoral_spec': pairs[prl].get('femoral_spec', ['', '']),
+            'head_offset': pairs[prl].get('head_offset', ''),
             'cup_outer': cup_outer,
             'head_outer': head_outer,
             'liner_offset': liner_offset,
+            'liner_offset_best': liner_offset_best,
+            'liner_material': '陶瓷' if occ_max[2] > 0.5 else '聚乙烯',
+            'head_center': head_center.tolist(),
             'cup_center': cup_center.tolist(),
             'cup_axis': cup_axis.tolist(),
-            'femoral_spec': [spec_0, spec_1],
-            'head_offset': head_offset,
-            'coverage': coverage_max,
+            'occupancy': list(occ_max),
         }
         st.code(tomlkit.dumps(data), 'toml')
 

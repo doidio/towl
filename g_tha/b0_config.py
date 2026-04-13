@@ -8,12 +8,12 @@ from minio import Minio, S3Error
 
 
 @st.cache_resource(show_spinner=False)
-def client_pairs(category: Literal['context', 'align']):
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--config', required=True)
-    args, _ = parser.parse_known_args()
+def cache_client_pairs(cfg_path: str, category: Literal['context', 'align']):
+    return client_pairs(cfg_path, category)
 
-    cfg_path = Path(args.config)
+
+def client_pairs(cfg_path: str, category: Literal['context', 'align']):
+    cfg_path = Path(cfg_path)
     cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
 
     client = Minio(**cfg['minio']['client'])

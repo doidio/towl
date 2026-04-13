@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import tomlkit
 from minio import Minio
+from tqdm import tqdm
 
 """
 b0_prothesis.py - 髋关节假体库 definition 与自动提取工具
@@ -348,7 +349,7 @@ def extract_prothesis_info(config_file, input_file='THATable.xlsx', output_file=
 
     df = pd.read_excel(input_file)
     result = []
-    for _, row in df.iterrows():
+    for _, row in tqdm(df.iterrows()):
         prl = row.get('prl')
         if pd.isna(prl): continue
         vals = [str(row.get(c, '')) for c in

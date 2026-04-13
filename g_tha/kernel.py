@@ -371,9 +371,12 @@ def resample_cup_head(
 
     to_p_head = p - head_center
     head_r = wp.length(to_p_head)
+    dot_head = wp.dot(to_p_head, cup_axis)
 
-    in_head = head_r <= head_radius
-    in_cup = dot_cup <= 0.0 and cup_r <= cup_radius
+    th = (cup_radius - head_radius) * 0.5
+
+    in_head = head_r <= head_radius and (dot_head <= 0.5 * head_radius)
+    in_cup = dot_cup <= 0.0 and (head_radius + th <= cup_r <= cup_radius)
 
     # 填充
     if in_head or in_cup:
@@ -390,11 +393,11 @@ def resample_cup_head(
 
 
 @wp.kernel
-def resample_cup_head_3d(
+def count_cup_head_3d(
         volume: wp.uint64, origin: wp.vec3, spacing: wp.vec3, ct_metal: float,
-        roi: wp.array3d(dtype=wp.float32), roi_origin: wp.vec3, roi_spacing: wp.float32,
-        metal: wp.array3d(dtype=wp.float32),
+        roi_origin: wp.vec3, roi_spacing: wp.float32,
         cup_center: wp.vec3, cup_axis: wp.vec3, head_center: wp.vec3, head_radius: wp.float32, cup_radius: wp.float32,
+        counts: wp.array1d(dtype=wp.int32)
 ):
     i, j, k = wp.tid()
 
@@ -412,12 +415,26 @@ def resample_cup_head_3d(
 
     to_p_head = p - head_center
     head_r = wp.length(to_p_head)
+    dot_head = wp.dot(to_p_head, cup_axis)
 
-    if head_r <= head_radius or (dot_cup <= 0.0 and cup_r <= cup_radius):
-        roi[i, j, k] = 1.0
+    th = (cup_radius - head_radius) * 0.5
 
+    in_head = head_r <= head_radius and (dot_head <= 0.5 * head_radius)
+    in_cup = dot_cup <= 0.0 and (head_radius + th <= cup_r <= cup_radius)
+    in_liner = dot_cup <= 0.0 and (cup_r > head_radius) and (cup_r < head_radius + th)
+
+    if in_head:
+        wp.atomic_add(counts, 0, 1)
         if ct_metal < grey:
-            metal[i, j, k] = 1.0
+            wp.atomic_add(counts, 1, 1)
+    elif in_cup:
+        wp.atomic_add(counts, 2, 1)
+        if ct_metal < grey:
+            wp.atomic_add(counts, 3, 1)
+    elif in_liner:
+        wp.atomic_add(counts, 4, 1)
+        if ct_metal < grey:
+            wp.atomic_add(counts, 5, 1)
 
 
 @wp.kernel

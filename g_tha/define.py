@@ -14,7 +14,7 @@ from monai.transforms import (
 ct_min = -1024.0
 ct_bone_min = 150.0  # 用于归一化
 ct_bone_best = 220.0  # 用于配准和显示
-ct_metal = 2700.0
+ct_metal = 2500.0
 
 # TotalSegmentator 标签
 ct_seg_femur_left = 75
