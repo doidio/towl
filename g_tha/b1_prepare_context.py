@@ -171,9 +171,7 @@ else:
     head_outer = int(pairs[prl].get('head_outer', 10))
     head_outer = cols[0].number_input('股骨头外径', 10, 90, head_outer, 2, key='head_outer')
 
-    liner_offset = pairs[prl].get('liner_offset', 0.0)
-    liner_offset: float = cols[0].number_input('内衬偏心距', -5.0, 5.0, liner_offset, 0.25, format='%.1f',
-                                               key='liner_offset')
+    liner_slot = cols[0].empty()
 
     step = cols[0].radio('调节步长 (mm/deg)', _ := [5, 2.5, 1, 0.5, 0.25], horizontal=True)
     step_atom = _[0]
@@ -280,8 +278,6 @@ else:
     empty = cols[0].empty()
 
     if cols[0].button('自动微调', width='stretch'):
-        occ_max = get_occupancy(head_center, cup_axis, liner_offset)
-
         # 斐波那契球面均匀采样方向
         samples = 26
         phi = np.pi * (3. - np.sqrt(5.))
@@ -291,17 +287,20 @@ else:
         theta = phi * i
         x = np.cos(theta) * radius
         z = np.sin(theta) * radius
-        sphere_directions = np.column_stack((x, y, z))
+        sphere_directions = np.column_stack((x, y, z)).tolist()
+
+        liner_offset_best = st.session_state.get(_ := 'liner_offset_best', pairs[prl].get(_, pairs[prl].get(_, 0.0)))
+        occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
 
         better = True
         while better:
             better = False
-            for offset in sphere_directions:
+            for offset in sphere_directions + [-cup_axis, cup_axis]:
                 offset = np.array(offset, float)
                 offset /= np.linalg.norm(offset)
                 head_center_test = head_center + offset * step
 
-                occ = get_occupancy(head_center_test, cup_axis, liner_offset)
+                occ = get_occupancy(head_center_test, cup_axis, liner_offset_best)
 
                 if occ_max[0] * 0.8 + occ_max[1] * 0.2 < occ[0] * 0.8 + occ[1] * 0.2:
                     occ_max = occ
@@ -325,7 +324,7 @@ else:
                 v = v * np.cos(theta) + np.cross(k, v) * np.sin(theta) + k * np.dot(k, v) * (1 - np.cos(theta))
                 v /= np.linalg.norm(v)
 
-                occ = get_occupancy(head_center, v, liner_offset)
+                occ = get_occupancy(head_center, v, liner_offset_best)
 
                 if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
                     occ_max = occ
@@ -337,27 +336,32 @@ else:
 
         empty.info(f'球头 {occ_max[0] * 1e2:.3f}% 壳杯 {occ_max[1] * 1e2:.3f}% 内衬 {occ_max[2] * 1e2:.3f}%')
 
-        occ_max = get_occupancy(head_center, cup_axis, liner_offset)
-        liner_offset_best = liner_offset
+        liner_offset_test = liner_offset_best
+        occ_max = get_occupancy(head_center, cup_axis, liner_offset_test)
 
         th = (cup_outer - head_outer) * 0.25
-        for step in range(1, int(th // 0.25)):
-            for inv in (-1, 1):
-                liner_offset_test = liner_offset + inv * step * 0.25
+        for _ in range(-int(th // 0.25), int(5.0 // 0.25)):
+            liner_offset_test = liner_offset_best + _ * 0.25
 
-                occ = get_occupancy(head_center, cup_axis, liner_offset_test)
+            occ = get_occupancy(head_center, cup_axis, liner_offset_test)
 
-                if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
-                    occ_max = occ
-                    liner_offset_best = liner_offset_test
+            if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
+                occ_max = occ
+                liner_offset_best = liner_offset_test
 
-                    empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
+                empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
 
         st.session_state['head_center'] = head_center.tolist()
         st.session_state['cup_axis'] = cup_axis.tolist()
         st.session_state['liner_offset_best'] = liner_offset_best
 
-    liner_offset_best: float = st.session_state.get('liner_offset_best', liner_offset)
+    _ = 'liner_offset_best'
+    st.session_state[_] = st.session_state.get(_, pairs[prl].get(_, pairs[prl].get(_, 0.0)))
+
+    th = (cup_outer - head_outer) * 0.25 // 0.25 * 0.25
+    liner_offset_best: float = liner_slot.number_input('内衬偏心距', -th, 5.0, step=0.25, format='%.2f',
+                                                       key='liner_offset_best')
+
     cup_center = head_center - liner_offset_best * cup_axis
 
     occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
@@ -429,14 +433,15 @@ else:
             'head_offset': pairs[prl].get('head_offset', ''),
             'cup_outer': cup_outer,
             'head_outer': head_outer,
-            'liner_offset': liner_offset,
-            'liner_offset_best': liner_offset_best,
             'liner_material': '陶瓷' if occ_max[2] > 0.5 else '聚乙烯',
             'head_center': head_center.tolist(),
             'cup_center': cup_center.tolist(),
             'cup_axis': cup_axis.tolist(),
             'occupancy': list(occ_max),
+            'liner_offset_best': liner_offset_best,
         }
+        if 'liner_offset' in pairs[prl]:
+            data['liner_offset'] = pairs[prl]['liner_offset']
         st.code(tomlkit.dumps(data), 'toml')
 
         if 'excluded' in pairs[prl] and 'excluded' not in st.session_state:

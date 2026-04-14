@@ -12,8 +12,8 @@ from b0_config import client_pairs
 
 
 def main(config_file: str, it: dict):
-    # if 'head_center' in it:
-    #     return
+    if 'head_center' in it:
+        return
 
     if 'post' not in it:
         return
@@ -108,7 +108,6 @@ def main(config_file: str, it: dict):
 
     cup_outer = int(it['cup_outer'])
     head_outer = int(it['head_outer'])
-    liner_offset = float(it.get('liner_offset', 0))
 
     v_max = bone_mesh.vertices[np.argmax(bone_mesh.vertices[:, 2])]
     head_center = v_max.copy()
@@ -130,22 +129,23 @@ def main(config_file: str, it: dict):
     theta = phi * i
     x = np.cos(theta) * radius
     z = np.sin(theta) * radius
-    sphere_directions = np.column_stack((x, y, z))
+    sphere_directions = np.column_stack((x, y, z)).tolist()
 
-    occ_max = get_occupancy(head_center, cup_axis, liner_offset)
+    liner_offset_best = float(it.get('liner_offset', 0))
+    occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
 
     # 梯度步长
-    for step in (5.0, 0.25):
+    for step in (5.0, 0.25, 0.25, 0.25):
         better = True
         while better:  # 位置
             better = False
 
-            for offset in sphere_directions:
+            for offset in sphere_directions + [-cup_axis, cup_axis]:
                 offset = np.array(offset, float)
                 offset /= np.linalg.norm(offset)
                 head_center_test = head_center + offset * step
 
-                occ = get_occupancy(head_center_test, cup_axis, liner_offset)
+                occ = get_occupancy(head_center_test, cup_axis, liner_offset_best)
 
                 if occ_max[0] * 0.8 + occ_max[1] * 0.2 < occ[0] * 0.8 + occ[1] * 0.2:
                     occ_max = occ
@@ -168,7 +168,7 @@ def main(config_file: str, it: dict):
                 v = v * np.cos(theta) + np.cross(k, v) * np.sin(theta) + k * np.dot(k, v) * (1 - np.cos(theta))
                 v /= np.linalg.norm(v)
 
-                occ = get_occupancy(head_center, v, liner_offset)
+                occ = get_occupancy(head_center, v, liner_offset_best)
 
                 if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
                     occ_max = occ
@@ -176,13 +176,12 @@ def main(config_file: str, it: dict):
                     better = True
                     break
 
-    occ_max = get_occupancy(head_center, cup_axis, liner_offset)
-    liner_offset_best = liner_offset
+        liner_offset_test = liner_offset_best
+        occ_max = get_occupancy(head_center, cup_axis, liner_offset_test)
 
-    th = (cup_outer - head_outer) * 0.25
-    for step in range(1, int(th // 0.25)):
-        for inv in (-1, 1):
-            liner_offset_test = liner_offset + inv * step * 0.25
+        th = (cup_outer - head_outer) * 0.25
+        for _ in range(-int(th // 0.25), int(5.0 // 0.25)):
+            liner_offset_test = liner_offset_best + _ * 0.25
 
             occ = get_occupancy(head_center, cup_axis, liner_offset_test)
 
@@ -199,7 +198,7 @@ def main(config_file: str, it: dict):
     ]
 
     stack = []
-    for m, w in ((-100.0, 1000.0), (2400.0, 600.0)):
+    for m, w in ((-100.0, 1000.0), (2000.0, 1000.0)):
         for i in range(3):
             axes = np.eye(3, dtype=float).tolist()
             del axes[i]
@@ -283,7 +282,7 @@ def launch(cfg_path: str, max_workers: int):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
-    parser.add_argument('--max_workers', type=int, default=8)
+    parser.add_argument('--max_workers', type=int, default=6)
     args = parser.parse_args()
 
     launch(args.config, args.max_workers)
