@@ -163,8 +163,8 @@ else:
     view_size = cols[0].radio('视野范围 (mm)', [100, 200, 300], horizontal=True)
     view_window = cols[0].radio('窗', ['高亮', '假体', '骨骼'], horizontal=True)
 
+    ct_highlight = 2000.0  # 适当降低阈值以兼容较大球头内部存在的较暗伪影
     window = {'高亮': [2000.0, 0.0], '假体': [2000.0, 1000.0], '骨骼': [-100.0, 1000.0]}[view_window]
-    ct_highlight = 2000.0
 
     cup_outer = int(pairs[prl].get('cup_outer', 90))
     cup_outer = cols[0].number_input('髋臼杯外径', 10, 90, cup_outer, 2, key='cup_outer')

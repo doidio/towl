@@ -201,7 +201,7 @@ def main(config_file: str, it: dict):
     ]
 
     stack = []
-    for m, w in ((-100.0, 1000.0), (2000.0, 1000.0)):
+    for m, w in ((-100.0, 1000.0), (ct_highlight, 0.0)):
         for i in range(3):
             axes = np.eye(3, dtype=float).tolist()
             del axes[i]
