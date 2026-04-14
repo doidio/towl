@@ -421,7 +421,8 @@ def count_cup_head_3d(
 
     in_head = head_r <= head_radius and (dot_head <= 0.5 * head_radius)
     in_cup = dot_cup <= 0.0 and (head_radius + th <= cup_r <= cup_radius)
-    in_liner = dot_cup <= 0.0 and (cup_r > head_radius) and (cup_r < head_radius + th)
+    in_liner = dot_cup <= 0.0 and (head_radius <= cup_r <= head_radius + th)
+    out_cup = dot_cup <= 0.0 and (cup_radius <= cup_r <= cup_radius + th)
 
     if in_head:
         wp.atomic_add(counts, 0, 1)
@@ -435,6 +436,10 @@ def count_cup_head_3d(
         wp.atomic_add(counts, 4, 1)
         if ct_metal < grey:
             wp.atomic_add(counts, 5, 1)
+    elif out_cup:
+        wp.atomic_add(counts, 6, 1)
+        if ct_metal < grey:
+            wp.atomic_add(counts, 7, 1)
 
 
 @wp.kernel

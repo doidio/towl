@@ -12,8 +12,8 @@ from b0_config import client_pairs
 
 
 def main(config_file: str, it: dict):
-    if 'head_center' in it:
-        return
+    # if 'head_center' in it:
+    #     return
 
     if 'post' not in it:
         return
@@ -72,7 +72,7 @@ def main(config_file: str, it: dict):
         _ = max(_.split(), key=lambda _: _.area)
         bone_mesh = _
 
-    counts = wp.zeros(6, dtype=wp.int32)
+    counts = wp.zeros(8, dtype=wp.int32)
 
     def get_occupancy(hc, ca, lo):
         counts.zero_()
@@ -93,12 +93,15 @@ def main(config_file: str, it: dict):
         cup_metal_sum = float(c[3])
         liner_roi_sum = float(c[4])
         liner_metal_sum = float(c[5])
+        out_cup_roi_sum = float(c[6])
+        out_cup_metal_sum = float(c[7])
 
         h_occ = head_metal_sum / head_roi_sum if head_roi_sum > 0 else 0.0
         c_occ = cup_metal_sum / cup_roi_sum if cup_roi_sum > 0 else 0.0
         l_occ = liner_metal_sum / liner_roi_sum if liner_roi_sum > 0 else 0.0
+        out_c_occ = out_cup_metal_sum / out_cup_roi_sum if out_cup_roi_sum > 0 else 0.0
 
-        return h_occ, c_occ, l_occ
+        return h_occ, c_occ - out_c_occ, l_occ
 
     roi_boxes = np.array(roi_boxes)
 
@@ -179,9 +182,8 @@ def main(config_file: str, it: dict):
         liner_offset_test = liner_offset_best
         occ_max = get_occupancy(head_center, cup_axis, liner_offset_test)
 
-        th = (cup_outer - head_outer) * 0.25
-        for _ in range(-int(th // 0.25), int(5.0 // 0.25)):
-            liner_offset_test = liner_offset_best + _ * 0.25
+        for _ in range(1, int(6.0 // 0.25) + 1):
+            liner_offset_test = _ * 0.25
 
             occ = get_occupancy(head_center, cup_axis, liner_offset_test)
 

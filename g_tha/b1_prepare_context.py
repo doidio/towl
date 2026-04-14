@@ -244,7 +244,7 @@ else:
     roi_spacing = 0.2
     roi_size = np.ceil((np.ones(3) * view_size) / roi_spacing).astype(int)
 
-    counts = wp.zeros(6, dtype=wp.int32)
+    counts = wp.zeros(8, dtype=wp.int32)
 
 
     def get_occupancy(hc, ca, lo):
@@ -266,12 +266,15 @@ else:
         cup_metal_sum = float(c[3])
         liner_roi_sum = float(c[4])
         liner_metal_sum = float(c[5])
+        out_cup_roi_sum = float(c[6])
+        out_cup_metal_sum = float(c[7])
 
         h_occ = head_metal_sum / head_roi_sum if head_roi_sum > 0 else 0.0
         c_occ = cup_metal_sum / cup_roi_sum if cup_roi_sum > 0 else 0.0
         l_occ = liner_metal_sum / liner_roi_sum if liner_roi_sum > 0 else 0.0
+        out_c_occ = out_cup_metal_sum / out_cup_roi_sum if out_cup_roi_sum > 0 else 0.0
 
-        return h_occ, c_occ, l_occ
+        return h_occ, c_occ - out_c_occ, l_occ
 
 
     cols[0].caption('高亮占比（3D）')
@@ -334,22 +337,19 @@ else:
                     better = True
                     break
 
-        empty.info(f'球头 {occ_max[0] * 1e2:.3f}% 壳杯 {occ_max[1] * 1e2:.3f}% 内衬 {occ_max[2] * 1e2:.3f}%')
+        empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
 
-        liner_offset_test = liner_offset_best
-        occ_max = get_occupancy(head_center, cup_axis, liner_offset_test)
+        liner_offset_best = 0.0
+        occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
 
-        th = (cup_outer - head_outer) * 0.25
-        for _ in range(-int(th // 0.25), int(5.0 // 0.25)):
-            liner_offset_test = liner_offset_best + _ * 0.25
+        for _ in range(1, int(6.0 // 0.25) + 1):
+            liner_offset_test = _ * 0.25
 
             occ = get_occupancy(head_center, cup_axis, liner_offset_test)
 
             if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
                 occ_max = occ
                 liner_offset_best = liner_offset_test
-
-                empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
 
         st.session_state['head_center'] = head_center.tolist()
         st.session_state['cup_axis'] = cup_axis.tolist()
@@ -358,8 +358,7 @@ else:
     _ = 'liner_offset_best'
     st.session_state[_] = st.session_state.get(_, pairs[prl].get(_, pairs[prl].get(_, 0.0)))
 
-    th = (cup_outer - head_outer) * 0.25 // 0.25 * 0.25
-    liner_offset_best: float = liner_slot.number_input('内衬偏心距', -th, 5.0, step=0.25, format='%.2f',
+    liner_offset_best: float = liner_slot.number_input('内衬偏心距', 0.0, 6.0, step=0.25, format='%.2f',
                                                        key='liner_offset_best')
 
     cup_center = head_center - liner_offset_best * cup_axis
