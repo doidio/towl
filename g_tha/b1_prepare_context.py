@@ -14,7 +14,7 @@ from PIL import Image, ImageDraw, ImageFont
 from minio import S3Error
 
 from b0_config import cache_client_pairs
-from define import ct_metal, ct_seg_femur_right, ct_seg_femur_left, ct_seg_hip_right, ct_seg_hip_left
+from define import ct_seg_femur_right, ct_seg_femur_left, ct_seg_hip_right, ct_seg_hip_left
 from kernel import resample_cup_head, count_cup_head_3d
 
 save_key = 'head_center'
@@ -126,7 +126,7 @@ else:
     pid, rl = prl.split('_')
     image, volume, size, spacing, origin, image_bg, roi_boxes, bone_mesh = st.session_state['roi']
 
-    with st.expander('存档'):
+    with st.expander(prl):
         st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
     roi_boxes = np.array(roi_boxes)
@@ -161,9 +161,10 @@ else:
 
     # 三视图
     view_size = cols[0].radio('视野范围 (mm)', [100, 200, 300], horizontal=True)
-    view_window = cols[0].radio('窗', ['假体', '骨骼'], horizontal=True)
+    view_window = cols[0].radio('窗', ['高亮', '假体', '骨骼'], horizontal=True)
 
-    window = [2000.0, 1000.0] if view_window == '假体' else [-100.0, 1000.0]
+    window = {'高亮': [2000.0, 0.0], '假体': [2000.0, 1000.0], '骨骼': [-100.0, 1000.0]}[view_window]
+    ct_highlight = 2000.0
 
     cup_outer = int(pairs[prl].get('cup_outer', 90))
     cup_outer = cols[0].number_input('髋臼杯外径', 10, 90, cup_outer, 2, key='cup_outer')
@@ -244,7 +245,7 @@ else:
     roi_spacing = 0.2
     roi_size = np.ceil((np.ones(3) * view_size) / roi_spacing).astype(int)
 
-    counts = wp.zeros(8, dtype=wp.int32)
+    counts: wp.array = wp.zeros(8, dtype=wp.int32)  # noqa
 
 
     def get_occupancy(hc, ca, lo):
@@ -253,7 +254,7 @@ else:
         o = cc - 0.5 * roi_size * roi_spacing
 
         wp.launch(count_cup_head_3d, tuple(roi_size.tolist()), [
-            volume.id, wp.vec3(origin), wp.vec3(spacing), ct_metal,
+            volume.id, wp.vec3(origin), wp.vec3(spacing), ct_highlight,
             wp.vec3(o), roi_spacing,
             wp.vec3(cc), wp.vec3(ca), wp.vec3(hc), head_outer / 2.0, cup_outer / 2.0,
             counts
@@ -323,7 +324,7 @@ else:
                 v = cup_axis.copy()
                 theta = np.deg2rad(step)
 
-                # 罗德里格旋转公式 (Rodrigues' rotation formula)
+                # 罗德里格旋转公式
                 v = v * np.cos(theta) + np.cross(k, v) * np.sin(theta) + k * np.dot(k, v) * (1 - np.cos(theta))
                 v /= np.linalg.norm(v)
 
@@ -381,7 +382,7 @@ else:
         shape = [*roi_size]
         del shape[i]
 
-        roi_slice = wp.zeros(shape, dtype=wp.vec3ub)
+        roi_slice: wp.array = wp.zeros(shape, dtype=wp.vec3ub)  # noqa
         roi_origin = cup_center - 0.5 * roi_size * roi_spacing * axes[0] - 0.5 * roi_size * roi_spacing * axes[1]
 
         wp.launch(resample_cup_head, roi_slice.shape, [
@@ -390,7 +391,7 @@ else:
             wp.vec3(cup_center), wp.vec3(cup_axis), wp.vec3(head_center), head_outer / 2.0, cup_outer / 2.0,
         ])
 
-        roi_slice = roi_slice.numpy().transpose(1, 0, 2)
+        roi_slice: np.ndarray = roi_slice.numpy().transpose(1, 0, 2)
 
         # +y↓: SSP -> IIP
         if i in (0, 1):

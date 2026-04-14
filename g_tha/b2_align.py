@@ -137,10 +137,10 @@ else:
     pid, rl = prl.split('_')
     rois, metal_meshes, metal_meshes_split, bone_meshes = st.session_state['roi']
 
-    with st.expander('存档'):
+    with st.expander(prl):
         st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
-    cols = st.columns(3)
+    cols: list = st.columns(3)
 
     save = {'femur': {}, 'hip': {}}
 
@@ -153,7 +153,7 @@ else:
             idx = pairs[prl].get(part, {}).get('metal_select', 1)
             idx = min(idx, len(options) - 1)
             metal_select = st.selectbox(f'选择{name}（选最大单连体，注意排除钢板，单连体损坏选合并体）',
-                                        range(len(options)), idx, format_func=lambda _: options[_])
+                                        range(len(options)), idx, format_func=lambda _: str(options[_]))
         else:
             st.error('没有可选的股骨柄')
             st.stop()
@@ -191,14 +191,14 @@ else:
             pl.camera.Azimuth(deg)
             pl.reset_camera_clipping_range()
             pl.render()
-            img = pl.screenshot(return_img=True).copy()
+            img = np.array(pl.screenshot(return_img=True)).copy()
             imgs.append(img)
 
         st.image(np.hstack(imgs))
         pl.close()
 
-    for part_id, part in enumerate(('femur', 'hip')):
-        part_name = ['股骨', '髋骨'][part_id]
+    for part_id, part in enumerate(('hip', 'femur')):
+        part_name = ['髋骨', '股骨'][part_id]
 
         with cols[0]:
             sizes = [np.array(rois[part][_]['size']) for _ in range(2)]
@@ -217,9 +217,10 @@ else:
 
             zl = [round(_.bounds[1][2] - _.bounds[0][2]) for _ in bone_meshes[part]]
 
+            post_mesh_outlier: trimesh.Trimesh | None
             if part in ('femur',):
                 _ = pairs[prl].get(part, {}).get('d_proximal', min(zl[1], 15))
-                d_proximal = st.number_input(
+                d_proximal: int = st.number_input(  # noqa
                     f'{part_name}近端截除（0 ~ {zl[1]:.0f} mm）', 0, zl[1], _, step=5, key=f'{part}_d_proximal',
                     help='截除术后比术前多余的近端特征，或截除术后到大粗隆顶端',
                 )
@@ -236,7 +237,7 @@ else:
 
                     # 记录被裁掉的部分以便在 3D 中对比显示
                     mask = ~mask
-                    post_mesh_outlier = bone_meshes[part][1].copy()
+                    post_mesh_outlier: trimesh.Trimesh = bone_meshes[part][1].copy()
                     post_mesh_outlier.update_faces(np.all(mask[post_mesh_outlier.faces], axis=1))
                     post_mesh_outlier.remove_unreferenced_vertices()
 
@@ -251,7 +252,7 @@ else:
 
             # 采样点纵向范围
             zl.append(round(post_mesh.bounds[1][2] - post_mesh.bounds[0][2]))
-            _min, _max = int(d_proximal), int(d_proximal + min(zl[0], zl[2]))
+            _min, _max = int(d_proximal), int(d_proximal) + int(min(zl[0], zl[2]))
 
             _def = pairs[prl].get(part, {}).get('d_sample_range', (_min, _max))
             _def = (max(_min, min(int(_def[0]), _max)), max(_min, min(int(_def[1]), _max)))
@@ -265,7 +266,8 @@ else:
 
             # 避开金属假体的距离
             _ = pairs[prl].get(part, {}).get('d_metal', 5 if part in ('femur',) else 15)
-            d_metal = st.number_input(f'{part_name}采样点远离金属（0 ~ 50 mm）', 0, 50, _, step=5, key=f'{part}_d_metal')
+            d_metal: int = st.number_input(  # noqa
+                f'{part_name}采样点远离金属（0 ~ 50 mm）', 0, 50, _, step=5, key=f'{part}_d_metal')
 
             with st.spinner(_ := '采样', show_time=True):  # noqa
                 max_dist = float(np.linalg.norm(sizes[1] * spacings[1]))
@@ -346,7 +348,7 @@ else:
             save[part]['iterations'] = int(iters)
             save[part]['mse'] = float(mse)
 
-        with cols[2 - part_id]:
+        with cols[1 + part_id]:
             with st.spinner(_ := '场景', show_time=True):  # noqa
                 # 使用 PyVista 构建三维场景
                 b = np.array(post_mesh.bounds)
@@ -372,12 +374,12 @@ else:
                     pl.add_mesh(pv.Cube(bounds=cb.T.flatten()), color='orange', opacity=0.1)
 
                 if post_mesh_outlier is not None and len(post_mesh_outlier.faces):
-                    pl.add_mesh(post_mesh_outlier, color='green')  # 术后被裁剪掉的部分（深绿）
-                pl.add_mesh(post_mesh, color='lightgreen')  # 术后用于配准的部分（浅绿）
+                    pl.add_mesh(post_mesh_outlier, color='green')  # noqa 术后被裁剪掉的部分（深绿）
+                pl.add_mesh(post_mesh, color='lightgreen')  # noqa 术后用于配准的部分（浅绿）
 
                 pre_mesh: trimesh.Trimesh = bone_meshes[part][0].copy()
                 pre_mesh.apply_transform(np.linalg.inv(matrix))  # 将术前网格逆变换到术后坐标系对比
-                pl.add_mesh(pre_mesh, color='lightyellow')  # 术前参考网格（浅黄）
+                pl.add_mesh(pre_mesh, color='lightyellow')  # noqa 术前参考网格（浅黄）
                 pl.add_points(vertices, color='crimson', render_points_as_spheres=True, point_size=3)  # 实际采样点（深红）
 
                 pl.camera_position = 'xz'
@@ -408,13 +410,13 @@ else:
                     pl.camera.parallel_scale = (b[1][2] - b[0][2]) * 0.6
                     pl.reset_camera_clipping_range()
                     pl.render()
-                    a = pl.screenshot(return_img=True).copy()
+                    a = np.array(pl.screenshot(return_img=True)).copy()
 
                     [pl.actors[_].SetVisibility(True) for _ in pl.actors].clear()
 
                     pl.reset_camera_clipping_range()
                     pl.render()
-                    c = pl.screenshot(return_img=True).copy()
+                    c = np.array(pl.screenshot(return_img=True)).copy()
 
                     # 将金属假体的剪影合并到截图上，确保假体始终可见
                     mask = (a != pl.background_color.int_rgb).any(axis=-1)

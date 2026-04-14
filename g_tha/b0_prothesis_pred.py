@@ -34,7 +34,7 @@ def main(config_file: str, it: dict):
     import trimesh
     from minio import Minio, S3Error
     from kernel import resample_cup_head, count_cup_head_3d
-    from define import ct_metal, ct_min
+    from define import ct_min
     from PIL import Image, ImageDraw, ImageFont
 
     cfg_path = Path(config_file)
@@ -72,7 +72,8 @@ def main(config_file: str, it: dict):
         _ = max(_.split(), key=lambda _: _.area)
         bone_mesh = _
 
-    counts = wp.zeros(8, dtype=wp.int32)
+    ct_highlight = 2000.0
+    counts: wp.array = wp.zeros(8, dtype=wp.int32)  # noqa
 
     def get_occupancy(hc, ca, lo):
         counts.zero_()
@@ -80,7 +81,7 @@ def main(config_file: str, it: dict):
         o = cc - 0.5 * roi_size * roi_spacing
 
         wp.launch(count_cup_head_3d, tuple(roi_size.tolist()), [
-            volume.id, wp.vec3(origin), wp.vec3(spacing), ct_metal,
+            volume.id, wp.vec3(origin), wp.vec3(spacing), ct_highlight,
             wp.vec3(o), roi_spacing,
             wp.vec3(cc), wp.vec3(ca), wp.vec3(hc), head_outer / 2.0, cup_outer / 2.0,
             counts
@@ -143,7 +144,7 @@ def main(config_file: str, it: dict):
         while better:  # 位置
             better = False
 
-            for offset in sphere_directions + [-cup_axis, cup_axis]:
+            for offset in sphere_directions + [-1 * cup_axis, cup_axis]:
                 offset = np.array(offset, float)
                 offset /= np.linalg.norm(offset)
                 head_center_test = head_center + offset * step
@@ -167,7 +168,7 @@ def main(config_file: str, it: dict):
                 v = cup_axis.copy()
                 theta = np.deg2rad(step)
 
-                # 罗德里格旋转公式 (Rodrigues' rotation formula)
+                # 罗德里格旋转公式
                 v = v * np.cos(theta) + np.cross(k, v) * np.sin(theta) + k * np.dot(k, v) * (1 - np.cos(theta))
                 v /= np.linalg.norm(v)
 
@@ -209,7 +210,7 @@ def main(config_file: str, it: dict):
             shape = [*roi_size]
             del shape[i]
 
-            roi_slice = wp.zeros(shape, dtype=wp.vec3ub)
+            roi_slice: wp.array = wp.zeros(shape, dtype=wp.vec3ub)  # noqa
             roi_origin = head_center - 0.5 * roi_size * roi_spacing * axes[0] - 0.5 * roi_size * roi_spacing * axes[1]
 
             wp.launch(resample_cup_head, roi_slice.shape, [
@@ -218,7 +219,7 @@ def main(config_file: str, it: dict):
                 wp.vec3(cup_center), wp.vec3(cup_axis), wp.vec3(head_center), head_outer / 2.0, cup_outer / 2.0,
             ])
 
-            roi_slice = roi_slice.numpy().transpose(1, 0, 2)
+            roi_slice: np.ndarray = roi_slice.numpy().transpose(1, 0, 2)
 
             # +y↓: SSP -> IIP
             if i in (0, 1):
@@ -284,7 +285,7 @@ def launch(cfg_path: str, max_workers: int):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
-    parser.add_argument('--max_workers', type=int, default=6)
+    parser.add_argument('--max_workers', type=int, default=8)
     args = parser.parse_args()
 
     launch(args.config, args.max_workers)
