@@ -173,8 +173,14 @@ else:
 
     liner_slot = cols[0].empty()
 
-    step = cols[0].radio('调节步长 (mm/deg)', _ := [5, 2.5, 1, 0.5, 0.25], horizontal=True)
-    step_atom = _[0]
+    step = cols[0].radio('调节 (mm/deg)', _ := ['5', '0.5', '0.25', '0.25 + 边缘精修'], horizontal=True)
+
+    if step in _[:-1]:
+        step = float(step)
+        shell_only = False
+    else:
+        step = 0.25
+        shell_only = True
 
     # 初始估计球心
     v_max = bone_mesh.vertices[np.argmax(bone_mesh.vertices[:, 2])]
@@ -285,9 +291,7 @@ else:
     cols[0].caption('高亮占比（3D）')
     empty = cols[0].empty()
 
-    shell_only = cols[0].checkbox('仅边缘')
-
-    if cols[0].button('自动微调', width='stretch'):
+    if cols[0].button('自动调节', width='stretch'):
         # 斐波那契球面均匀采样方向
         samples = 26
         phi = np.pi * (3. - np.sqrt(5.))
