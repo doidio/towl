@@ -73,36 +73,42 @@ def main(config_file: str, it: dict):
         bone_mesh = _
 
     ct_highlight = 2000.0
-    counts: wp.array = wp.zeros(8, dtype=wp.int32)  # noqa
 
     def get_occupancy(hc, ca, lo):
-        counts.zero_()
         cc = hc - lo * ca
         o = cc - 0.5 * roi_size * roi_spacing
 
+        counts: wp.array = wp.zeros(10, dtype=wp.int32)  # noqa
         wp.launch(count_cup_head_3d, tuple(roi_size.tolist()), [
             volume.id, wp.vec3(origin), wp.vec3(spacing), ct_highlight,
             wp.vec3(o), roi_spacing,
             wp.vec3(cc), wp.vec3(ca), wp.vec3(hc), head_outer / 2.0, cup_outer / 2.0,
-            counts
+            counts, shell_only,
         ])
 
         c = counts.numpy()
         head_roi_sum = float(c[0])
         head_metal_sum = float(c[1])
-        cup_roi_sum = float(c[2])
-        cup_metal_sum = float(c[3])
-        liner_roi_sum = float(c[4])
-        liner_metal_sum = float(c[5])
+        out_head_roi_sum = float(c[2])
+        out_head_metal_sum = float(c[3])
+
+        cup_roi_sum = float(c[4])
+        cup_metal_sum = float(c[5])
         out_cup_roi_sum = float(c[6])
         out_cup_metal_sum = float(c[7])
 
+        liner_roi_sum = float(c[8])
+        liner_metal_sum = float(c[9])
+
         h_occ = head_metal_sum / head_roi_sum if head_roi_sum > 0 else 0.0
+        out_h_occ = out_head_metal_sum / out_head_roi_sum if out_head_roi_sum > 0 else 0.0
+
         c_occ = cup_metal_sum / cup_roi_sum if cup_roi_sum > 0 else 0.0
-        l_occ = liner_metal_sum / liner_roi_sum if liner_roi_sum > 0 else 0.0
         out_c_occ = out_cup_metal_sum / out_cup_roi_sum if out_cup_roi_sum > 0 else 0.0
 
-        return h_occ, c_occ - out_c_occ, l_occ
+        l_occ = liner_metal_sum / liner_roi_sum if liner_roi_sum > 0 else 0.0
+
+        return (h_occ - out_h_occ) if shell_only else h_occ, c_occ - out_c_occ, l_occ
 
     roi_boxes = np.array(roi_boxes)
 
@@ -135,11 +141,11 @@ def main(config_file: str, it: dict):
     z = np.sin(theta) * radius
     sphere_directions = np.column_stack((x, y, z)).tolist()
 
-    liner_offset_best = float(it.get('liner_offset', 0))
-    occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
-
     # 梯度步长
-    for step in (5.0, 0.25, 0.25, 0.25):
+    for step, shell_only in ((5.0, False), (0.25, False), (0.25, False), (0.25, True), (0.25, True)):
+        liner_offset_test = float(it.get('liner_offset', 0))
+        occ_max = get_occupancy(head_center, cup_axis, liner_offset_test)
+
         better = True
         while better:  # 位置
             better = False
@@ -149,7 +155,7 @@ def main(config_file: str, it: dict):
                 offset /= np.linalg.norm(offset)
                 head_center_test = head_center + offset * step
 
-                occ = get_occupancy(head_center_test, cup_axis, liner_offset_best)
+                occ = get_occupancy(head_center_test, cup_axis, liner_offset_test)
 
                 if occ_max[0] * 0.8 + occ_max[1] * 0.2 < occ[0] * 0.8 + occ[1] * 0.2:
                     occ_max = occ
@@ -172,7 +178,7 @@ def main(config_file: str, it: dict):
                 v = v * np.cos(theta) + np.cross(k, v) * np.sin(theta) + k * np.dot(k, v) * (1 - np.cos(theta))
                 v /= np.linalg.norm(v)
 
-                occ = get_occupancy(head_center, v, liner_offset_best)
+                occ = get_occupancy(head_center, v, liner_offset_test)
 
                 if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
                     occ_max = occ
@@ -180,8 +186,8 @@ def main(config_file: str, it: dict):
                     better = True
                     break
 
-        liner_offset_test = liner_offset_best
-        occ_max = get_occupancy(head_center, cup_axis, liner_offset_test)
+        liner_offset_best = 0.0
+        occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
 
         for _ in range(1, int(6.0 // 0.25) + 1):
             liner_offset_test = _ * 0.25
@@ -192,6 +198,8 @@ def main(config_file: str, it: dict):
                 occ_max = occ
                 liner_offset_best = liner_offset_test
 
+    shell_only = False
+    occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
     cup_center = head_center - liner_offset_best * cup_axis
 
     ort = [

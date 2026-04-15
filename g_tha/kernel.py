@@ -347,13 +347,13 @@ def resample_roi(
 @wp.kernel
 def resample_cup_head(
         volume: wp.uint64, origin: wp.vec3, spacing: wp.vec3, ct_min: float, ct_width: float,
-        head_image: wp.array2d(dtype=wp.vec3ub), head_origin: wp.vec3, head_spacing: wp.float32,
+        roi_image: wp.array2d(dtype=wp.vec3ub), roi_origin: wp.vec3, roi_spacing: wp.float32,
         axis_i: wp.vec3, axis_j: wp.vec3,
         cup_center: wp.vec3, cup_axis: wp.vec3, head_center: wp.vec3, head_radius: wp.float32, cup_radius: wp.float32,
 ):
     i, j = wp.tid()
 
-    p = head_origin + axis_i * wp.float32(i) * head_spacing + axis_j * wp.float32(j) * head_spacing
+    p = roi_origin + axis_i * wp.float32(i) * roi_spacing + axis_j * wp.float32(j) * roi_spacing
 
     uvw = wp.vec3(wp.cw_div(p - origin, spacing))
     grey = float(wp.volume_sample_f(volume, uvw, wp.Volume.LINEAR))
@@ -373,23 +373,35 @@ def resample_cup_head(
     head_r = wp.length(to_p_head)
     dot_head = wp.dot(to_p_head, cup_axis)
 
-    th = (cup_radius - head_radius) * 0.5
+    # th = roi_spacing * 2.1
 
-    in_head = head_r <= head_radius and (dot_head <= 0.5 * head_radius)
-    in_cup = dot_cup <= 0.0 and (head_radius + th <= cup_r <= cup_radius)
+    in_head = dot_head <= 0.5 * head_radius and (head_r <= head_radius)
+    # out_head = dot_head <= 0.5 * head_radius and (head_radius < head_r <= head_radius + th)
 
-    # 填充
-    if in_head or in_cup:
-        if in_head:
-            r, g, b = r * 0.5 + 127.0, g * 0.5, b * 0.5
-        else:
-            r, g, b = r * 0.5, g * 0.5 + 64.0, b * 0.5 + 127.0
+    # th = (cup_radius - head_radius) * 0.5
+
+    in_cup = dot_cup <= 0.0 and (cup_radius * 0.5 + head_radius * 0.5 < cup_r <= cup_radius)
+    # out_cup = dot_cup <= 0.0 and (cup_radius < cup_r <= cup_radius + th)
+    # out_cup = out_cup or (dot_cup <= 0.5 * cup_radius and (cup_radius - th < cup_r <= cup_radius + th))
+
+    # in_liner = dot_cup <= 0.0 and (head_radius < cup_r <= head_radius + th)
+
+    if in_head:
+        r, g, b = r * 0.5 + 127.0, g * 0.5, b * 0.5
+    # elif out_head:
+    #     r, g, b = r * 0.5 + 64.0, g * 0.5, b * 0.5
+    elif in_cup:
+        r, g, b = r * 0.5, g * 0.5 + 64.0, b * 0.5 + 127.0
+    # elif out_cup:
+    #     r, g, b = r * 0.5, g * 0.5 + 32.0, b * 0.5 + 64.0
+    # elif in_liner:
+    #     r, g, b = r * 0.5 + 64.0, g * 0.5 + 64.0, b * 0.5 + 64.0
 
     r = wp.clamp(r, 0.0, 255.0)
     g = wp.clamp(g, 0.0, 255.0)
     b = wp.clamp(b, 0.0, 255.0)
 
-    head_image[i, j] = wp.vec3ub(wp.uint8(r), wp.uint8(g), wp.uint8(b))
+    roi_image[i, j] = wp.vec3ub(wp.uint8(r), wp.uint8(g), wp.uint8(b))
 
 
 @wp.kernel
@@ -397,7 +409,7 @@ def count_cup_head_3d(
         volume: wp.uint64, origin: wp.vec3, spacing: wp.vec3, ct_metal: float,
         roi_origin: wp.vec3, roi_spacing: wp.float32,
         cup_center: wp.vec3, cup_axis: wp.vec3, head_center: wp.vec3, head_radius: wp.float32, cup_radius: wp.float32,
-        counts: wp.array1d(dtype=wp.int32)
+        counts: wp.array1d(dtype=wp.int32), shell_only: bool,
 ):
     i, j, k = wp.tid()
 
@@ -418,21 +430,31 @@ def count_cup_head_3d(
     dot_head = wp.dot(to_p_head, cup_axis)
 
     th = (cup_radius - head_radius) * 0.5
+    in_cup = dot_cup <= 0.0 and (cup_radius - th < cup_r <= cup_radius)
+    out_cup = dot_cup <= 0.0 and (cup_radius < cup_r <= cup_radius + th)
+    out_cup = out_cup or (dot_cup <= 0.5 * cup_radius and (cup_radius - th < cup_r <= cup_radius + th))
 
-    in_head = head_r <= head_radius and (dot_head <= 0.5 * head_radius)
-    in_cup = dot_cup <= 0.0 and (head_radius + th <= cup_r <= cup_radius)
-    in_liner = dot_cup <= 0.0 and (head_radius <= cup_r <= head_radius + th)
-    out_cup = dot_cup <= 0.0 and (cup_radius <= cup_r <= cup_radius + th)
+    in_liner = dot_cup <= 0.0 and (head_radius < cup_r <= head_radius + th)
+
+    if shell_only:
+        th = roi_spacing * 2.1
+
+        in_head = dot_head <= 0.5 * head_radius and (head_radius - th < head_r <= head_radius)
+        out_head = dot_head <= 0.5 * head_radius and (head_radius < head_r <= head_radius + th)
+    else:
+        in_head = dot_head <= 0.5 * head_radius and (head_r <= head_radius)
+        out_head = dot_head <= 0.5 * head_radius and (head_radius < head_r <= head_radius + th)
+
 
     if in_head:
         wp.atomic_add(counts, 0, 1)
         if ct_metal < grey:
             wp.atomic_add(counts, 1, 1)
-    elif in_cup:
+    elif out_head:
         wp.atomic_add(counts, 2, 1)
         if ct_metal < grey:
             wp.atomic_add(counts, 3, 1)
-    elif in_liner:
+    elif in_cup:
         wp.atomic_add(counts, 4, 1)
         if ct_metal < grey:
             wp.atomic_add(counts, 5, 1)
@@ -440,6 +462,10 @@ def count_cup_head_3d(
         wp.atomic_add(counts, 6, 1)
         if ct_metal < grey:
             wp.atomic_add(counts, 7, 1)
+    elif in_liner:
+        wp.atomic_add(counts, 8, 1)
+        if ct_metal < grey:
+            wp.atomic_add(counts, 9, 1)
 
 
 @wp.kernel
