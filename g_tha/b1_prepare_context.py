@@ -20,7 +20,7 @@ from kernel import resample_cup_head, count_cup_head_3d
 
 save_key = 'head_center'
 
-st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed', layout='wide')
+st.set_page_config('G-THA', initial_sidebar_state='collapsed', layout='wide')
 st.markdown('### G-THA 全局标签录入')
 
 # --- 第一阶段：初始化与数据列表加载 ---
@@ -29,7 +29,7 @@ if (it := st.session_state.get('init')) is None:
         parser = argparse.ArgumentParser()
         parser.add_argument('--config', required=True)
         args, _ = parser.parse_known_args()
-        client, pairs = cache_client_pairs(args.config, 'context')
+        client, pairs = cache_client_pairs(args.config, ['context'])
 
     st.session_state['init'] = client, pairs
     st.rerun()
@@ -39,7 +39,7 @@ elif (it := st.session_state.get('prl')) is None:
     client, pairs = st.session_state['init']
 
     # 统计配准进度
-    dn = len([_ for _ in pairs if save_key in pairs[_]])
+    dn = len([_ for _ in pairs if save_key in pairs[_]['context']])
     ud = len(pairs) - dn
 
     st.progress(_ := dn / (dn + ud), text=f'{100 * _:.2f}%')
@@ -48,7 +48,7 @@ elif (it := st.session_state.get('prl')) is None:
     # 自动跳转到下一个待配准的病例
     if st.button('下一个'):
         for prl in pairs:
-            if save_key not in pairs[prl]:
+            if save_key not in pairs[prl]['context']:
                 st.session_state['prl_input'] = prl
                 break
 
@@ -75,12 +75,12 @@ elif (it := st.session_state.get('roi')) is None:
     # 术后
     roi_boxes = []
     for part in ('hip', 'femur'):
-        origin = np.array(pairs[prl]['post'][part]['roi']['origin'])
-        spacing = np.array(pairs[prl]['post'][part]['roi']['spacing'])
-        size = np.array(pairs[prl]['post'][part]['roi']['size'])
+        origin = np.array(pairs[prl]['roi'][part]['post']['origin'])
+        spacing = np.array(pairs[prl]['roi'][part]['post']['spacing'])
+        size = np.array(pairs[prl]['roi'][part]['post']['size'])
         roi_boxes.append([origin, origin + spacing * size])
 
-    object_name = pairs[prl]['post']['nii']
+    object_name = pairs[prl]['nii']['post']
 
     with tempfile.TemporaryDirectory() as tdir:
         with st.spinner(_ := '下载原图', show_time=True):  # noqa
@@ -125,6 +125,8 @@ else:
     pid, rl = prl.split('_')
     image, volume, size, spacing, origin, image_bg, roi_boxes, bone_mesh = st.session_state['roi']
 
+    context = pairs[prl]['context']
+
     with st.expander(prl):
         st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
@@ -134,7 +136,7 @@ else:
 
     # 股骨柄型号规格
     with cols[0]:
-        spec_0, spec_1 = pairs[prl].get('femoral_spec', ['', ''])
+        spec_0, spec_1 = context.get('femoral_spec', ['', ''])
 
         if spec_0 not in FEMORAL:
             spec_0 = ''
@@ -153,7 +155,7 @@ else:
 
     # 股骨头偏距
     with cols[0]:
-        head_offset = pairs[prl].get('head_offset', '')
+        head_offset = context.get('head_offset', '')
         if head_offset not in HEAD_OFFSET:
             head_offset = ''
         head_offset = st.selectbox('股骨头偏距/颈长偏移 (mm)', HEAD_OFFSET, HEAD_OFFSET.index(head_offset))
@@ -165,10 +167,10 @@ else:
     ct_highlight = 2000.0  # 适当降低阈值以兼容较大球头内部存在的较暗伪影
     window = {'高亮': [2000.0, 0.0], '假体': [2000.0, 1000.0], '骨骼': [-100.0, 1000.0]}[view_window]
 
-    cup_outer = int(pairs[prl].get('cup_outer', 90))
+    cup_outer = int(context.get('cup_outer', 90))
     cup_outer = cols[0].number_input('髋臼杯外径', 10, 90, cup_outer, 2, key='cup_outer')
 
-    head_outer = int(pairs[prl].get('head_outer', 10))
+    head_outer = int(context.get('head_outer', 10))
     head_outer = cols[0].number_input('股骨头外径', 10, 90, head_outer, 2, key='head_outer')
 
     liner_slot = cols[0].empty()
@@ -193,13 +195,13 @@ else:
     head_center_default = head_center_default.tolist()
 
     if 'head_center' not in st.session_state:
-        st.session_state['head_center'] = np.array(pairs[prl].get('head_center', head_center_default)).copy()
+        st.session_state['head_center'] = np.array(context.get('head_center', head_center_default)).copy()
 
     cup_axis_default = np.array([(1 if rl == 'L' else -1) * np.sin(np.deg2rad(40)), 0, -np.cos(np.deg2rad(40))])
     cup_axis_default /= np.linalg.norm(cup_axis_default)
 
     if 'cup_axis' not in st.session_state:
-        st.session_state['cup_axis'] = np.array(pairs[prl].get('cup_axis', cup_axis_default)).copy()
+        st.session_state['cup_axis'] = np.array(context.get('cup_axis', cup_axis_default)).copy()
 
     img_slots = [cols[1 + _].container() for _ in range(3)]
 
@@ -303,7 +305,7 @@ else:
         z = np.sin(theta) * radius
         sphere_directions = np.column_stack((x, y, z)).tolist()
 
-        liner_offset_test: float = pairs[prl].get('liner_offset', 0.0)
+        liner_offset_test: float = context.get('liner_offset', 0.0)
         occ_max = get_occupancy(head_center, cup_axis, liner_offset_test)
 
         better = True
@@ -368,7 +370,7 @@ else:
         st.session_state['liner_offset_best'] = liner_offset_best
 
     _ = 'liner_offset_best'
-    st.session_state[_] = st.session_state.get(_, pairs[prl].get(_, pairs[prl].get(_, 0.0)))
+    st.session_state[_] = st.session_state.get(_, context.get(_, context.get('liner_offset', 0.0)))
 
     liner_offset_best: float = liner_slot.number_input('内衬偏心距', 0.0, 6.0, step=0.25, format='%.2f',
                                                        key='liner_offset_best')
@@ -438,9 +440,18 @@ else:
         _.save(buf, format='PNG')
         images.append(buf.getvalue())
 
+    if 'excluded' in context and 'excluded' not in st.session_state:
+        st.session_state['excluded'] = context['excluded']
+
+    options = ['半髋置换', ]
+    if 'excluded' in context and context['excluded'] not in options:
+        options.append(context['excluded'])
+
+    excluded = cols[0].multiselect('是否排除', options, accept_new_options=True, key='excluded')
+
     # 提交结果
     with st.form('submit'):
-        data = {
+        save = {
             'femoral_spec': [spec_0, spec_1],
             'head_offset': head_offset,
             'cup_outer': cup_outer,
@@ -452,25 +463,18 @@ else:
             'liner_material': '陶瓷' if occ_max[2] > 0.5 else '聚乙烯',
             'liner_offset_best': liner_offset_best,
         }
-        if 'liner_offset' in pairs[prl]:
-            data['liner_offset'] = pairs[prl]['liner_offset']
-        st.code(tomlkit.dumps(data), 'toml')
+        if 'liner_offset' in context:
+            save['liner_offset'] = context['liner_offset']
 
-        if 'excluded' in pairs[prl] and 'excluded' not in st.session_state:
-            st.session_state['excluded'] = pairs[prl]['excluded']
+        save['excluded'] = excluded
+        save = {**context, **save}
+        st.code(tomlkit.dumps({'context': save}), 'toml')
 
-        excluded = st.multiselect('是否排除', ['半髋置换', ], accept_new_options=True, key='excluded')
-
-        if st.form_submit_button('提交（覆盖）' if save_key in pairs[prl] else '提交'):
-            data = {**pairs[prl], **data}
-            if len(excluded):
-                data.update({'excluded': excluded})
-
+        if st.form_submit_button('提交（覆盖）' if save_key in context else '提交'):
             # 更新内存中的总表
-            pairs[prl].update(data)
+            pairs[prl]['context'].update(save)
 
-            data = tomlkit.dumps(data).encode('utf-8')
-
+            data = tomlkit.dumps(save).encode('utf-8')
             client.put_object('pair', '/'.join([pid, rl, 'context.toml']), BytesIO(data), len(data))
 
             # 保留 init 状态，只清空当前会话的其他状态

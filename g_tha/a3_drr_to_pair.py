@@ -23,7 +23,7 @@ cfg_path = Path(args.config)
 cfg = tomlkit.loads(cfg_path.read_text('utf-8')).unwrap()
 client = Minio(**cfg['minio']['client'])
 
-st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed')
+st.set_page_config('G-THA', initial_sidebar_state='collapsed')
 st.markdown('### G-THA 术前术后配对')
 
 if (it := st.session_state.get('ud')) is None:

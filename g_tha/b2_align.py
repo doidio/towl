@@ -17,7 +17,7 @@ from kernel import compute_sdf, icp
 
 save_key = 'hip_align'
 
-st.set_page_config('锦瑟医疗数据中心', initial_sidebar_state='collapsed', layout='wide')
+st.set_page_config('G-THA', initial_sidebar_state='collapsed', layout='wide')
 st.markdown('### G-THA 术前术后配准')
 
 # --- 第一阶段：初始化与数据列表加载 ---
@@ -26,7 +26,7 @@ if (it := st.session_state.get('init')) is None:
         parser = argparse.ArgumentParser()
         parser.add_argument('--config', required=True)
         args, _ = parser.parse_known_args()
-        client, pairs = cache_client_pairs(args.config, 'align')
+        client, pairs = cache_client_pairs(args.config, ['context', 'align'])
 
     st.session_state['init'] = client, pairs
     st.rerun()
@@ -36,7 +36,7 @@ elif (it := st.session_state.get('prl')) is None:
     client, pairs = st.session_state['init']
 
     # 统计配准进度
-    dn = len([_ for _ in pairs if save_key in pairs[_]])
+    dn = len([_ for _ in pairs if save_key in pairs[_]['align']])
     ud = len(pairs) - dn
 
     st.progress(_ := dn / (dn + ud), text=f'{100 * _:.2f}%')
@@ -45,18 +45,17 @@ elif (it := st.session_state.get('prl')) is None:
     # 自动跳转到下一个待配准的病例
     if st.button('下一个'):
         for prl in pairs:
-            if save_key not in pairs[prl]:
+            if save_key not in pairs[prl]['align']:
                 st.session_state['prl_input'] = prl
                 break
 
     # 手动输入或选择病例 ID
     prl = st.text_input('PatientID_RL', key='prl_input')
     if prl in pairs:
-        st.code(tomlkit.dumps(pairs[prl]), 'toml')
-
         if st.button('确定'):
             st.session_state['prl'] = prl
             st.rerun()
+        st.code(tomlkit.dumps(pairs[prl]), 'toml')
 
 # --- 第三阶段：ROI 提取与三维重建 ---
 elif (it := st.session_state.get('roi')) is None:
@@ -64,9 +63,6 @@ elif (it := st.session_state.get('roi')) is None:
     prl = st.session_state['prl']
     pid, rl = prl.split('_')
 
-    st.code(tomlkit.dumps(pairs[prl]), 'toml')
-
-    rois = {'femur': [], 'hip': []}
     metal_meshes = {'femur': [], 'hip': []}
     metal_meshes_split = {'femur': [], 'hip': []}
     bone_meshes = {'femur': [], 'hip': []}
@@ -75,16 +71,6 @@ elif (it := st.session_state.get('roi')) is None:
     with tempfile.TemporaryDirectory() as tdir:
         for op in ('pre', 'post'):
             for part in ('femur', 'hip'):
-                try:
-                    object_name = '/'.join([pid, rl, op, part, 'roi.toml'])
-                    data = client.get_object('pair', object_name).data
-                    data = tomlkit.loads(data.decode('utf-8')).unwrap()
-                except S3Error:
-                    st.error(f'{op} {part} roi.toml 下载失败')
-                    st.stop()
-
-                rois[part].append(data)
-
                 if op == 'post':
                     try:
                         f = Path(tdir) / 'metal.stl'
@@ -127,7 +113,7 @@ elif (it := st.session_state.get('roi')) is None:
                 _ = max(_.split(), key=lambda _: _.area)
                 bone_meshes[part].append(_)
 
-    st.session_state['roi'] = rois, metal_meshes, metal_meshes_split, bone_meshes
+    st.session_state['roi'] = metal_meshes, metal_meshes_split, bone_meshes
     st.rerun()
 
 # --- 第四阶段：交互式配准与结果确认 ---
@@ -135,7 +121,9 @@ else:
     client, pairs = st.session_state['init']
     prl = st.session_state['prl']
     pid, rl = prl.split('_')
-    rois, metal_meshes, metal_meshes_split, bone_meshes = st.session_state['roi']
+    metal_meshes, metal_meshes_split, bone_meshes = st.session_state['roi']
+
+    align = pairs[prl]['align']
 
     with st.expander(prl):
         st.code(tomlkit.dumps(pairs[prl]), 'toml')
@@ -150,7 +138,7 @@ else:
             options = ['单连体 {} 点 {} 面'.format(len(_.vertices), len(_.faces))
                        for _ in metal_meshes_split[part][1]]
             options[0] = options[0].replace('单连体', '合并体')
-            idx = pairs[prl].get(part, {}).get('metal_select', 1)
+            idx = align.get(part, {}).get('metal_select', 1)
             idx = min(idx, len(options) - 1)
             metal_select = st.selectbox(f'选择{name}（选最大单连体，注意排除钢板，单连体损坏选合并体）',
                                         range(len(options)), idx, format_func=lambda _: str(options[_]))
@@ -201,25 +189,25 @@ else:
         part_name = ['髋骨', '股骨'][part_id]
 
         with cols[0]:
-            sizes = [np.array(rois[part][_]['size']) for _ in range(2)]
-            spacings = [np.array(rois[part][_]['spacing']) for _ in range(2)]
-            origins = [np.array(rois[part][_]['origin']) for _ in range(2)]
+            sizes = [np.array(pairs[prl]['roi'][part][_]['size']) for _ in ('pre', 'post')]
+            spacings = [np.array(pairs[prl]['roi'][part][_]['spacing']) for _ in ('pre', 'post')]
+            origins = [np.array(pairs[prl]['roi'][part][_]['origin']) for _ in ('pre', 'post')]
 
             post_mesh: trimesh.Trimesh = bone_meshes[part][1].copy()
 
             if part in ('femur',):
                 _max = round(post_mesh.bounds[1][2] - metal_femur.bounds[0][2])
-                _ = pairs[prl].get(part, {}).get('metal_depth', round(_max * 2 / 3))
+                _ = align.get(part, {}).get('metal_depth', round(_max * 2 / 3))
                 metal_depth = st.slider(f'{part_name}柄深度（0 ~ {_max} mm）（小转子以下）', 0, _max, _, step=1)
 
-                _ = pairs[prl].get(part, {}).get('metal_truncated', False)
+                _ = align.get(part, {}).get('metal_truncated', False)
                 metal_truncated = st.checkbox(f'{part_name}柄是否被截断', _)
 
             zl = [round(_.bounds[1][2] - _.bounds[0][2]) for _ in bone_meshes[part]]
 
             post_mesh_outlier: trimesh.Trimesh | None
             if part in ('femur',):
-                _ = pairs[prl].get(part, {}).get('d_proximal', min(zl[1], 15))
+                _ = align.get(part, {}).get('d_proximal', min(zl[1], 15))
                 d_proximal: int = st.number_input(  # noqa
                     f'{part_name}近端截除（0 ~ {zl[1]:.0f} mm）', 0, zl[1], _, step=5, key=f'{part}_d_proximal',
                     help='截除术后比术前多余的近端特征，或截除术后到大粗隆顶端',
@@ -254,7 +242,7 @@ else:
             zl.append(round(post_mesh.bounds[1][2] - post_mesh.bounds[0][2]))
             _min, _max = int(d_proximal), int(d_proximal) + int(min(zl[0], zl[2]))
 
-            _def = pairs[prl].get(part, {}).get('d_sample_range', (_min, _max))
+            _def = align.get(part, {}).get('d_sample_range', (_min, _max))
             _def = (max(_min, min(int(_def[0]), _max)), max(_min, min(int(_def[1]), _max)))
 
             if _def[0] > _def[1]: _def = (_min, _max)
@@ -265,7 +253,7 @@ else:
             )
 
             # 避开金属假体的距离
-            _ = pairs[prl].get(part, {}).get('d_metal', 5 if part in ('femur',) else 15)
+            _ = align.get(part, {}).get('d_metal', 5 if part in ('femur',) else 15)
             d_metal: int = st.number_input(  # noqa
                 f'{part_name}采样点远离金属（0 ~ 50 mm）', 0, 50, _, step=5, key=f'{part}_d_metal')
 
@@ -333,9 +321,9 @@ else:
 
             g_matrix = pre @ matrix @ post_inv
 
-            align = np.array(wp.transform_from_matrix(wp.mat44(g_matrix)), dtype=float).tolist()
+            xform = np.array(wp.transform_from_matrix(wp.mat44(g_matrix)), dtype=float).tolist()
 
-            save[f'{part}_align'] = align
+            save[f'{part}_align'] = xform
 
             if part in ('femur',):
                 save[part]['d_proximal'] = d_proximal
@@ -433,26 +421,23 @@ else:
             else:
                 st.caption('金属体 {} 点 {} 面'.format(len(_.vertices), len(_.faces)))
 
+    if 'excluded' in align and 'excluded' not in st.session_state:
+        st.session_state['excluded'] = align['excluded']
+
+    options = ['配准差', '骨折', '假体破损', '小转子下骨折', '小转子下截骨', '钢板', '髓内钉']
+    if 'excluded' in align and align['excluded'] not in options:
+        options.append(align['excluded'])
+
+    excluded = cols[0].multiselect('是否排除', options, accept_new_options=True, key='excluded')
+    save['excluded'] = excluded
+
     # 提交
     with cols[0]:
         with st.form('submit'):
-            if 'excluded' in pairs[prl]:
-                save['excluded'] = pairs[prl]['excluded']
-            st.code(tomlkit.dumps(save), 'toml')
+            save = {**align, **save}
+            st.code(tomlkit.dumps({'align': save}), 'toml')
 
-            if 'excluded' in pairs[prl] and 'excluded' not in st.session_state:
-                st.session_state['excluded'] = pairs[prl]['excluded']
-
-            options = ['配准差', '骨折', '假体破损', '小转子下骨折', '小转子下截骨', '钢板', '髓内钉']
-            if 'excluded' in pairs[prl] and pairs[prl]['excluded'] not in options:
-                options.append(pairs[prl]['excluded'])
-
-            excluded = st.multiselect('是否排除', options, key='excluded')
-
-            if st.form_submit_button('提交（覆盖）' if save_key in pairs[prl] else '提交'):
-                if len(excluded):
-                    save.update({'excluded': excluded})
-
+            if st.form_submit_button('提交（覆盖）' if save_key in align else '提交'):
                 # 更新内存中的总表
                 pairs[prl].update(save)
 
