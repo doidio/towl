@@ -10,7 +10,7 @@ from minio import Minio, S3Error
 from tqdm import tqdm
 
 
-def main(cfg_path: str, prl: str, data: dict):
+def main(config_file: str, prl: str, data: dict):
     import numpy as np
     import warp as wp
     from kernel import diff_dmc
@@ -19,8 +19,8 @@ def main(cfg_path: str, prl: str, data: dict):
         ct_seg_femur_right, ct_seg_femur_left, ct_seg_hip_right, ct_seg_hip_left, ct_bone_best, ct_metal, ct_min
     )
 
-    cfg_path = Path(cfg_path)
-    cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
+    cfg_path = Path(config_file)
+    cfg = tomlkit.loads(cfg_path.read_text('utf-8')).unwrap()
     client = Minio(**cfg['minio']['client'])
 
     pid, rl = prl.split('_')
@@ -56,7 +56,6 @@ def main(cfg_path: str, prl: str, data: dict):
             origin = np.array(itk.origin(image), float)
 
             image = itk.array_from_image(image).transpose(2, 1, 0)
-            image_bg = ct_min  # 获取背景值（通常是空气的 CT 值）
 
             for part, label in (('femur', fem_label), ('hip', hip_label)):
                 if np.sum(total_roi := (total == label)) == 0:
@@ -74,7 +73,7 @@ def main(cfg_path: str, prl: str, data: dict):
                 roi_size = box[1] - box[0]
 
                 # 非目标区域的高亮部分（如邻近骨骼）置为背景，避免干扰配准
-                roi_image[np.where((roi_total != label) & (roi_image > ct_bone_best))] = image_bg
+                roi_image[np.where((roi_total != label) & (roi_image > ct_bone_best))] = ct_min
 
                 # 如果是术后数据，提取金属假体网格
                 if op == 1:
@@ -116,9 +115,9 @@ def main(cfg_path: str, prl: str, data: dict):
                 client.put_object('pair', '/'.join([pid, rl, op_name, part, 'roi.toml']), BytesIO(roi), len(roi))
 
 
-def launch(cfg_path: str, max_workers: int):
-    cfg_path = Path(cfg_path)
-    cfg = tomlkit.loads(cfg_path.read_text('utf-8'))
+def launch(config_file: str, max_workers: int):
+    cfg_path = Path(config_file)
+    cfg = tomlkit.loads(cfg_path.read_text('utf-8')).unwrap()
     client = Minio(**cfg['minio']['client'])
 
     pairs = {}

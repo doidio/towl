@@ -125,7 +125,7 @@ else:
     pid, rl = prl.split('_')
     image, volume, size, spacing, origin, image_bg, roi_boxes, bone_mesh = st.session_state['roi']
 
-    context = pairs[prl]['context']
+    saved = pairs[prl]['context']
 
     with st.expander(prl):
         st.code(tomlkit.dumps(pairs[prl]), 'toml')
@@ -136,7 +136,7 @@ else:
 
     # 股骨柄型号规格
     with cols[0]:
-        spec_0, spec_1 = context.get('femoral_spec', ['', ''])
+        spec_0, spec_1 = saved.get('femoral_spec', ['', ''])
 
         if spec_0 not in FEMORAL:
             spec_0 = ''
@@ -155,7 +155,7 @@ else:
 
     # 股骨头偏距
     with cols[0]:
-        head_offset = context.get('head_offset', '')
+        head_offset = saved.get('head_offset', '')
         if head_offset not in HEAD_OFFSET:
             head_offset = ''
         head_offset = st.selectbox('股骨头偏距/颈长偏移 (mm)', HEAD_OFFSET, HEAD_OFFSET.index(head_offset))
@@ -167,10 +167,10 @@ else:
     ct_highlight = 2000.0  # 适当降低阈值以兼容较大球头内部存在的较暗伪影
     window = {'高亮': [2000.0, 0.0], '假体': [2000.0, 1000.0], '骨骼': [-100.0, 1000.0]}[view_window]
 
-    cup_outer = int(context.get('cup_outer', 90))
+    cup_outer = int(saved.get('cup_outer', 90))
     cup_outer = cols[0].number_input('髋臼杯外径', 10, 90, cup_outer, 2, key='cup_outer')
 
-    head_outer = int(context.get('head_outer', 10))
+    head_outer = int(saved.get('head_outer', 10))
     head_outer = cols[0].number_input('股骨头外径', 10, 90, head_outer, 2, key='head_outer')
 
     liner_slot = cols[0].empty()
@@ -195,13 +195,13 @@ else:
     head_center_default = head_center_default.tolist()
 
     if 'head_center' not in st.session_state:
-        st.session_state['head_center'] = np.array(context.get('head_center', head_center_default)).copy()
+        st.session_state['head_center'] = np.array(saved.get('head_center', head_center_default)).copy()
 
     cup_axis_default = np.array([(1 if rl == 'L' else -1) * np.sin(np.deg2rad(40)), 0, -np.cos(np.deg2rad(40))])
     cup_axis_default /= np.linalg.norm(cup_axis_default)
 
     if 'cup_axis' not in st.session_state:
-        st.session_state['cup_axis'] = np.array(context.get('cup_axis', cup_axis_default)).copy()
+        st.session_state['cup_axis'] = np.array(saved.get('cup_axis', cup_axis_default)).copy()
 
     img_slots = [cols[1 + _].container() for _ in range(3)]
 
@@ -305,7 +305,7 @@ else:
         z = np.sin(theta) * radius
         sphere_directions = np.column_stack((x, y, z)).tolist()
 
-        liner_offset_test: float = context.get('liner_offset', 0.0)
+        liner_offset_test: float = saved.get('liner_offset', 0.0)
         occ_max = get_occupancy(head_center, cup_axis, liner_offset_test)
 
         better = True
@@ -370,7 +370,7 @@ else:
         st.session_state['liner_offset_best'] = liner_offset_best
 
     _ = 'liner_offset_best'
-    st.session_state[_] = st.session_state.get(_, context.get(_, context.get('liner_offset', 0.0)))
+    st.session_state[_] = st.session_state.get(_, saved.get(_, saved.get('liner_offset', 0.0)))
 
     liner_offset_best: float = liner_slot.number_input('内衬偏心距', 0.0, 6.0, step=0.25, format='%.2f',
                                                        key='liner_offset_best')
@@ -440,37 +440,38 @@ else:
         _.save(buf, format='PNG')
         images.append(buf.getvalue())
 
-    if 'excluded' in context and 'excluded' not in st.session_state:
-        st.session_state['excluded'] = context['excluded']
+    if 'excluded' in saved and 'excluded' not in st.session_state:
+        st.session_state['excluded'] = saved['excluded']
 
     options = ['半髋置换', ]
-    if 'excluded' in context and context['excluded'] not in options:
-        options.append(context['excluded'])
+    if 'excluded' in saved and saved['excluded'] not in options:
+        options.append(saved['excluded'])
 
     excluded = cols[0].multiselect('是否排除', options, accept_new_options=True, key='excluded')
 
+    save = {
+        'femoral_spec': [spec_0, spec_1],
+        'head_offset': head_offset,
+        'cup_outer': cup_outer,
+        'head_outer': head_outer,
+        'head_center': head_center.tolist(),
+        'cup_center': cup_center.tolist(),
+        'cup_axis': cup_axis.tolist(),
+        'occupancy': list(occ_max),
+        'liner_material': '陶瓷' if occ_max[2] > 0.5 else '聚乙烯',
+        'liner_offset_best': liner_offset_best,
+    }
+    if 'liner_offset' in saved:
+        save['liner_offset'] = saved['liner_offset']
+
+    save['excluded'] = excluded
+
     # 提交结果
     with st.form('submit'):
-        save = {
-            'femoral_spec': [spec_0, spec_1],
-            'head_offset': head_offset,
-            'cup_outer': cup_outer,
-            'head_outer': head_outer,
-            'head_center': head_center.tolist(),
-            'cup_center': cup_center.tolist(),
-            'cup_axis': cup_axis.tolist(),
-            'occupancy': list(occ_max),
-            'liner_material': '陶瓷' if occ_max[2] > 0.5 else '聚乙烯',
-            'liner_offset_best': liner_offset_best,
-        }
-        if 'liner_offset' in context:
-            save['liner_offset'] = context['liner_offset']
-
-        save['excluded'] = excluded
-        save = {**context, **save}
+        save = {**saved, **save}
         st.code(tomlkit.dumps({'context': save}), 'toml')
 
-        if st.form_submit_button('提交（覆盖）' if save_key in context else '提交'):
+        if st.form_submit_button('提交（覆盖）' if save_key in saved else '提交'):
             # 更新内存中的总表
             pairs[prl]['context'].update(save)
 
