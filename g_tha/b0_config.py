@@ -16,6 +16,7 @@ def client_pairs(config_file: str, categories: list[Literal['context', 'align']]
     cfg = tomlkit.loads(cfg_path.read_text('utf-8')).unwrap()
 
     client = Minio(**cfg['minio']['client'])
+    excluded = cfg['pairs']['excluded']
 
     # 遍历 MinIO 'pair' 桶，整理术前术后成对的病例数据
     pairs = {}
@@ -69,5 +70,8 @@ def client_pairs(config_file: str, categories: list[Literal['context', 'align']]
                     pairs[prl]['roi'][part][op] = data
                 except S3Error:
                     pass
+
+        if prl in excluded:
+            pairs[prl]['excluded'] = True
 
     return client, pairs

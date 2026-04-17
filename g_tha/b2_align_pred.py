@@ -17,6 +17,12 @@ def main(config_file: str, it: dict):
     prl = it['prl']
     pid, rl = prl.split('_')
 
+    cfg_path = Path(config_file)
+    cfg = tomlkit.loads(cfg_path.read_text('utf-8')).unwrap()
+
+    if it.get('excluded', False):
+        return
+
     import numpy as np
     import warp as wp
     import trimesh
@@ -25,9 +31,8 @@ def main(config_file: str, it: dict):
     from kernel import compute_sdf, icp
     from PIL import Image
 
-    cfg_path = Path(config_file)
-    cfg = tomlkit.loads(cfg_path.read_text('utf-8')).unwrap()
     client = Minio(**cfg['minio']['client'])
+    saved = it['align']
 
     metal_meshes = {'femur': [], 'hip': []}
     bone_meshes = {'femur': [], 'hip': []}
@@ -67,8 +72,6 @@ def main(config_file: str, it: dict):
                 else:
                     raise RuntimeError(f'{op} {part} {f.name} 空网格体')
                 bone_meshes[part].append(mesh)
-
-    saved = it['align']
 
     save = {'femur': {}, 'hip': {}}
 
@@ -265,24 +268,19 @@ def main(config_file: str, it: dict):
         # 横向拼接图像并显示在 Streamlit
         stack = np.hstack(imgs)
 
-        root = cfg['dataset']['root']
-
-        if 'excluded' in saved:
-            f = Path(root) / 'align_pred_excluded' / part / f'{prl}.png'
-        else:
-            f = Path(root) / 'align_pred' / part / f'{prl}.png'
-        f.parent.mkdir(parents=True, exist_ok=True)
-
-        Image.fromarray(stack).save(f)
+        save_file = Path(cfg['dataset']['root']) / 'align_pred' / part / f'{prl}.png'
+        save_file.parent.mkdir(parents=True, exist_ok=True)
+        Image.fromarray(stack).save(save_file)
 
         pl.close()
 
     # 提交
-    for k in ('hip', 'femur'):
-        if k not in saved:
-            saved[k] = {}
-        saved[k].update(save[k])
-    data = tomlkit.dumps(save).encode('utf-8')
+    for k, v in save.items():
+        if isinstance(v, dict) and k in saved and isinstance(saved[k], dict):
+            saved[k].update(v)
+        else:
+            saved[k] = v
+    data = tomlkit.dumps(saved).encode('utf-8')
     from io import BytesIO
     client.put_object('pair', '/'.join([pid, rl, 'align.toml']), BytesIO(data), len(data))
 

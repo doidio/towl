@@ -39,7 +39,7 @@ elif (it := st.session_state.get('prl')) is None:
     client, pairs = st.session_state['init']
 
     # 统计配准进度
-    dn = len([_ for _ in pairs if save_key in pairs[_]['context']])
+    dn = len([_ for _ in pairs if save_key in pairs[_]['context'] or pairs[_].get('excluded', False)])
     ud = len(pairs) - dn
 
     st.progress(_ := dn / (dn + ud), text=f'{100 * _:.2f}%')
@@ -97,7 +97,7 @@ elif (it := st.session_state.get('roi')) is None:
             spacing = np.array(itk.spacing(image), float)
             origin = np.array(itk.origin(image), float)
 
-            image = itk.array_from_image(image).transpose(2, 1, 0)
+            image = np.ascontiguousarray(itk.array_from_image(image).transpose(2, 1, 0))
             image_bg = float(np.min(image))
 
             volume = wp.Volume.load_from_numpy(image, bg_value=image_bg)
@@ -440,15 +440,6 @@ else:
         _.save(buf, format='PNG')
         images.append(buf.getvalue())
 
-    if 'excluded' in saved and 'excluded' not in st.session_state:
-        st.session_state['excluded'] = saved['excluded']
-
-    options = ['半髋置换', ]
-    if 'excluded' in saved and saved['excluded'] not in options:
-        options.append(saved['excluded'])
-
-    excluded = cols[0].multiselect('是否排除', options, accept_new_options=True, key='excluded')
-
     save = {
         'femoral_spec': [spec_0, spec_1],
         'head_offset': head_offset,
@@ -464,18 +455,23 @@ else:
     if 'liner_offset' in saved:
         save['liner_offset'] = saved['liner_offset']
 
-    save['excluded'] = excluded
-
     # 提交结果
     with st.form('submit'):
-        save = {**saved, **save}
-        st.code(tomlkit.dumps({'context': save}), 'toml')
+        if pairs[prl].get('excluded', False):
+            st.warning(f'已排除 {prl}')
+
+        for k, v in save.items():
+            if isinstance(v, dict) and k in saved and isinstance(saved[k], dict):
+                saved[k].update(v)
+            else:
+                saved[k] = v
+        st.code(tomlkit.dumps({'context': saved}), 'toml')
 
         if st.form_submit_button('提交（覆盖）' if save_key in saved else '提交'):
             # 更新内存中的总表
-            pairs[prl]['context'].update(save)
+            pairs[prl]['context'] = saved
 
-            data = tomlkit.dumps(save).encode('utf-8')
+            data = tomlkit.dumps(saved).encode('utf-8')
             client.put_object('pair', '/'.join([pid, rl, 'context.toml']), BytesIO(data), len(data))
 
             # 保留 init 状态，只清空当前会话的其他状态

@@ -36,7 +36,7 @@ elif (it := st.session_state.get('prl')) is None:
     client, pairs = st.session_state['init']
 
     # 统计配准进度
-    dn = len([_ for _ in pairs if save_key in pairs[_]['align']])
+    dn = len([_ for _ in pairs if save_key in pairs[_]['align'] or pairs[_].get('excluded', False)])
     ud = len(pairs) - dn
 
     st.progress(_ := dn / (dn + ud), text=f'{100 * _:.2f}%')
@@ -140,7 +140,7 @@ else:
 
             post_mesh_outlier: trimesh.Trimesh | None
             if part in ('femur',):
-                _ = min(zl[1], saved.get(part, {}).get('d_proximal', 15))
+                _ = saved.get(part, {}).get('d_proximal', min(zl[1], 15))
                 d_proximal: int = st.number_input(  # noqa
                     f'{part_name}近端截除（0 ~ {zl[1]:.0f} mm）', 0, zl[1], _, step=5, key=f'{part}_d_proximal',
                     help='截除术后比术前多余的近端特征，或截除术后到大粗隆顶端',
@@ -347,30 +347,24 @@ else:
 
         cols[0].space('medium')
 
-    if 'excluded' in saved and 'excluded' not in st.session_state:
-        st.session_state['excluded'] = saved['excluded']
-
-    options = ['配准差', '骨折', '假体破损', '小转子下骨折', '小转子下截骨', '钢板', '髓内钉']
-    if 'excluded' in saved and saved['excluded'] not in options:
-        options.append(saved['excluded'])
-
-    excluded = cols[0].multiselect('是否排除', options, accept_new_options=True, key='excluded')
-    save['excluded'] = excluded  # noqa
-
     # 提交
     with cols[0]:
         with st.form('submit'):
-            for k in ('hip', 'femur'):
-                if k not in saved:
-                    saved[k] = {}
-                saved[k].update(save[k])
-            st.code(tomlkit.dumps({'align': save}), 'toml')
+            if pairs[prl].get('excluded', False):
+                st.warning(f'已排除 {prl}')
+
+            for k, v in save.items():
+                if isinstance(v, dict) and k in saved and isinstance(saved[k], dict):
+                    saved[k].update(v)
+                else:
+                    saved[k] = v
+            st.code(tomlkit.dumps({'align': saved}), 'toml')
 
             if st.form_submit_button('提交（覆盖）' if save_key in saved else '提交'):
                 # 更新内存中的总表
-                pairs[prl].update(save)
+                pairs[prl]['align'] = saved
 
-                data = tomlkit.dumps(save).encode('utf-8')
+                data = tomlkit.dumps(saved).encode('utf-8')
                 # 将配准参数保存回 MinIO
                 client.put_object('pair', '/'.join([pid, rl, 'align.toml']), BytesIO(data), len(data))
 

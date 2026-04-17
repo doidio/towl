@@ -15,19 +15,16 @@ def main(config_file: str, it: dict):
     # if 'head_center' in it:
     #     return
 
-    saved = it['context']
+    prl = it['prl']
+    pid, rl = prl.split('_')
 
-    if 'post' not in it['nii']:
+    cfg_path = Path(config_file)
+    cfg = tomlkit.loads(cfg_path.read_text('utf-8')).unwrap()
+
+    if it.get('excluded', False):
         return
 
     import numpy as np
-    roi_boxes = []
-    for part in ('hip', 'femur'):
-        origin = np.array(it['roi'][part]['post']['origin'])
-        spacing = np.array(it['roi'][part]['post']['spacing'])
-        size = np.array(it['roi'][part]['post']['size'])
-        roi_boxes.append([origin, origin + spacing * size])
-
     import itk
     import warp as wp
     import trimesh
@@ -36,12 +33,15 @@ def main(config_file: str, it: dict):
     from define import ct_min
     from PIL import Image, ImageDraw, ImageFont
 
-    cfg_path = Path(config_file)
-    cfg = tomlkit.loads(cfg_path.read_text('utf-8')).unwrap()
     client = Minio(**cfg['minio']['client'])
+    saved = it['context']
 
-    prl = it['prl']
-    pid, rl = prl.split('_')
+    roi_boxes = []
+    for part in ('hip', 'femur'):
+        origin = np.array(it['roi'][part]['post']['origin'])
+        spacing = np.array(it['roi'][part]['post']['spacing'])
+        size = np.array(it['roi'][part]['post']['size'])
+        roi_boxes.append([origin, origin + spacing * size])
 
     object_name = it['nii']['post']
 
@@ -257,15 +257,22 @@ def main(config_file: str, it: dict):
 
     Image.fromarray(np.vstack([np.hstack(stack[:3]), np.hstack(stack[3:])])).save(f)
 
-    save = {**saved, **{
+    save = {
         'cup_center': cup_center.tolist(),
         'head_center': head_center.tolist(),
         'cup_axis': cup_axis.tolist(),
         'liner_offset_best': liner_offset_best,
         'liner_material': '陶瓷' if occ_max[2] > 0.5 else '聚乙烯',
         'occupancy': list(occ_max),
-    }}
-    data = tomlkit.dumps(save).encode('utf-8')
+    }
+    
+    for k, v in save.items():
+        if isinstance(v, dict) and k in saved and isinstance(saved[k], dict):
+            saved[k].update(v)
+        else:
+            saved[k] = v
+            
+    data = tomlkit.dumps(saved).encode('utf-8')
     client.put_object('pair', '/'.join([pid, rl, 'context.toml']), BytesIO(data), len(data))
 
 
