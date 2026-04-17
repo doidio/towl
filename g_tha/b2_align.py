@@ -26,7 +26,7 @@ if (it := st.session_state.get('init')) is None:
         parser = argparse.ArgumentParser()
         parser.add_argument('--config', required=True)
         args, _ = parser.parse_known_args()
-        client, pairs = cache_client_pairs(args.config, ['context', 'align'])
+        client, pairs = cache_client_pairs(args.config, ['align'])
 
     st.session_state['init'] = client, pairs
     st.rerun()
@@ -66,22 +66,15 @@ elif (it := st.session_state.get('roi')) is None:
     metal_meshes = {'femur': [], 'hip': []}
     bone_meshes = {'femur': [], 'hip': []}
 
-    context = pairs[prl]['context']
-    head_center = np.array(context['head_center'], float)
-    cup_radius = float(context['cup_outer']) * 0.5
-
     # 分别处理术前(op=0)和术后(op=1)数据
     with tempfile.TemporaryDirectory() as tdir:
         for op in ('pre', 'post'):
             for part in ('femur', 'hip'):
-                origin = np.array(pairs[prl]['roi'][part][op]['origin'])
-                c = head_center - origin
-
                 if op == 'post':
                     try:
                         f = Path(tdir) / 'metal.stl'
                         object_name = '/'.join([pid, rl, op, part, f.name])
-                        data = client.fget_object('pair', object_name, f.as_posix())
+                        client.fget_object('pair', object_name, f.as_posix())
 
                         mesh = trimesh.load_mesh(f.as_posix())
                         metal_meshes[part].append(mesh)
@@ -102,9 +95,16 @@ elif (it := st.session_state.get('roi')) is None:
                     st.error(f'{op} {part} {f.name} 下载失败')
                     st.stop()
 
-                _ = trimesh.load_mesh(f.as_posix())
-                _ = max(_.split(), key=lambda _: _.area)
-                bone_meshes[part].append(_)
+                mesh = trimesh.load_mesh(f.as_posix())
+                if not mesh.is_empty:
+                    mesh = list(sorted(
+                        mesh.split(only_watertight=False),
+                        key=lambda _: np.linalg.norm(_.bounds[1] - _.bounds[0]), reverse=True,
+                    ))[0]
+                else:
+                    st.error(f'{op} {part} {f.name} 空网格体')
+                    st.stop()
+                bone_meshes[part].append(mesh)
 
     st.session_state['roi'] = metal_meshes, bone_meshes
     st.rerun()
@@ -134,12 +134,13 @@ else:
             origins = [np.array(pairs[prl]['roi'][part][_]['origin']) for _ in ('pre', 'post')]
 
             post_mesh: trimesh.Trimesh = bone_meshes[part][1].copy()
+            post_mesh.export(f'{part_name}_post_mesh.stl')
 
             zl = [round(_.bounds[1][2] - _.bounds[0][2]) for _ in bone_meshes[part]]
 
             post_mesh_outlier: trimesh.Trimesh | None
             if part in ('femur',):
-                _ = saved.get(part, {}).get('d_proximal', min(zl[1], 15))
+                _ = min(zl[1], saved.get(part, {}).get('d_proximal', 15))
                 d_proximal: int = st.number_input(  # noqa
                     f'{part_name}近端截除（0 ~ {zl[1]:.0f} mm）', 0, zl[1], _, step=5, key=f'{part}_d_proximal',
                     help='截除术后比术前多余的近端特征，或截除术后到大粗隆顶端',
@@ -199,7 +200,7 @@ else:
                                     wp.array(metal_meshes[part][1].faces.flatten(), wp.int32))
 
                     wp.launch(compute_sdf, d.shape, [
-                        wp.uint64(metal.id), wp.array1d(post_mesh.vertices, wp.vec3), d, max_dist,
+                        wp.uint64(metal.id), wp.array(post_mesh.vertices, wp.vec3), d, max_dist,
                     ])
 
                 d = d.numpy()
@@ -359,7 +360,10 @@ else:
     # 提交
     with cols[0]:
         with st.form('submit'):
-            save = {**saved, **save}
+            for k in ('hip', 'femur'):
+                if k not in saved:
+                    saved[k] = {}
+                saved[k].update(save[k])
             st.code(tomlkit.dumps({'align': save}), 'toml')
 
             if st.form_submit_button('提交（覆盖）' if save_key in saved else '提交'):

@@ -15,18 +15,17 @@ def main(config_file: str, it: dict):
     # if 'head_center' in it:
     #     return
 
-    if 'post' not in it:
+    saved = it['context']
+
+    if 'post' not in it['nii']:
         return
 
     import numpy as np
     roi_boxes = []
     for part in ('hip', 'femur'):
-        if part not in it['post']:
-            return
-
-        origin = np.array(it['post'][part]['roi']['origin'])
-        spacing = np.array(it['post'][part]['roi']['spacing'])
-        size = np.array(it['post'][part]['roi']['size'])
+        origin = np.array(it['roi'][part]['post']['origin'])
+        spacing = np.array(it['roi'][part]['post']['spacing'])
+        size = np.array(it['roi'][part]['post']['size'])
         roi_boxes.append([origin, origin + spacing * size])
 
     import itk
@@ -44,7 +43,7 @@ def main(config_file: str, it: dict):
     prl = it['prl']
     pid, rl = prl.split('_')
 
-    object_name = it['post']['nii']
+    object_name = it['nii']['post']
 
     with tempfile.TemporaryDirectory() as tdir:
         f = Path(tdir) / 'image.nii.gz'
@@ -116,8 +115,8 @@ def main(config_file: str, it: dict):
     roi_spacing = 0.2
     roi_size = np.ceil((np.ones(3) * view_size) / roi_spacing).astype(int)
 
-    cup_outer = int(it['cup_outer'])
-    head_outer = int(it['head_outer'])
+    cup_outer = int(saved['cup_outer'])
+    head_outer = int(saved['head_outer'])
 
     v_max = bone_mesh.vertices[np.argmax(bone_mesh.vertices[:, 2])]
     head_center = v_max.copy()
@@ -143,7 +142,7 @@ def main(config_file: str, it: dict):
 
     # 梯度步长
     for step, shell_only in ((5.0, False), (0.25, False), (0.25, False), (0.25, True), (0.25, True)):
-        liner_offset_test = float(it.get('liner_offset', 0))
+        liner_offset_test = float(saved.get('liner_offset', 0))
         occ_max = get_occupancy(head_center, cup_axis, liner_offset_test)
 
         better = True
@@ -258,20 +257,20 @@ def main(config_file: str, it: dict):
 
     Image.fromarray(np.vstack([np.hstack(stack[:3]), np.hstack(stack[3:])])).save(f)
 
-    it.update({
+    save = {**saved, **{
         'cup_center': cup_center.tolist(),
         'head_center': head_center.tolist(),
         'cup_axis': cup_axis.tolist(),
         'liner_offset_best': liner_offset_best,
         'liner_material': '陶瓷' if occ_max[2] > 0.5 else '聚乙烯',
         'occupancy': list(occ_max),
-    })
-    data = tomlkit.dumps(it).encode('utf-8')
+    }}
+    data = tomlkit.dumps(save).encode('utf-8')
     client.put_object('pair', '/'.join([pid, rl, 'context.toml']), BytesIO(data), len(data))
 
 
 def launch(cfg_path: str, max_workers: int):
-    client, pairs = client_pairs(cfg_path, 'context')
+    client, pairs = client_pairs(cfg_path, ['context'])
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(main, cfg_path, it): prl for prl, it in pairs.items()}
