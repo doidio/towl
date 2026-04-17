@@ -1,5 +1,6 @@
 # uv run streamlit run b2_align.py --server.port 8502 -- --config config.toml
 import argparse
+import copy
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -116,7 +117,7 @@ else:
     pid, rl = prl.split('_')
     metal_meshes, bone_meshes = st.session_state['roi']
 
-    saved = pairs[prl]['align']
+    saved = copy.deepcopy(pairs[prl]['align'])
 
     with st.expander(prl):
         st.code(tomlkit.dumps(pairs[prl]), 'toml')

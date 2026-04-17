@@ -1,5 +1,6 @@
 # uv run streamlit run b1_prepare_context.py --server.port 8501 -- --config config.toml
 import argparse
+import copy
 import tempfile
 from io import BytesIO
 from pathlib import Path
@@ -14,7 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 from minio import S3Error
 
 from b0_config import cache_client_pairs
-from b0_prothesis_load import FEMORAL, HEAD_OFFSET
+from b0_preload_prothesis import FEMORAL, HEAD_OFFSET
 from define import ct_seg_femur_right, ct_seg_femur_left, ct_seg_hip_right, ct_seg_hip_left
 from kernel import resample_cup_head, count_cup_head_3d
 
@@ -125,7 +126,7 @@ else:
     pid, rl = prl.split('_')
     image, volume, size, spacing, origin, image_bg, roi_boxes, bone_mesh = st.session_state['roi']
 
-    saved = pairs[prl]['context']
+    saved = copy.deepcopy(pairs[prl]['context'])
 
     with st.expander(prl):
         st.code(tomlkit.dumps(pairs[prl]), 'toml')

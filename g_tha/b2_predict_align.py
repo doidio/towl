@@ -286,7 +286,7 @@ def main(config_file: str, it: dict):
 
 
 def launch(cfg_path: str, max_workers: int):
-    client, pairs = client_pairs(cfg_path, ['context', 'align'])
+    client, pairs = client_pairs(cfg_path, ['align'])
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(main, cfg_path, it): prl for prl, it in pairs.items()}
