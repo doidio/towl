@@ -300,48 +300,123 @@ def resample_ab(
     image_b[i, j, k] = b
 
 
+@wp.func
+def bone_normalize(ct_value: float) -> float:
+    if 150.0 <= ct_value < 650.0:
+        value = -1.0 + (ct_value - 150.0) / 500.0 * 1.0
+    elif 650.0 <= ct_value < 1150.0:
+        value = 0.0 + (ct_value - 650.0) / 500.0 * 0.5
+    elif 1150.0 <= ct_value < 3150.0:
+        value = 0.5 + (ct_value - 1150.0) / 2000.0 * 0.5
+    else:
+        value = -1.0
+    return value
+
+
 @wp.kernel
 def resample_roi(
-        image_roi: wp.array3d(dtype=wp.vec3), origin_obb: wp.vec3, spacing_obb: wp.vec3, xform_roi: wp.transform,
-        volume_a: wp.uint64, origin_a: wp.vec3, spacing_a: wp.vec3, size_a: wp.vec3,
-        volume_b: wp.uint64, origin_b: wp.vec3, spacing_b: wp.vec3, size_b: wp.vec3,
-        xform_a: wp.transform, mesh: wp.uint64, sdf_t: wp.float32, max_dist: wp.float32,
+        roi_images: wp.array3d(dtype=wp.vec3), roi_origin: wp.vec3, roi_spacing: wp.vec3,
+        roi_hip_min: wp.vec3, roi_hip_max: wp.vec3, roi_fem_min: wp.vec3, roi_fem_max: wp.vec3,
+        xform_hip: wp.transform, xform_fem: wp.transform,
+        pre_volume: wp.uint64, pre_origin: wp.vec3, pre_spacing: wp.vec3,
+        post_volume: wp.uint64, post_origin: wp.vec3, post_spacing: wp.vec3,
+        hip_metal: wp.array3d(dtype=wp.float32), fem_metal: wp.array3d(dtype=wp.float32), ct_metal: wp.float32,
 ):
     i, j, k = wp.tid()
 
-    p = origin_obb + wp.cw_mul(spacing_obb, wp.vec3(wp.float32(i), wp.float32(j), wp.float32(k)))
+    pos = roi_origin + wp.cw_mul(roi_spacing, wp.vec3(wp.float32(i), wp.float32(j), wp.float32(k)))
+    uvw = wp.cw_div(pos - pre_origin, pre_spacing)
+    pix = wp.volume_sample_f(pre_volume, uvw, wp.Volume.LINEAR)
 
-    pa = wp.transform_point(xform_roi, p)
-    uvw_a = wp.cw_div(pa - origin_a, spacing_a)
-    a = wp.volume_sample_f(volume_a, uvw_a, wp.Volume.LINEAR)
+    hip_pos = wp.transform_point(xform_hip, pos)
+    hip_uvw = wp.cw_div(hip_pos - post_origin, post_spacing)
+    hip_pix = wp.volume_sample_f(post_volume, hip_uvw, wp.Volume.LINEAR)
 
-    inbox_a = (0 <= uvw_a[0] <= size_a[0] - 1.0 and
-               0 <= uvw_a[1] <= size_a[1] - 1.0 and
-               0 <= uvw_a[2] <= size_a[2] - 1.0)
+    fem_pos = wp.transform_point(xform_fem, pos)
+    fem_uvw = wp.cw_div(fem_pos - post_origin, post_spacing)
+    fem_pix = wp.volume_sample_f(post_volume, fem_uvw, wp.Volume.LINEAR)
 
-    pb = wp.transform_point(xform_a, pa)
-    uvw_b = wp.cw_div(pb - origin_b, spacing_b)
-    b = wp.volume_sample_f(volume_b, uvw_b, wp.Volume.LINEAR)
+    hip_in = (roi_hip_min[0] <= pos[0] <= roi_hip_max[0] and
+              roi_hip_min[1] <= pos[1] <= roi_hip_max[1] and
+              roi_hip_min[2] <= pos[2] <= roi_hip_max[2])
 
-    inbox_b = (0 <= uvw_b[0] <= size_b[0] - 1.0 and
-               0 <= uvw_b[1] <= size_b[1] - 1.0 and
-               0 <= uvw_b[2] <= size_b[2] - 1.0)
+    fem_in = (roi_fem_min[0] <= pos[0] <= roi_fem_max[0] and
+              roi_fem_min[1] <= pos[1] <= roi_fem_max[1] and
+              roi_fem_min[2] <= pos[2] <= roi_fem_max[2])
 
-    # 计算 SDF (Signed Distance Field)
-    sdf = float(-1.0)
+    value = wp.vec3(-1.0)
 
-    query = wp.mesh_query_point_sign_normal(mesh, pa, max_dist)
+    if hip_in or fem_in:
+        value[0] = bone_normalize(pix)
+
+    if hip_in:
+        value[1] = bone_normalize(hip_pix)
+        if hip_pix >= ct_metal:
+            hip_metal[i, j, k] = 1.0
+
+    if fem_in:
+        value[2] = bone_normalize(fem_pix)
+        if fem_pix >= ct_metal:
+            fem_metal[i, j, k] = 1.0
+
+    roi_images[i, j, k] = value
+
+
+@wp.kernel
+def resample_metal(
+        metal_image: wp.array3d(dtype=wp.vec3), roi_origin: wp.vec3, roi_spacing: wp.vec3,
+        hip_mesh: wp.uint64, fem_mesh: wp.uint64,
+        hip_cup_center: wp.vec3, fem_cup_center: wp.vec3, hip_cup_axis: wp.vec3, fem_cup_axis: wp.vec3,
+        hip_head_center: wp.vec3, fem_head_center: wp.vec3, cup_radius: wp.float32, head_radius: wp.float32,
+        sdf_t: wp.float32, max_dist: wp.float32, padding: wp.float32,
+):
+    i, j, k = wp.tid()
+
+    pos = roi_origin + wp.cw_mul(roi_spacing, wp.vec3(wp.float32(i), wp.float32(j), wp.float32(k)))
+
+    # 规范化轴向
+    axis = wp.normalize(hip_cup_axis)
+
+    # 分界平面：以 axis 为法向，距离股骨侧球心 + 1/2 球半径处
+    plane_side = wp.dot(pos - fem_head_center, axis) - 0.5 * head_radius
+
+    # 1. 髋臼侧假体组件 (半球体)
+    to_p_cup = pos - hip_cup_center
+    dist_cup = wp.length(to_p_cup)
+    sdf_cup = wp.min(cup_radius - dist_cup, -wp.dot(to_p_cup, axis)) / sdf_t
+    
+    # 隔断逻辑：髋臼杯仅保留在髋臼侧
+    if plane_side > 0.0:
+        sdf_cup = -1.0
+
+    # 2. 股骨侧假体组件 (原始 Mesh)
+    query = wp.mesh_query_point_sign_normal(fem_mesh, pos, max_dist)
     if query.result:
-        closest = wp.mesh_eval_position(mesh, query.face, query.u, query.v)
-        # query.sign 外正内负，CT内正外负，所以取反
-        dist = -query.sign * wp.length(pa - closest)
-        sdf = wp.clamp(dist / sdf_t, -1.0, 1.0)
-
-    if inbox_a and inbox_b:
-        image_roi[i, j, k] = wp.vec3(wp.float32(a), wp.float32(b), wp.float32(sdf))
+        closest = wp.mesh_eval_position(fem_mesh, query.face, query.u, query.v)
+        sdf_stem = (-query.sign * wp.length(pos - closest) - padding) / sdf_t
     else:
-        ab = wp.min(wp.float32(a), wp.float32(b))
-        image_roi[i, j, k] = wp.vec3(ab, ab, wp.float32(sdf))
+        sdf_stem = -1.0
+
+    # 隔断逻辑：股骨柄仅保留在股骨侧
+    if plane_side <= 0.0:
+        sdf_stem = -1.0
+
+    # 3. 球头 (球体) - 两侧均计算以体现配准错位
+    sdf_hip_head = (head_radius - wp.length(pos - hip_head_center)) / sdf_t
+    sdf_fem_head = (head_radius - wp.length(pos - fem_head_center)) / sdf_t
+
+    # 4. 布尔并：球头放在最后
+    hip_final = wp.clamp(wp.max(sdf_cup, sdf_hip_head), -1.0, 1.0)
+    fem_final = wp.clamp(wp.max(sdf_stem, sdf_fem_head), -1.0, 1.0)
+
+    # 5. Channel 2: 零等值面二值化效果 (体现重叠与差异)
+    merge = -1.0
+    if hip_final > 0.0 and fem_final > 0.0:
+        merge = 1.0
+    elif hip_final > 0.0 or fem_final > 0.0:
+        merge = 0.0
+
+    metal_image[i, j, k] = wp.vec3(hip_final, fem_final, merge)
 
 
 @wp.kernel
@@ -406,7 +481,7 @@ def resample_cup_head(
 
 @wp.kernel
 def count_cup_head_3d(
-        volume: wp.uint64, origin: wp.vec3, spacing: wp.vec3, ct_metal: float,
+        volume: wp.uint64, origin: wp.vec3, spacing: wp.vec3, ct_highlight: float,
         roi_origin: wp.vec3, roi_spacing: wp.float32,
         cup_center: wp.vec3, cup_axis: wp.vec3, head_center: wp.vec3, head_radius: wp.float32, cup_radius: wp.float32,
         counts: wp.array1d(dtype=wp.int32), shell_only: bool,
@@ -445,26 +520,25 @@ def count_cup_head_3d(
         in_head = dot_head <= 0.5 * head_radius and (head_r <= head_radius)
         out_head = dot_head <= 0.5 * head_radius and (head_radius < head_r <= head_radius + th)
 
-
     if in_head:
         wp.atomic_add(counts, 0, 1)
-        if ct_metal < grey:
+        if ct_highlight < grey:
             wp.atomic_add(counts, 1, 1)
     elif out_head:
         wp.atomic_add(counts, 2, 1)
-        if ct_metal < grey:
+        if ct_highlight < grey:
             wp.atomic_add(counts, 3, 1)
     elif in_cup:
         wp.atomic_add(counts, 4, 1)
-        if ct_metal < grey:
+        if ct_highlight < grey:
             wp.atomic_add(counts, 5, 1)
     elif out_cup:
         wp.atomic_add(counts, 6, 1)
-        if ct_metal < grey:
+        if ct_highlight < grey:
             wp.atomic_add(counts, 7, 1)
     elif in_liner:
         wp.atomic_add(counts, 8, 1)
-        if ct_metal < grey:
+        if ct_highlight < grey:
             wp.atomic_add(counts, 9, 1)
 
 

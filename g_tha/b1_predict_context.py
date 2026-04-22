@@ -9,6 +9,7 @@ import tomlkit
 from tqdm import tqdm
 
 from b0_config import client_pairs
+from define import ct_metal
 
 
 def main(config_file: str, it: dict):
@@ -71,9 +72,11 @@ def main(config_file: str, it: dict):
         _ = max(_.split(), key=lambda _: _.area)
         bone_mesh = _
 
-    ct_highlight = 2000.0
+    # 适当降低阈值以兼顾球头内芯暗影
+    ct_highlight = ct_metal - 500.0
 
-    def get_occupancy(hc, ca, lo):
+    def get_occupancy(hc, ca, lo, co=None):
+        if co is None: co = cup_outer
         cc = hc - lo * ca
         o = cc - 0.5 * roi_size * roi_spacing
 
@@ -81,7 +84,7 @@ def main(config_file: str, it: dict):
         wp.launch(count_cup_head_3d, tuple(roi_size.tolist()), [
             volume.id, wp.vec3(origin), wp.vec3(spacing), ct_highlight,
             wp.vec3(o), roi_spacing,
-            wp.vec3(cc), wp.vec3(ca), wp.vec3(hc), head_outer / 2.0, cup_outer / 2.0,
+            wp.vec3(cc), wp.vec3(ca), wp.vec3(hc), head_outer / 2.0, co / 2.0,
             counts, shell_only,
         ])
 
@@ -140,21 +143,25 @@ def main(config_file: str, it: dict):
     z = np.sin(theta) * radius
     sphere_directions = np.column_stack((x, y, z)).tolist()
 
+    liner_offset_best = float(saved.get('liner_offset', 0))
+
     # 梯度步长
     for step, shell_only in ((5.0, False), (0.25, False), (0.25, False), (0.25, True), (0.25, True)):
-        liner_offset_test = float(saved.get('liner_offset', 0))
-        occ_max = get_occupancy(head_center, cup_axis, liner_offset_test)
+        liner_offset_best = float(saved.get('liner_offset', 0)) if step > 0.25 else liner_offset_best
+
+        occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
 
         better = True
-        while better:  # 位置
+        while better:  # 位置和内衬偏心联合优化
             better = False
 
+            # 1. 试探位置
             for offset in sphere_directions + [-1 * cup_axis, cup_axis]:
                 offset = np.array(offset, float)
                 offset /= np.linalg.norm(offset)
                 head_center_test = head_center + offset * step
 
-                occ = get_occupancy(head_center_test, cup_axis, liner_offset_test)
+                occ = get_occupancy(head_center_test, cup_axis, liner_offset_best)
 
                 if occ_max[0] * 0.8 + occ_max[1] * 0.2 < occ[0] * 0.8 + occ[1] * 0.2:
                     occ_max = occ
@@ -162,10 +169,25 @@ def main(config_file: str, it: dict):
                     better = True
                     break
 
+            # 2. 试探内衬偏心 (仅在精修阶段)
+            if step <= 0.25:
+                for _ in range(0, int(6.0 // 0.25) + 1):
+                    lo_test = _ * 0.25
+                    if lo_test == liner_offset_best:
+                        continue
+                    occ = get_occupancy(head_center, cup_axis, lo_test, cup_outer)
+
+                    if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
+                        occ_max = occ
+                        liner_offset_best = lo_test
+                        better = True
+                        break
+
         better = True
         while better:  # 朝向
             better = False
 
+            # 3. 试探朝向
             for axis in [
                 [-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1],
             ]:
@@ -177,7 +199,7 @@ def main(config_file: str, it: dict):
                 v = v * np.cos(theta) + np.cross(k, v) * np.sin(theta) + k * np.dot(k, v) * (1 - np.cos(theta))
                 v /= np.linalg.norm(v)
 
-                occ = get_occupancy(head_center, v, liner_offset_test)
+                occ = get_occupancy(head_center, v, liner_offset_best)
 
                 if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
                     occ_max = occ
@@ -185,20 +207,34 @@ def main(config_file: str, it: dict):
                     better = True
                     break
 
-        liner_offset_best = 0.0
-        occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
+    # 联合优化 cup_outer 和 liner_offset
+    best_outer = cup_outer
+    best_lo = liner_offset_best
+    best_occ = occ_max
+
+    for test_outer in (cup_outer, cup_outer + 2):
+        # 针对当前测试尺寸寻找最佳 liner_offset
+        lo_best = 0.0
+        max_o = get_occupancy(head_center, cup_axis, lo_best, test_outer)
 
         for _ in range(1, int(6.0 // 0.25) + 1):
-            liner_offset_test = _ * 0.25
+            lo_test = _ * 0.25
+            occ = get_occupancy(head_center, cup_axis, lo_test, test_outer)
 
-            occ = get_occupancy(head_center, cup_axis, liner_offset_test)
+            if max_o[0] * 0.2 + max_o[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
+                max_o = occ
+                lo_best = lo_test
 
-            if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
-                occ_max = occ
-                liner_offset_best = liner_offset_test
+        if best_occ[0] * 0.2 + best_occ[1] * 0.8 < max_o[0] * 0.2 + max_o[1] * 0.8:
+            best_occ = max_o
+            best_outer = test_outer
+            best_lo = lo_best
+
+    cup_outer_best = best_outer
+    liner_offset_best = best_lo
 
     shell_only = False
-    occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
+    occ_max = get_occupancy(head_center, cup_axis, liner_offset_best, cup_outer_best)
     cup_center = head_center - liner_offset_best * cup_axis
 
     ort = [
@@ -223,7 +259,7 @@ def main(config_file: str, it: dict):
             wp.launch(resample_cup_head, roi_slice.shape, [
                 volume.id, wp.vec3(origin), wp.vec3(spacing), m, w,
                 roi_slice, wp.vec3(roi_origin), roi_spacing, wp.vec3(axes[0]), wp.vec3(axes[1]),
-                wp.vec3(cup_center), wp.vec3(cup_axis), wp.vec3(head_center), head_outer / 2.0, cup_outer / 2.0,
+                wp.vec3(cup_center), wp.vec3(cup_axis), wp.vec3(head_center), head_outer / 2.0, cup_outer_best / 2.0,
             ])
 
             roi_slice: np.ndarray = roi_slice.numpy().transpose(1, 0, 2)
@@ -252,7 +288,7 @@ def main(config_file: str, it: dict):
             stack.append(np.array(img))
 
     root = cfg['dataset']['root']
-    f = Path(root) / 'prothesis_pred' / f'{prl}.png'
+    f = Path(root) / 'predict_context' / f'{prl}.png'
     f.parent.mkdir(parents=True, exist_ok=True)
 
     Image.fromarray(np.vstack([np.hstack(stack[:3]), np.hstack(stack[3:])])).save(f)
@@ -262,16 +298,17 @@ def main(config_file: str, it: dict):
         'head_center': head_center.tolist(),
         'cup_axis': cup_axis.tolist(),
         'liner_offset_best': liner_offset_best,
+        'cup_outer_best': cup_outer_best,
         'liner_material': '陶瓷' if occ_max[2] > 0.5 else '聚乙烯',
         'occupancy': list(occ_max),
     }
-    
+
     for k, v in save.items():
         if isinstance(v, dict) and k in saved and isinstance(saved[k], dict):
             saved[k].update(v)
         else:
             saved[k] = v
-            
+
     data = tomlkit.dumps(saved).encode('utf-8')
     client.put_object('pair', '/'.join([pid, rl, 'context.toml']), BytesIO(data), len(data))
 

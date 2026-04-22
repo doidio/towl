@@ -16,7 +16,7 @@ from minio import S3Error
 
 from b0_config import cache_client_pairs
 from b0_preload_prothesis import FEMORAL, HEAD_OFFSET
-from define import ct_seg_femur_right, ct_seg_femur_left, ct_seg_hip_right, ct_seg_hip_left
+from define import ct_seg_femur_right, ct_seg_femur_left, ct_seg_hip_right, ct_seg_hip_left, ct_metal
 from kernel import resample_cup_head, count_cup_head_3d
 
 save_key = 'head_center'
@@ -165,10 +165,10 @@ else:
     view_size = cols[0].radio('视野范围 (mm)', [100, 200, 300], horizontal=True)
     view_window = cols[0].radio('窗', ['高亮', '假体', '骨骼'], horizontal=True)
 
-    ct_highlight = 2000.0  # 适当降低阈值以兼容较大球头内部存在的较暗伪影
-    window = {'高亮': [2000.0, 0.0], '假体': [2000.0, 1000.0], '骨骼': [-100.0, 1000.0]}[view_window]
+    ct_highlight = ct_metal - 500.0  # 适当降低阈值以兼容较大球头内部存在的较暗伪影
+    window = {'高亮': [ct_highlight, 0.0], '假体': [ct_highlight, 1000.0], '骨骼': [-100.0, 1000.0]}[view_window]
 
-    cup_outer = int(saved.get('cup_outer', 90))
+    cup_outer = int(saved.get('cup_outer_best', saved.get('cup_outer', 90)))
     cup_outer = cols[0].number_input('髋臼杯外径', 10, 90, cup_outer, 2, key='cup_outer')
 
     head_outer = int(saved.get('head_outer', 10))
@@ -176,7 +176,7 @@ else:
 
     liner_slot = cols[0].empty()
 
-    step = cols[0].radio('调节 (mm/deg)', _ := ['5', '0.5', '0.25', '0.25 + 边缘精修'], horizontal=True)
+    step = cols[0].radio('调节 (mm/deg)', _ := ['5', '25', '50', '0.5', '0.25', '0.25 + 边缘精修'], horizontal=True)
 
     if step in _[:-1]:
         step = float(step)
@@ -306,19 +306,23 @@ else:
         z = np.sin(theta) * radius
         sphere_directions = np.column_stack((x, y, z)).tolist()
 
-        liner_offset_test: float = saved.get('liner_offset', 0.0)
-        occ_max = get_occupancy(head_center, cup_axis, liner_offset_test)
+        liner_offset_best: float = (
+            st.session_state.get('liner_offset_best', saved.get('liner_offset', 0.0))
+            if step > 0.25 else saved.get('liner_offset', 0.0)
+        )
+        occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
 
         better = True
-        while better:  # 位置
+        while better:  # 位置和内衬偏心联合优化
             better = False
 
+            # 1. 试探位置
             for offset in sphere_directions + [-cup_axis, cup_axis]:
                 offset = np.array(offset, float)
                 offset /= np.linalg.norm(offset)
                 head_center_test = head_center + offset * step
 
-                occ = get_occupancy(head_center_test, cup_axis, liner_offset_test)
+                occ = get_occupancy(head_center_test, cup_axis, liner_offset_best)
 
                 if occ_max[0] * 0.8 + occ_max[1] * 0.2 < occ[0] * 0.8 + occ[1] * 0.2:
                     occ_max = occ
@@ -327,6 +331,22 @@ else:
                     empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
                     better = True
                     break
+
+            # 2. 试探内衬偏心 (仅在精修阶段)
+            if step <= 0.25:
+                for _ in range(0, int(6.0 // 0.25) + 1):
+                    lo_test = _ * 0.25
+                    if lo_test == liner_offset_best:
+                        continue
+                    occ = get_occupancy(head_center, cup_axis, lo_test)
+
+                    if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
+                        occ_max = occ
+                        liner_offset_best = lo_test
+
+                        empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
+                        better = True
+                        break
 
         better = True
         while better:  # 朝向
@@ -342,7 +362,7 @@ else:
                 v = v * np.cos(theta) + np.cross(k, v) * np.sin(theta) + k * np.dot(k, v) * (1 - np.cos(theta))
                 v /= np.linalg.norm(v)
 
-                occ = get_occupancy(head_center, v, liner_offset_test)
+                occ = get_occupancy(head_center, v, liner_offset_best)
 
                 if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
                     occ_max = occ
@@ -354,18 +374,6 @@ else:
 
         empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
 
-        liner_offset_best = 0.0
-        occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
-
-        for _ in range(1, int(6.0 // 0.25) + 1):
-            liner_offset_test = _ * 0.25
-
-            occ = get_occupancy(head_center, cup_axis, liner_offset_test)
-
-            if occ_max[0] * 0.2 + occ_max[1] * 0.8 < occ[0] * 0.2 + occ[1] * 0.8:
-                occ_max = occ
-                liner_offset_best = liner_offset_test
-
         st.session_state['head_center'] = head_center.tolist()
         st.session_state['cup_axis'] = cup_axis.tolist()
         st.session_state['liner_offset_best'] = liner_offset_best
@@ -373,13 +381,13 @@ else:
     _ = 'liner_offset_best'
     st.session_state[_] = st.session_state.get(_, saved.get(_, saved.get('liner_offset', 0.0)))
 
-    liner_offset_best: float = liner_slot.number_input('内衬偏心距', 0.0, 6.0, step=0.25, format='%.2f',
-                                                       key='liner_offset_best')
+    liner_offset: float = liner_slot.number_input('内衬偏心距', 0.0, 6.0, step=0.25, format='%.2f',
+                                                  key='liner_offset_best')
 
-    cup_center = head_center - liner_offset_best * cup_axis
+    cup_center = head_center - liner_offset * cup_axis
 
     shell_only = False
-    occ_max = get_occupancy(head_center, cup_axis, liner_offset_best)
+    occ_max = get_occupancy(head_center, cup_axis, liner_offset)
     empty.info(f'头 {occ_max[0] * 1e2:.3f}% 杯 {occ_max[1] * 1e2:.3f}% 衬 {occ_max[2] * 1e2:.3f}%')
 
     ort = [
@@ -398,7 +406,7 @@ else:
         del shape[i]
 
         roi_slice: wp.array = wp.zeros(shape, dtype=wp.vec3ub)  # noqa
-        roi_origin = cup_center - 0.5 * roi_size * roi_spacing * axes[0] - 0.5 * roi_size * roi_spacing * axes[1]
+        roi_origin = head_center - 0.5 * roi_size * roi_spacing * axes[0] - 0.5 * roi_size * roi_spacing * axes[1]
 
         wp.launch(resample_cup_head, roi_slice.shape, [
             volume.id, wp.vec3(origin), wp.vec3(spacing), *window,
@@ -444,14 +452,14 @@ else:
     save = {
         'femoral_spec': [spec_0, spec_1],
         'head_offset': head_offset,
-        'cup_outer': cup_outer,
+        'cup_outer_best': cup_outer,
         'head_outer': head_outer,
         'head_center': head_center.tolist(),
         'cup_center': cup_center.tolist(),
         'cup_axis': cup_axis.tolist(),
         'occupancy': list(occ_max),
         'liner_material': '陶瓷' if occ_max[2] > 0.5 else '聚乙烯',
-        'liner_offset_best': liner_offset_best,
+        'liner_offset_best': liner_offset,
     }
     if 'liner_offset' in saved:
         save['liner_offset'] = saved['liner_offset']

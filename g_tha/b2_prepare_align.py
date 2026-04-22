@@ -1,4 +1,4 @@
-# uv run streamlit run b2_align.py --server.port 8502 -- --config config.toml
+# uv run streamlit run b2_prepare_align.py --server.port 8502 -- --config config.toml
 import argparse
 import copy
 import tempfile
