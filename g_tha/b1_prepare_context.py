@@ -49,7 +49,7 @@ elif (it := st.session_state.get('prl')) is None:
     # 自动跳转到下一个待配准的病例
     if st.button('下一个'):
         for prl in pairs:
-            if save_key not in pairs[prl]['context']:
+            if save_key not in pairs[prl]['context'] and not pairs[prl].get('excluded', False):
                 st.session_state['prl_input'] = prl
                 break
 
